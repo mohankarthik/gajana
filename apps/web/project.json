@@ -50,7 +50,8 @@
       "options": {
         "buildTarget": "web:build",
         "hmr": true,
-        "proxyConfig": "apps/web/proxy.conf.json"
+        "proxyConfig": "apps/web/proxy.conf.json",
+        "inspect": true
       },
       "configurations": {
         "development": {
