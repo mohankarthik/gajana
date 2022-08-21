@@ -19,11 +19,13 @@
   "dependencies": {
     "@nestjs/common": "9.0.0",
     "@nestjs/core": "9.0.0",
+    "@nestjs/mongoose": "^9.2.0",
     "@nestjs/platform-express": "9.0.0",
     "@nestjs/schedule": "^2.1.0",
     "@nestjs/serve-static": "3.0.0",
     "core-js": "3.6.5",
     "googleapis": "^107.0.0",
+    "mongoose": "^6.5.2",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-router-dom": "6.3.0",

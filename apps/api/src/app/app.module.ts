@@ -6,7 +6,7 @@ import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 import { ScheduleModule } from '@nestjs/schedule';
 import { DataAcquisitionModule } from './data-acquisition/data-acquisition.module';
-import { DataAcquisitionGmailService } from './data-acquisition/data-acquisition-gmail.service';
+import { MongooseModule } from '@nestjs/mongoose';
 
 @Module({
   imports: [
@@ -14,10 +14,13 @@ import { DataAcquisitionGmailService } from './data-acquisition/data-acquisition
       rootPath: join(__dirname, '..', 'web'),
       exclude: ['/api*'],
     }),
+    MongooseModule.forRoot(
+      `mongodb+srv://${process.env.MONGO_USER_NAME}:${process.env.MONGO_PASSWORD}@${process.env.MONGO_HOST}/?retryWrites=true&w=majority`
+    ),
     ScheduleModule.forRoot(),
     DataAcquisitionModule,
   ],
   controllers: [AppController],
-  providers: [AppService, DataAcquisitionGmailService],
+  providers: [AppService],
 })
 export class AppModule {}

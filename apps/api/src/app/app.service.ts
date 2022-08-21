@@ -1,8 +1,11 @@
 import { Injectable } from '@nestjs/common';
-
+import { DataAcquisitionGmailService } from './data-acquisition/data-acquisition-gmail.service';
 @Injectable()
 export class AppService {
-  getData(): { message: string } {
-    return { message: 'Welcome to api!' };
+  constructor(
+    private readonly dataAcquisitionGmailSerivce: DataAcquisitionGmailService
+  ) {}
+  async getData(): Promise<string[]> {
+    return this.dataAcquisitionGmailSerivce.getLabels();
   }
 }
