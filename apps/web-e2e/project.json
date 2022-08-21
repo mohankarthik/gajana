@@ -22,6 +22,14 @@
       "options": {
         "lintFilePatterns": ["apps/web-e2e/**/*.{js,ts}"]
       }
+    },
+    "lint:check": {
+      "executor": "@nrwl/linter:eslint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": ["apps/web-e2e/**/*.{js,ts}"],
+        "fix": false
+      }
     }
   },
   "tags": [],

@@ -10,6 +10,7 @@
     "start": "node dist/apps/api/main",
     "build": "nx run-many --parallel --target=build --all",
     "lint": "nx run-many --parallel --target=lint --all",
+    "lint:check": "nx run-many --parallel --target=lint:check --all",
     "format": "nx format:write",
     "format:check": "nx format:check",
     "test": "nx run-many --parallel --target=test --all"

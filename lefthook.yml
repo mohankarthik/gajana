@@ -20,7 +20,10 @@ pre-commit:
       run: yarn format:check {staged_files}
     eslint:
       glob: '*.{js,ts,jsx,tsx}'
-      run: yarn lint {staged_files}
+      run: yarn lint:check {staged_files}
+    build:
+      glob: '*.{js,ts,jsx,tsx}'
+      run: yarn build
 #     rubocop:
 #       tags: backend style
 #       glob: "*.rb"

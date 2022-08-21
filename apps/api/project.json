@@ -44,6 +44,14 @@
         "lintFilePatterns": ["apps/api/**/*.ts"]
       }
     },
+    "lint:check": {
+      "executor": "@nrwl/linter:eslint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": ["apps/api/**/*.ts"],
+        "fix": false
+      }
+    },
     "test": {
       "executor": "@nrwl/jest:jest",
       "outputs": ["coverage/apps/api"],
