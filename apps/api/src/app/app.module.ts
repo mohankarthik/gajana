@@ -14,7 +14,7 @@ import { DataAcquisitionModule } from './data-acquisition/data-acquisition.modul
       exclude: ['/api*'],
     }),
     ScheduleModule.forRoot(),
-    DataAcquisitionModule
+    DataAcquisitionModule,
   ],
   controllers: [AppController],
   providers: [AppService],
