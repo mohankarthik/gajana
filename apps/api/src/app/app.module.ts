@@ -6,6 +6,7 @@ import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 import { ScheduleModule } from '@nestjs/schedule';
 import { DataAcquisitionModule } from './data-acquisition/data-acquisition.module';
+import { DataAcquisitionGmailService } from './data-acquisition/data-acquisition-gmail.service';
 
 @Module({
   imports: [
@@ -17,6 +18,6 @@ import { DataAcquisitionModule } from './data-acquisition/data-acquisition.modul
     DataAcquisitionModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, DataAcquisitionGmailService],
 })
 export class AppModule {}
