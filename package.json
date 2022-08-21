@@ -3,9 +3,12 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "start": "nx serve",
-    "build": "nx build",
-    "test": "nx test"
+    "start": "nx run-many --parallel --target=serve --projects=web,api",
+    "build": "nx run-many --parallel --target=build --projects=web,api",
+    "lint": "nx run-many --parallel --target=lint --projects=web,api",
+    "format": "nx format:write",
+    "format:check": "nx format:check",
+    "test": "nx run-many --parallel --target=test --projects=web,api"
   },
   "private": true,
   "dependencies": {
