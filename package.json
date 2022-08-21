@@ -2,8 +2,8 @@
   "name": "gajana",
   "version": "0.0.0",
   "license": "MIT",
-  "engines" : {
-    "node" : "16.x"
+  "engines": {
+    "node": "16.x"
   },
   "scripts": {
     "local": "nx run-many --parallel --target=serve --all",
