@@ -11,7 +11,7 @@
   "dependencies": {},
   "devDependencies": {
     "@nrwl/cli": "14.5.8",
-    "@nrwl/next": "^14.5.8",
+    "@nrwl/nest": "^14.5.8",
     "@nrwl/nx-cloud": "latest",
     "@nrwl/react": "^14.5.8",
     "@nrwl/workspace": "14.5.8",
