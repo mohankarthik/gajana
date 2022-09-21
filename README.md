@@ -25,12 +25,29 @@ An automated personal finance tracker that fetches transactions from multiple so
   - `yarn install`
 - Githooks
   - `lefthook install`
+- Environment configuration
+  - Copy `apps/api/.env.local.example` and rename to `apps/api/.env.local`
+  - Fill in the values from your Mongo repository and your Google credentials. See steps below
+
+#### Mongo
+
+- Create a new mongo DB (either using the [free MongoDb Atlas cluster](https://www.mongodb.com/pricing) or a self hosted version
+- Ensure that your local IP address has access to the DB. If using Atlas, either whitelist your IP, or enable all IP `0.0.0.0/0`
+- Copy the username, password and hostname and enter them in the `apps/api/.env.local` file
+
+#### Google
+
+- Follow the steps [here](https://developers.google.com/workspace/guides/create-credentials) to setup a Google credentials
+- Copy the `client_id` and `client_secret` and enter them in `apps/api/.env.local` file
+- Run `node ./scripts/generate-google-tokens.js` and follow the steps on the console to oauth your gmail account and generate a `token` file saved at `./scripts/token.json`
+- Go to Mongo, and under the `googletokens` collection, add the contents of the token file so it can be used.
 
 ### Run local
 
 `yarn local`
 The server should be running at `http://localhost:3333` and the API server at `http://localhost:3333/api`
 
-### Build
+### Build and run
 
 `yarn build`
+`yarn start`
