@@ -4,9 +4,17 @@ from sheets import Sheets
 from dotenv import load_dotenv
 import os
 import logging
+import argparse
+
+def parse_arguments():
+  parser = argparse.ArgumentParser(description='Fetch latest transactions and update database')
+  parser.add_argument('--dry_run', action="store_true", help='skips actually getting data or updating data')
+
+  args = parser.parse_args()
+  return args
 
 
-def update_mf(sheet_stub: Sheets) -> None:
+def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
     # Get existing transactions
     existing_mf_transactions = sheet_stub.get_mf_transactions()
     logging.info(
@@ -29,7 +37,8 @@ def update_mf(sheet_stub: Sheets) -> None:
         ],
     )
     logging.info("Starting web session to fetch latest MF transactions and holding")
-    mf_stub.update()
+    if not dry_run:
+      mf_stub.update()
     logging.info("Got a total of {} MF transactions".format(len(mf_stub._orders)))
 
     # Get new MF transactions and push it to sheets
@@ -38,11 +47,14 @@ def update_mf(sheet_stub: Sheets) -> None:
     ]
     logging.info("Only {} MF transactions are new".format(len(new_mf_txns)))
 
-    sheet_stub.update_mf_transactions(new_mf_txns)
+    if not dry_run:
+      sheet_stub.update_mf_transactions(new_mf_txns)
     logging.info("Updated Sheet with latest transactions")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    args = parse_arguments()
     load_dotenv()
 
     # Instantiate link to sheets
@@ -51,4 +63,4 @@ if __name__ == "__main__":
         os.getenv("SHEETS_BANK_ID"),
     )
 
-    update_mf(sheet_stub)
+    update_mf(sheet_stub, args.dry_run)
