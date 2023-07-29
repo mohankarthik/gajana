@@ -150,7 +150,7 @@ class MutualFundTransaction:
       self.fund_house = fund_house
 
     self.folio = folio
-    self.type = type
+    self.type = type.replace("-", " ")
     self.units = units
     self.nav = nav
     self.value = value

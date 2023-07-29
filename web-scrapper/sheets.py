@@ -1,4 +1,3 @@
-import httplib2
 import os
 
 from apiclient import discovery
@@ -49,7 +48,7 @@ class Sheets:
       range="MF Transactions!B2:M",
       body={
         "values": [[
-            "",
+            txn.fund_house,
             txn.scheme,
             txn.date.strftime("%Y-%m-%d"),
             txn.units,
@@ -59,8 +58,8 @@ class Sheets:
             txn.type,
             txn.folio,
             txn.account,
-            txn.units if txn.type == "Purchase" or txn.type == "Switch In" else -txn.units,
-            txn.value if txn.type == "Purchase" or txn.type == "Switch In" else -txn.value,
+            txn.units if (txn.type == "Purchase" or txn.type == "Switch In") else -txn.units,
+            -txn.value if (txn.type == "Purchase" or txn.type == "Switch In") else txn.value,
           ] for txn in new_txns]
       },
       valueInputOption='USER_ENTERED'
