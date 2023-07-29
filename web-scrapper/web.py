@@ -10,30 +10,38 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 import time
 
+
 class Web:
-  def __init__(self) -> None:
-    service=ChromeService(ChromeDriverManager().install())
-    options = ChromeOptions()
-    options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    self._driver = webdriver.Chrome(service=service, options=options)
-    # self._driver.maximize_window()
-    time.sleep(1)
+    def __init__(self) -> None:
+        service = ChromeService(ChromeDriverManager().install())
+        options = ChromeOptions()
+        options.binary_location = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
+        self._driver = webdriver.Chrome(service=service, options=options)
+        # self._driver.maximize_window()
+        time.sleep(1)
 
-  def __del__(self) -> None:
-    self._driver.close()
-    self._driver.quit()
+    def __del__(self) -> None:
+        self._driver.close()
+        self._driver.quit()
 
-  def navigate(self, url: str) -> None:
-    self._driver.get(url)
+    def navigate(self, url: str) -> None:
+        self._driver.get(url)
 
-  def get_element(self, by: By, value: str) -> WebElement:
-    return WebDriverWait(self._driver, timeout=3).until(lambda d: d.find_element(by, value))
+    def get_element(self, by: By, value: str) -> WebElement:
+        return WebDriverWait(self._driver, timeout=3).until(
+            lambda d: d.find_element(by, value)
+        )
 
-  def click_element(self, by: By, value: str) -> None:
-    WebDriverWait(self._driver, timeout=3).until(EC.element_to_be_clickable((by, value))).click()
+    def click_element(self, by: By, value: str) -> None:
+        WebDriverWait(self._driver, timeout=3).until(
+            EC.element_to_be_clickable((by, value))
+        ).click()
+
 
 if __name__ == "__main__":
-  web = Web()
-  web.navigate("https://google.com/")
-  time.sleep(2)
-  del web
+    web = Web()
+    web.navigate("https://google.com/")
+    time.sleep(2)
+    del web
