@@ -13,6 +13,8 @@ def parse_arguments():
   args = parser.parse_args()
   return args
 
+def update_bank_and_cc():
+  pass
 
 def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
     # Get existing transactions
@@ -37,8 +39,7 @@ def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
         ],
     )
     logging.info("Starting web session to fetch latest MF transactions and holding")
-    if not dry_run:
-      mf_stub.update()
+    mf_stub.update()
     logging.info("Got a total of {} MF transactions".format(len(mf_stub._orders)))
 
     # Get new MF transactions and push it to sheets

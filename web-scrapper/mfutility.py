@@ -10,6 +10,7 @@ import xlrd
 from mf_holding import MutualFundHolding
 from mf_transaction import MutualFundTransaction
 from typing import Any
+import logging
 
 MFUTILITY_URL = "https://www.mfuonline.com/"
 MFUTILITY_HOLDING = DOWNLOAD_DIR + "CANHoldingReport.xls"
@@ -20,6 +21,7 @@ class MFUtility:
     def __init__(
         self, username: str, password: str, txn_password: str, config: dict[str, Any]
     ) -> None:
+        self._logger = logging.getLogger('MFUtility')
         self._username = username
         self._password = password
         self._txn_password = txn_password
@@ -32,9 +34,11 @@ class MFUtility:
         web.navigate(MFUTILITY_URL)
 
         if os.path.exists(MFUTILITY_HOLDING):
-            os.remove(MFUTILITY_HOLDING)
+          self._logger.info("{} already exists, cleaning it up".format(MFUTILITY_HOLDING))
+          os.remove(MFUTILITY_HOLDING)
         if os.path.exists(MFUTILITY_NORMAL_ORDER):
-            os.remove(MFUTILITY_NORMAL_ORDER)
+          self._logger.info("{} already exists, cleaning it up".format(MFUTILITY_NORMAL_ORDER))
+          os.remove(MFUTILITY_NORMAL_ORDER)
 
         web.get_element(By.ID, "loginid").send_keys(self._username)
         web.get_element(By.ID, "password").send_keys(self._password)
@@ -42,6 +46,7 @@ class MFUtility:
 
         web.get_element(By.ID, "txnPassword").send_keys(self._txn_password)
         web.click_element(By.ID, "cnfrmBtn")
+        self._logger.info("Logged in succesfully")
 
         # Export holding
         web.click_element(
@@ -49,6 +54,7 @@ class MFUtility:
         )
         web.click_element(By.ID, "exportSection")
         time.sleep(2)
+        self._logger.info("Exported holdings")
 
         # Navigate to Normal Order Book
         web.click_element(By.XPATH, "/html/body/div[1]/div[6]/nav/div/ul/li[4]")
@@ -68,13 +74,16 @@ class MFUtility:
         time.sleep(2)
         web.click_element(By.ID, "exportSection")
         time.sleep(2)
+        self._logger.info("Exported orders")
 
         # clean up
         del web
 
         # Parse the downloaded data
         self._parse_holding()
+        self._logger.info("Got a total of {} holdings".format(len(self._holding)))
         self._parse_orders()
+        self._logger.info("Got a total of {} orders".format(len(self._orders)))
 
     def _parse_holding(self):
         if os.path.exists(MFUTILITY_HOLDING):
@@ -106,6 +115,8 @@ class MFUtility:
                         value=sheet.cell_value(rowx=index, colx=11),
                     )
                 )
+        else:
+          self._logger.warning("Cannot find {}".format(MFUTILITY_HOLDING))
 
     def _parse_orders(self):
         if os.path.exists(MFUTILITY_NORMAL_ORDER):
@@ -146,6 +157,8 @@ class MFUtility:
                         sanitize_name=True,
                     )
                 )
+        else:
+          self._logger.warning("Cannot find {}".format(MFUTILITY_NORMAL_ORDER))
 
 
 if __name__ == "__main__":
