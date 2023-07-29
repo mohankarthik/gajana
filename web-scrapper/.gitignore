@@ -1,4 +1,7 @@
+# Python
 __pycache__/
 venv/
+
+# Credentials and env setup
 .env
 google_secret.json
