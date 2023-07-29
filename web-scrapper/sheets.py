@@ -57,7 +57,7 @@ class Sheets:
 
     def update_mf_transactions(self, new_txns: list[MutualFundTransaction]) -> None:
         if not new_txns:
-          return
+            return
         self._service.spreadsheets().values().append(
             spreadsheetId=self._mf_sheet_id,
             range="MF Transactions!B2:M",

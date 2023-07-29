@@ -21,7 +21,7 @@ class MFUtility:
     def __init__(
         self, username: str, password: str, txn_password: str, config: dict[str, Any]
     ) -> None:
-        self._logger = logging.getLogger('MFUtility')
+        self._logger = logging.getLogger("MFUtility")
         self._username = username
         self._password = password
         self._txn_password = txn_password
@@ -34,11 +34,15 @@ class MFUtility:
         web.navigate(MFUTILITY_URL)
 
         if os.path.exists(MFUTILITY_HOLDING):
-          self._logger.info("{} already exists, cleaning it up".format(MFUTILITY_HOLDING))
-          os.remove(MFUTILITY_HOLDING)
+            self._logger.info(
+                "{} already exists, cleaning it up".format(MFUTILITY_HOLDING)
+            )
+            os.remove(MFUTILITY_HOLDING)
         if os.path.exists(MFUTILITY_NORMAL_ORDER):
-          self._logger.info("{} already exists, cleaning it up".format(MFUTILITY_NORMAL_ORDER))
-          os.remove(MFUTILITY_NORMAL_ORDER)
+            self._logger.info(
+                "{} already exists, cleaning it up".format(MFUTILITY_NORMAL_ORDER)
+            )
+            os.remove(MFUTILITY_NORMAL_ORDER)
 
         web.get_element(By.ID, "loginid").send_keys(self._username)
         web.get_element(By.ID, "password").send_keys(self._password)
@@ -116,7 +120,7 @@ class MFUtility:
                     )
                 )
         else:
-          self._logger.warning("Cannot find {}".format(MFUTILITY_HOLDING))
+            self._logger.warning("Cannot find {}".format(MFUTILITY_HOLDING))
 
     def _parse_orders(self):
         if os.path.exists(MFUTILITY_NORMAL_ORDER):
@@ -158,7 +162,7 @@ class MFUtility:
                     )
                 )
         else:
-          self._logger.warning("Cannot find {}".format(MFUTILITY_NORMAL_ORDER))
+            self._logger.warning("Cannot find {}".format(MFUTILITY_NORMAL_ORDER))
 
 
 if __name__ == "__main__":

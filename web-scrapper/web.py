@@ -22,8 +22,11 @@ class Web:
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         )
         self._driver = webdriver.Chrome(service=service, options=options)
-        params = {'behavior': 'allow', 'downloadPath': os.path.join(Path.home(), "Downloads")}
-        self._driver.execute_cdp_cmd('Page.setDownloadBehavior', params)
+        params = {
+            "behavior": "allow",
+            "downloadPath": os.path.join(Path.home(), "Downloads"),
+        }
+        self._driver.execute_cdp_cmd("Page.setDownloadBehavior", params)
         # self._driver.maximize_window()
         time.sleep(1)
 

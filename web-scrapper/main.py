@@ -6,15 +6,24 @@ import os
 import logging
 import argparse
 
-def parse_arguments():
-  parser = argparse.ArgumentParser(description='Fetch latest transactions and update database')
-  parser.add_argument('--dry_run', action="store_true", help='skips actually getting data or updating data')
 
-  args = parser.parse_args()
-  return args
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="Fetch latest transactions and update database"
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="skips actually getting data or updating data",
+    )
+
+    args = parser.parse_args()
+    return args
+
 
 def update_bank_and_cc():
-  pass
+    pass
+
 
 def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
     # Get existing transactions
@@ -49,7 +58,7 @@ def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
     logging.info("Only {} MF transactions are new".format(len(new_mf_txns)))
 
     if not dry_run:
-      sheet_stub.update_mf_transactions(new_mf_txns)
+        sheet_stub.update_mf_transactions(new_mf_txns)
     logging.info("Updated Sheet with latest transactions")
 
 
