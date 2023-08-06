@@ -16,6 +16,11 @@ def parse_arguments():
         action="store_true",
         help="skips actually getting data or updating data",
     )
+    parser.add_argument(
+        "--disable_headless",
+        action="store_true",
+        help="Disables web scrapper in headless mode, allowing the user to see the steps",
+    )
 
     args = parser.parse_args()
     return args
@@ -25,7 +30,7 @@ def update_bank_and_cc():
     pass
 
 
-def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
+def update_mf(sheet_stub: Sheets, dry_run=False, disable_headless=False) -> None:
     # Get existing transactions
     existing_mf_transactions = sheet_stub.get_mf_transactions()
     logging.info(
@@ -46,6 +51,7 @@ def update_mf(sheet_stub: Sheets, dry_run=False) -> None:
             }
             for idx in range(int(os.getenv("MFU_CAN_COUNT")))
         ],
+        disable_headless=disable_headless,
     )
     logging.info("Starting web session to fetch latest MF transactions and holding")
     mf_stub.update()
@@ -73,4 +79,4 @@ if __name__ == "__main__":
         os.getenv("SHEETS_BANK_ID"),
     )
 
-    update_mf(sheet_stub, args.dry_run)
+    update_mf(sheet_stub, args.dry_run, args.disable_headless)

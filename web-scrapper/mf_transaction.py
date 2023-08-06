@@ -5,6 +5,10 @@ import logging
 
 FUND_HOUSES = [
     [
+        "Aditya Birla Mutual Fund",
+        ["Aditya Birla Sun Life Regular Savings Fund - Growth / Payment - Direct Plan"],
+    ],
+    [
         "Axis Mutual Fund",
         [
             "Axis Liquid Fund - Direct Plan - Growth Option",
@@ -18,6 +22,10 @@ FUND_HOUSES = [
             "CANARA ROBECO LIQUID FUND - DIRECT PLAN - GROWTH OPTION",
             "CANARA ROBECO BLUE CHIP EQUITY FUND - DIRECT PLAN - GROWTH OPTION",
         ],
+    ],
+    [
+        "HDFC Mutual Fund",
+        ["HDFC Overnight Fund - Growth Option - Direct Plan"],
     ],
     [
         "Invesco Mutual Fund",
@@ -58,6 +66,10 @@ FUND_HOUSES = [
 
 MATCHERS = [
     [
+        "Aditya Birla Sun Life Savings Fund - Growth-Direct Plan",
+        "Aditya Birla Sun Life Regular Savings Fund - Growth / Payment - Direct Plan",
+    ],
+    [
         "Axis Liquid Fund - Direct Growth",
         "Axis Liquid Fund - Direct Plan - Growth Option",
     ],
@@ -73,6 +85,10 @@ MATCHERS = [
     [
         "Canara Robeco Bluechip Equity Fund Direct Growth Growth",
         "CANARA ROBECO BLUE CHIP EQUITY FUND - DIRECT PLAN - GROWTH OPTION",
+    ],
+    [
+        "HDFC Overnight Fund - Direct-Growth",
+        "HDFC Overnight Fund - Growth Option - Direct Plan",
     ],
     [
         "Invesco India Liquid Fund - Direct Plan Growth",

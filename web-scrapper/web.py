@@ -14,20 +14,26 @@ import time
 
 
 class Web:
-    def __init__(self) -> None:
+    def __init__(self, disable_headless=False) -> None:
         service = ChromeService(ChromeDriverManager().install())
         options = ChromeOptions()
-        options.headless = True
+
         options.binary_location = (
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         )
+
+        if not disable_headless:
+            options.headless = True
+
         self._driver = webdriver.Chrome(service=service, options=options)
-        params = {
-            "behavior": "allow",
-            "downloadPath": os.path.join(Path.home(), "Downloads"),
-        }
-        self._driver.execute_cdp_cmd("Page.setDownloadBehavior", params)
-        # self._driver.maximize_window()
+
+        if not disable_headless:
+            params = {
+                "behavior": "allow",
+                "downloadPath": os.path.join(Path.home(), "Downloads"),
+            }
+            self._driver.execute_cdp_cmd("Page.setDownloadBehavior", params)
+
         time.sleep(1)
 
     def __del__(self) -> None:

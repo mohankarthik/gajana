@@ -19,7 +19,12 @@ MFUTILITY_NORMAL_ORDER = DOWNLOAD_DIR + "NormalOrderBook.xls"
 
 class MFUtility:
     def __init__(
-        self, username: str, password: str, txn_password: str, config: dict[str, Any]
+        self,
+        username: str,
+        password: str,
+        txn_password: str,
+        config: dict[str, Any],
+        disable_headless=False,
     ) -> None:
         self._logger = logging.getLogger("MFUtility")
         self._username = username
@@ -28,9 +33,10 @@ class MFUtility:
         self._config = config
         self._holding: list[MutualFundHolding] = []
         self._orders: list[MutualFundTransaction] = []
+        self._disable_headless = disable_headless
 
     def update(self) -> None:
-        web = Web()
+        web = Web(disable_headless=self._disable_headless)
         web.navigate(MFUTILITY_URL)
 
         if os.path.exists(MFUTILITY_HOLDING):
