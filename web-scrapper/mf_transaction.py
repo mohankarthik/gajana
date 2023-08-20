@@ -21,6 +21,7 @@ FUND_HOUSES = [
         [
             "CANARA ROBECO LIQUID FUND - DIRECT PLAN - GROWTH OPTION",
             "CANARA ROBECO BLUE CHIP EQUITY FUND - DIRECT PLAN - GROWTH OPTION",
+            "CANARA ROBECO EMERGING EQUITIES - DIRECT PLAN - GROWTH OPTION",
         ],
     ],
     [
@@ -85,6 +86,10 @@ MATCHERS = [
     [
         "Canara Robeco Bluechip Equity Fund Direct Growth Growth",
         "CANARA ROBECO BLUE CHIP EQUITY FUND - DIRECT PLAN - GROWTH OPTION",
+    ],
+    [
+      "Canara Robeco Emerging Equities-Direct-Growth",
+      "CANARA ROBECO EMERGING EQUITIES - DIRECT PLAN - GROWTH OPTION",
     ],
     [
         "HDFC Overnight Fund - Direct-Growth",
