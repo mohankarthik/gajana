@@ -88,8 +88,8 @@ MATCHERS = [
         "CANARA ROBECO BLUE CHIP EQUITY FUND - DIRECT PLAN - GROWTH OPTION",
     ],
     [
-      "Canara Robeco Emerging Equities-Direct-Growth",
-      "CANARA ROBECO EMERGING EQUITIES - DIRECT PLAN - GROWTH OPTION",
+        "Canara Robeco Emerging Equities-Direct-Growth",
+        "CANARA ROBECO EMERGING EQUITIES - DIRECT PLAN - GROWTH OPTION",
     ],
     [
         "HDFC Overnight Fund - Direct-Growth",
