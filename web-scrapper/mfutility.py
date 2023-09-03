@@ -161,7 +161,7 @@ class MFUtility:
                         value=sheet.cell_value(rowx=index, colx=16),
                         nav=sheet.cell_value(rowx=index, colx=17),
                         date=datetime.strptime("01-01-1900", "%d-%m-%Y")
-                        + timedelta(days=sheet.cell_value(rowx=index, colx=18)),
+                        + timedelta(days=(sheet.cell_value(rowx=index, colx=18) - 2)),
                         stamp_duty=sheet.cell_value(rowx=index, colx=21),
                         fund_house=None,
                         sanitize_name=True,

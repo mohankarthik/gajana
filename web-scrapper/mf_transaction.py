@@ -6,12 +6,16 @@ import logging
 FUND_HOUSES = [
     [
         "Aditya Birla Mutual Fund",
-        ["Aditya Birla Sun Life Regular Savings Fund - Growth / Payment - Direct Plan"],
+        [
+            "Aditya Birla Sun Life Regular Savings Fund - Growth / Payment - Direct Plan",
+            "Aditya Birla Sun Life Money Manager Fund - Growth - Direct Plan",
+        ],
     ],
     [
         "Axis Mutual Fund",
         [
             "Axis Liquid Fund - Direct Plan - Growth Option",
+            "Axis Long Term Equity Fund - Direct Plan - Growth Option",
             "Axis Bluechip Fund - Direct Plan - Growth",
             "Axis Midcap Fund - Direct Plan - Growth",
         ],
@@ -22,6 +26,16 @@ FUND_HOUSES = [
             "CANARA ROBECO LIQUID FUND - DIRECT PLAN - GROWTH OPTION",
             "CANARA ROBECO BLUE CHIP EQUITY FUND - DIRECT PLAN - GROWTH OPTION",
             "CANARA ROBECO EMERGING EQUITIES - DIRECT PLAN - GROWTH OPTION",
+        ],
+    ],
+    [
+        "DSP Mutual Fund",
+        ["DSP Tax Saver Fund - Direct Plan - Growth"],
+    ],
+    [
+        "Edelweiss Mutual Fund",
+        [
+            "BHARAT Bond FOF- April 2031- Direct Plan- Growth Option",
         ],
     ],
     [
@@ -36,6 +50,12 @@ FUND_HOUSES = [
         ],
     ],
     [
+        "Kotak Mahindra Mutual Fund",
+        [
+            "Kotak Savings Fund-Growth - Direct",
+        ],
+    ],
+    [
         "Mirae Asset Mutual Fund",
         [
             "Mirae Asset Cash Management Fund - Direct Plan - Growth",
@@ -47,6 +67,12 @@ FUND_HOUSES = [
         [
             "Motilal Oswal Liquid Fund - Direct Growth",
             "Motilal Oswal Nifty Smallcap 250 Index Fund- Direct Plan",
+        ],
+    ],
+    [
+        "Nippon India Mutual Fund",
+        [
+            "Nippon India Nivesh Lakshya Fund- Direct Plan- Growth Option",
         ],
     ],
     [
@@ -67,6 +93,10 @@ FUND_HOUSES = [
 
 MATCHERS = [
     [
+        "Aditya Birla Sun Life Money Manager Fund - Growth-Direct Plan",
+        "Aditya Birla Sun Life Money Manager Fund - Growth - Direct Plan",
+    ],
+    [
         "Aditya Birla Sun Life Savings Fund - Growth-Direct Plan",
         "Aditya Birla Sun Life Regular Savings Fund - Growth / Payment - Direct Plan",
     ],
@@ -75,10 +105,18 @@ MATCHERS = [
         "Axis Liquid Fund - Direct Plan - Growth Option",
     ],
     [
+        "Axis Long Term Equity Fund - Direct Growth",
+        "Axis Long Term Equity Fund - Direct Plan - Growth Option",
+    ],
+    [
         "Axis Bluechip Fund - Direct Plan - Growth",
         "Axis Bluechip Fund - Direct Plan - Growth",
     ],
     ["Axis Mid Cap Fund - Direct Growth", "Axis Midcap Fund - Direct Plan - Growth"],
+    [
+        "BHARAT BOND FOF - APRIL 2031 - DIRECT PLAN - GROWTH",
+        "BHARAT Bond FOF- April 2031- Direct Plan- Growth Option",
+    ],
     [
         "Canara Robeco Liquid Fund -Direct-Growth",
         "CANARA ROBECO LIQUID FUND - DIRECT PLAN - GROWTH OPTION",
@@ -92,6 +130,10 @@ MATCHERS = [
         "CANARA ROBECO EMERGING EQUITIES - DIRECT PLAN - GROWTH OPTION",
     ],
     [
+        "DSP Tax Saver Fund - Direct Plan - Growth",
+        "DSP Tax Saver Fund - Direct Plan - Growth",
+    ],
+    [
         "HDFC Overnight Fund - Direct-Growth",
         "HDFC Overnight Fund - Growth Option - Direct Plan",
     ],
@@ -102,6 +144,10 @@ MATCHERS = [
     [
         "Invesco India Growth Opportunities Fund- Direct Plan Growth",
         "Invesco India Growth Opportunities Fund - Direct Plan - Growth",
+    ],
+    [
+        "Kotak Savings Fund-Direct-Growth",
+        "Kotak Savings Fund-Growth - Direct",
     ],
     [
         "Mirae Asset Cash Management Fund - Direct Plan - Growth",
@@ -118,6 +164,10 @@ MATCHERS = [
     [
         "Motilal Oswal Nifty Smallcap 250 Index Fund-Direct Growth",
         "Motilal Oswal Nifty Smallcap 250 Index Fund- Direct Plan",
+    ],
+    [
+        "Nippon India NIVESH LAKSHYA FUND - DIRECT GROWTH PLAN",
+        "Nippon India Nivesh Lakshya Fund- Direct Plan- Growth Option",
     ],
     [
         "Parag Parikh Liquid Fund Direct Plan Growth",
@@ -185,6 +235,8 @@ class MutualFundTransaction:
 
         self.folio = folio
         self.type = type.replace("-", " ")
+        if self.type == "Additional Purchase":
+            self.type = "Purchase"
         self.units = units
         self.nav = nav
         self.value = value
