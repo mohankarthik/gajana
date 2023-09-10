@@ -49,7 +49,7 @@ class Web:
         )
 
     def click_element(self, by: By, value: str) -> None:
-        WebDriverWait(self._driver, timeout=3).until(
+        WebDriverWait(self._driver, timeout=10).until(
             EC.element_to_be_clickable((by, value))
         ).click()
 
