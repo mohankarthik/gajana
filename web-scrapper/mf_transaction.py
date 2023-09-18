@@ -73,6 +73,7 @@ FUND_HOUSES = [
         "Nippon India Mutual Fund",
         [
             "Nippon India Nivesh Lakshya Fund- Direct Plan- Growth Option",
+            "Nippon India Value Fund - Direct Plan Growth Plan",
         ],
     ],
     [
@@ -87,6 +88,12 @@ FUND_HOUSES = [
         [
             "ICICI Prudential Liquid Fund - Direct Plan - Growth",
             "ICICI Prudential Balanced Advantage Fund - Direct Plan -  Growth",
+        ],
+    ],
+    [
+        "SBI Mutual Fund",
+        [
+            "SBI MAGNUM GILT FUND - DIRECT PLAN - GROWTH",
         ],
     ],
 ]
@@ -170,6 +177,10 @@ MATCHERS = [
         "Nippon India Nivesh Lakshya Fund- Direct Plan- Growth Option",
     ],
     [
+        "NIPPON INDIA VALUE FUND DIRECT GROWTH PLAN GROWTH OPTION GROWTH",
+        "Nippon India Value Fund - Direct Plan Growth Plan",
+    ],
+    [
         "Parag Parikh Liquid Fund Direct Plan Growth",
         "Parag Parikh Liquid Fund- Direct Plan- Growth",
     ],
@@ -188,6 +199,10 @@ MATCHERS = [
     [
         "Parag Parikh Flexi Cap Fund-Direct-Growth",
         "Parag Parikh Flexi Cap Fund - Direct Plan - Growth",
+    ],
+    [
+        "SBI Magnum Gilt Fund- Direct Plan - Growth",
+        "SBI MAGNUM GILT FUND - DIRECT PLAN - GROWTH",
     ],
 ]
 
