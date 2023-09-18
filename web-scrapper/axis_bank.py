@@ -14,12 +14,18 @@ AXIS_HOME_URL = "https://omni.axisbank.co.in/axisretailbanking/"
 
 class AxisBank:
     def __init__(
-        self, account: str, account_num: str, username: str, password: str
+        self,
+        account: str,
+        account_num: str,
+        username: str,
+        password: str,
+        disable_headless=False,
     ) -> None:
         self._account = account
         self._username = username
         self._password = password
         self._csv_path = DOWNLOAD_DIR + f"{account_num}.csv"
+        self._disable_headless = disable_headless
         self._data = []
 
     def update(self) -> None:
@@ -28,7 +34,7 @@ class AxisBank:
             os.remove(self._csv_path)
 
         # Instantiate the web client
-        web = Web()
+        web = Web(disable_headless=self._disable_headless)
         web.navigate(AXIS_HOME_URL)
 
         # Scrape
