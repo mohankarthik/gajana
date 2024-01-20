@@ -3,10 +3,25 @@
   "version": "0.0.0",
   "license": "MIT",
   "engines": {
-    "node": "16.x"
+    "node": "20.11.0"
   },
-  "scripts": {},
+  "scripts": {
+    "lint": "gts lint",
+    "clean": "gts clean",
+    "compile": "tsc",
+    "fix": "gts fix",
+    "start": "node --loader ts-node/esm src/index.ts",
+    "prepare": "yarn run compile",
+    "pretest": "yarn run compile",
+    "posttest": "yarn run lint"
+  },
   "private": true,
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {
+    "@babel/core": "7.23.7",
+    "@types/node": "20.8.2",
+    "gts": "5.2.0",
+    "ts-node": "10.9.2",
+    "typescript": "5.2.2"
+  }
 }
