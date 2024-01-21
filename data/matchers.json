@@ -1,0 +1,149 @@
+[
+  {
+    "description": [
+      "car w",
+      "JAGADISH G"
+    ],
+    "debit": true,
+    "category": "Expense:Automobile"
+  },
+  {
+    "description": [
+      "/medic"
+    ],
+    "debit": true,
+    "category": "Expense:Medical"
+  },
+  {
+    "description": [
+      "/grocer",
+      "oidmilk",
+      "/veget"
+    ],
+    "debit": true,
+    "category": "Bills:Groceries"
+  },
+  {
+    "description": [
+      "/auto",
+      "/cab",
+      "ola",
+      "uber",
+      "parkin"
+    ],
+    "debit": true,
+    "category": "Expense:Local Travel"
+  },
+  {
+    "description": [
+      "/appar",
+      "cloth",
+      "dress",
+      "ANVIS DESIGNER",
+      "myntracom"
+    ],
+    "debit": true,
+    "category": "Expense:Clothing"
+  },
+  {
+    "description": [
+      "/dining",
+      "/food",
+      "swiggy",
+      "/chaat",
+      "Restaurant"
+    ],
+    "debit": true,
+    "category": "Expense:Dining"
+  },
+  {
+    "description": [
+      "/A1106"
+    ],
+    "debit": true,
+    "category": "Expense:Housing"
+  },
+  {
+    "description": [
+      "/iron",
+      "laundr"
+    ],
+    "debit": true,
+    "category": "Bills:Laundry"
+  },
+  {
+    "description": [
+      "/yoga"
+    ],
+    "debit": true,
+    "category": "Expense:Personal Care"
+  },
+  {
+    "description": [
+      "entert"
+    ],
+    "debit": true,
+    "category": "Expense:Entertainment"
+  },
+  {
+    "description": [
+      "medici",
+      "aster dm",
+      "manipal",
+      "fortis",
+      "wellspring",
+      "physio",
+      "doctor",
+      "ashalatha"
+    ],
+    "debit": true,
+    "category": "Expense:Medical"
+  },
+  {
+    "description": [
+      "int.pd",
+      "CREDIT INTEREST CAPITALISED"
+    ],
+    "debit": false,
+    "category": "Income:Interest"
+  },
+  {
+    "description": [
+      "CPMS"
+    ],
+    "debit": false,
+    "account": "bank-axis-karti",
+    "category": "Income:Rent"
+  },
+  {
+    "description": [
+      "payout",
+      "TYCHE PAY",
+      "INSTAMOJO"
+    ],
+    "debit": false,
+    "account": "bank-axis-mini",
+    "category": "Income:WOU"
+  },
+  {
+    "description": [
+      "mf utilities"
+    ],
+    "debit": true,
+    "category": "Investment Expense:Mutual Funds"
+  },
+  {
+    "description": [
+      "atm"
+    ],
+    "debit": true,
+    "category": "Transfer:Cash"
+  },
+  {
+    "description": [
+      "CreditCard Payment",
+      "Amazon Pay Credit Car"
+    ],
+    "category": "Transfer:Credit Card"
+  }
+]

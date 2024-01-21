@@ -3,6 +3,7 @@ import os.path
 
 import httplib2
 import sys
+import json
 from difflib import SequenceMatcher
 import datetime
 import logging
@@ -55,6 +56,19 @@ class GoogleWrapper:
     txns = sorted(txns, key=itemgetter('date', 'account', 'amount', 'description'))
     logging.info(f"Found total of {len(txns)} bank transactions in CSV statements with latest date of {txns[-1]['date']}")
     return txns
+  
+  def add_new_bank_txns(self, txns: list[dict]) -> None:
+    values = []
+    for txn in txns:
+      debit = ''
+      credit = ''
+      if txn['amount'] < 0:
+        debit = str(-txn['amount'])
+      else:
+        credit = str(txn['amount'])
+      values.append([txn['date'].strftime("%Y-%m-%d"), txn['description'], debit, credit, txn['category'], '', txn['account']])
+    
+    self._update_sheet_data(TRANSACTIONS_SHEET_ID, BANK_TRANSACTIONS_RANGE, values)
 
   def _get_axis_bank_txns(self, sheet_id: str, account_name: str) -> list[dict]:
     txns = []
@@ -133,7 +147,9 @@ class GoogleWrapper:
     logging.info(f'Found a total of {len(files)} statement files')
     return files
   
-  def _get_sheet_data(self, sheet_id: str, range: str) -> list:
+  def _get_sheet_data(self, sheet_id: str, range: str, retry_count: int = 0) -> list:
+    if retry_count > 3:
+      raise SystemError(f'Unable to update sheet after {retry_count} attempts')
     sheet = self.sheets_service.spreadsheets()
     try:
       result = (
@@ -147,7 +163,30 @@ class GoogleWrapper:
     except:
       logging.warning(f'Hit API resource limits, waiting for 1 minute and retrying')
       time.sleep(60)
-      return self._get_sheet_data(sheet_id, range)
+      return self._get_sheet_data(sheet_id, range, retry_count + 1)
+    
+  def _update_sheet_data(self, spreadsheet_id: str, range_name: str, values: list, value_input_option: str="USER_ENTERED", retry_count: int=0) -> None:
+    if retry_count > 3:
+      raise SystemError(f'Unable to update sheet after {retry_count} attempts')
+    try:
+      body = {"values": values}
+      result = (
+          self.sheets_service.spreadsheets()
+          .values()
+          .append(
+              spreadsheetId=spreadsheet_id,
+              range=range_name,
+              valueInputOption=value_input_option,
+              body=body,
+          )
+          .execute()
+      )
+      logging.info(f"{(result.get('updates').get('updatedCells'))} cells appended.")
+      return result
+    except:
+      logging.warning(f'Failed to update sheet, retrying')
+      time.sleep(60)
+      return self._update_sheet_data(spreadsheet_id, range_name, values, value_input_option, retry_count+1)
 
   @staticmethod
   def _parse_amount(value: str) -> float:
@@ -191,6 +230,7 @@ class TransactionMatcher:
         continue
       missing_txns.append(all_txns[all_idx])
       all_idx += 1
+
     logging.info(f"Found total of {len(missing_txns)} missing bank transactions")
     for txn in missing_txns:
       print(txn)
@@ -199,6 +239,33 @@ class TransactionMatcher:
     logging.info(f"Found total of {len(new_txns)} new bank transactions")
     return missing_txns, new_txns
 
+class Categorizer:
+  def __init__(self) -> None:
+    self.matchers = None
+    with open("data/matchers.json", "r") as f:
+      self.matchers = json.load(f)
+
+  def categorize(self, txns: list[dict]) -> list[dict]:
+    for txn in txns:
+      found = False
+      is_debit = txn['amount'] < 0
+      txn_description = txn['description'].lower()
+      for matcher in self.matchers:
+        if found:
+          break
+        if ('debit' in matcher) and ((matcher['debit'] and not is_debit) or (not matcher['debit'] and is_debit)):
+          continue
+        if ('account' in matcher) and (matcher['account'] not in txn['account']):
+          continue
+        for matcher_description in matcher['description']:
+          if matcher_description.lower() in txn_description:
+            found = True
+            txn['category'] = matcher['category']
+            logging.info(f"Found matcher {matcher} for transaction {txn}")
+            break
+      if not found:
+        logging.warning(f"Could not categorize transaction {txn}")
+    return txns
 
 def main():
   """Shows basic usage of the Drive Activity API.
@@ -207,9 +274,13 @@ def main():
   """
   logging.basicConfig(level=logging.INFO)
   google_stub = GoogleWrapper()
+  categorizer = Categorizer()
   old_bank_txns = google_stub.get_old_bank_txns()
   all_bank_txns = google_stub.get_all_bank_txns()
   missing_txns, new_txns = TransactionMatcher.find_new_txns(old_bank_txns, all_bank_txns)
+  new_txns = categorizer.categorize(new_txns)
+  google_stub.add_new_bank_txns(new_txns)
+
 
 if __name__ == "__main__":
   main()
