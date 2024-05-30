@@ -17,9 +17,14 @@ SERVICE_ACCOUNT_KEY_FILE = 'secrets/google.json'
 CSV_FOLDER = '1DwJGCYydYikP7eWxMWD6mA84Mj7fO7-3'
 TRANSACTIONS_SHEET_ID = '1I1NkOf2L5hVB6_yV896x9H-s1CIsRYWTR2T0ioBZDZU'
 BANK_TRANSACTIONS_RANGE = 'Bank transactions!B3:H'
+CC_TRANSACTIONS_RANGE = 'CC Transactions!B3:H'
 AXIS_BANK_STATEMENT_RANGE = 'transactions!A19:G'
+AXIS_CC_STATEMENT_RANGE = 'Transactions Summary!A8:F'
 HDFC_BANK_STATEMENT_RANGE = 'transactions!A4:G'
-SKIP_TILL_YEAR = '2024'
+HDFC_CC_STATEMENT_RANGE = 'transactions!A24:G'
+ICICI_CC_STATEMENT_RANGE = 'transactions!A9:G'
+
+CURRENT_YEAR = '2024'
 
 class GoogleWrapper:
   def __init__(self) -> None:
@@ -48,7 +53,7 @@ class GoogleWrapper:
   def get_all_bank_txns(self) -> list[dict]:
     txns = []
     for file in self.statement_files:
-      if SKIP_TILL_YEAR not in file['name']:
+      if CURRENT_YEAR not in file['name']:
         continue
       if 'bank-axis-karti' in file['name']:
         txns += self._get_axis_bank_txns(file['id'], 'bank-axis-karti')
@@ -58,6 +63,41 @@ class GoogleWrapper:
         txns += self._get_hdfc_bank_txns(file['id'], 'bank-hdfc-karti')
     txns = sorted(txns, key=itemgetter('date', 'account', 'amount', 'description'))
     logging.info(f"Found total of {len(txns)} bank transactions in CSV statements with latest date of {txns[-1]['date']}")
+    return txns
+  
+  def get_old_cc_txns(self) -> list[dict]:
+    values = self._get_sheet_data(TRANSACTIONS_SHEET_ID, CC_TRANSACTIONS_RANGE)
+
+    txns = []
+    for row in values:
+      txns.append({
+        "date": datetime.datetime.strptime(row[0], "%Y-%m-%d"),
+        "description": row[1],
+        "amount": self._parse_amount(row[3]) - self._parse_amount(row[2]),
+        "category": row[4],
+        "remarks": row[5],
+        "account": row[6]
+      })
+    txns = sorted(txns, key=itemgetter('date', 'account', 'amount', 'description'))
+    logging.info(f"Found total of {len(txns)} cc transactions already processed with latest date of {txns[-1]['date']}")
+    return txns
+  
+  def get_all_cc_txns(self) -> list[dict]:
+    txns = []
+    for file in self.statement_files:
+      if CURRENT_YEAR not in file['name']:
+        continue
+      if 'cc-axis-magnus' in file['name']:
+        txns += self._get_axis_cc_txns(file['id'], 'cc-axis-magnus')
+      elif 'cc-axis-select' in file['name']:
+        txns += self._get_axis_cc_txns(file['id'], 'cc-axis-select')
+      elif 'cc-hdfc-regaliagold' in file['name']:
+        txns += self._get_hdfc_cc_txns(file['id'], 'cc-hdfc-regaliagold')
+      elif 'cc-icici-amazonpay' in file['name']:
+        txns += self._get_icici_cc_txns(file['id'], 'cc-icici-amazonpay')
+
+    txns = sorted(txns, key=itemgetter('date', 'account', 'amount', 'description'))
+    logging.info(f"Found total of {len(txns)} cc transactions in CSV statements with latest date of {txns[-1]['date']}")
     return txns
   
   def add_new_bank_txns(self, txns: list[dict]) -> None:
@@ -72,6 +112,19 @@ class GoogleWrapper:
       values.append([txn['date'].strftime("%Y-%m-%d"), txn['description'], debit, credit, txn['category'], '', txn['account']])
     
     self._update_sheet_data(TRANSACTIONS_SHEET_ID, BANK_TRANSACTIONS_RANGE, values)
+    
+  def add_new_cc_txns(self, txns: list[dict]) -> None:
+    values = []
+    for txn in txns:
+      debit = ''
+      credit = ''
+      if txn['amount'] < 0:
+        debit = str(-txn['amount'])
+      else:
+        credit = str(txn['amount'])
+      values.append([txn['date'].strftime("%Y-%m-%d"), txn['description'], debit, credit, txn['category'], '', txn['account']])
+    
+    self._update_sheet_data(TRANSACTIONS_SHEET_ID, CC_TRANSACTIONS_RANGE, values)
 
   def _get_axis_bank_txns(self, sheet_id: str, account_name: str) -> list[dict]:
     txns = []
@@ -88,6 +141,25 @@ class GoogleWrapper:
         "account": account_name
       })
     return txns
+
+  def _get_axis_cc_txns(self, sheet_id: str, account_name: str) -> list[dict]:
+    txns = []
+    values = self._get_sheet_data(sheet_id, AXIS_CC_STATEMENT_RANGE)
+    for row in values:
+      if len(row) != 5:
+        continue
+      txns.append({
+        "date": datetime.datetime.strptime(row[0].replace("'",""), "%d %b %y"),
+        "description": row[1],
+        "amount": self._parse_amount(row[3]),
+        "category": None,
+        "remarks": None,
+        "account": account_name
+      })
+      if row[4] == "Debit":
+        txns[-1]["amount"] = -txns[-1]["amount"]
+      
+    return txns
   
   def _get_hdfc_bank_txns(self, sheet_id: str, account_name: str) -> list[dict]:
     txns = []
@@ -103,6 +175,46 @@ class GoogleWrapper:
         "remarks": None,
         "account": account_name
       })
+    return txns
+
+  def _get_hdfc_cc_txns(self, sheet_id: str, account_name: str) -> list[dict]:
+    txns = []
+    values = self._get_sheet_data(sheet_id, HDFC_CC_STATEMENT_RANGE)
+    for row in values:
+      val = ''.join(row)
+      entries = val.split('~')
+      if len(entries) != 6:
+        continue
+      txns.append({
+        "date": datetime.datetime.strptime(entries[2], "%d/%m/%Y"),
+        "description": entries[3],
+        "amount": self._parse_amount(entries[4]),
+        "category": None,
+        "remarks": None,
+        "account": account_name
+      })
+      if entries[5] != "Cr":
+        txns[-1]["amount"] = -txns[-1]["amount"]
+      
+    return txns
+  
+  def _get_icici_cc_txns(self, sheet_id: str, account_name: str) -> list[dict]:
+    txns = []
+    values = self._get_sheet_data(sheet_id, ICICI_CC_STATEMENT_RANGE)
+    for row in values:
+      if len(row) != 6 and len(row) != 7:
+        continue
+      txns.append({
+        "date": datetime.datetime.strptime(row[0], "%d/%m/%Y"),
+        "description": row[2],
+        "amount": self._parse_amount(row[5]),
+        "category": None,
+        "remarks": None,
+        "account": account_name
+      })
+      if len(row) == 6 or row[6] != "CR":
+        txns[-1]["amount"] = -txns[-1]["amount"]
+      
     return txns
 
   def _get_credential(self) -> ServiceAccountCredentials:
@@ -196,7 +308,7 @@ class GoogleWrapper:
     if value == '':
       return 0
     
-    return float(value.replace(',', ''))
+    return float(value.replace(',', '').replace('₹',''))
 
 class TransactionMatcher:
   @staticmethod
@@ -234,12 +346,13 @@ class TransactionMatcher:
       missing_txns.append(all_txns[all_idx])
       all_idx += 1
 
-    logging.info(f"Found total of {len(missing_txns)} missing bank transactions")
-    for txn in missing_txns:
-      print(txn)
+    if missing_txns:
+      logging.warning(f"Found total of {len(missing_txns)} missing transactions")
+      for txn in missing_txns:
+        print(txn)
 
     new_txns = all_txns[all_idx:]
-    logging.info(f"Found total of {len(new_txns)} new bank transactions")
+    logging.info(f"Found total of {len(new_txns)} new transactions")
     return missing_txns, new_txns
 
 class Categorizer:
@@ -249,6 +362,7 @@ class Categorizer:
       self.matchers = json.load(f)
 
   def categorize(self, txns: list[dict]) -> list[dict]:
+    total_uncategorized = 0
     for txn in txns:
       found = False
       is_debit = txn['amount'] < 0
@@ -264,10 +378,14 @@ class Categorizer:
           if matcher_description.lower() in txn_description:
             found = True
             txn['category'] = matcher['category']
-            logging.info(f"Found matcher {matcher} for transaction {txn}")
+            logging.debug(f"Found matcher {matcher} for transaction {txn}")
             break
       if not found:
-        logging.warning(f"Could not categorize transaction {txn}")
+        total_uncategorized += 1
+        logging.debug(f"Could not categorize transaction {txn}")
+    
+    if total_uncategorized:
+      logging.warning(f"Out of {len(txns)}, {total_uncategorized} could not be categorized.")
     return txns
 
 def main():
@@ -278,11 +396,18 @@ def main():
   logging.basicConfig(level=logging.INFO)
   google_stub = GoogleWrapper()
   categorizer = Categorizer()
+  
   old_bank_txns = google_stub.get_old_bank_txns()
   all_bank_txns = google_stub.get_all_bank_txns()
-  missing_txns, new_txns = TransactionMatcher.find_new_txns(old_bank_txns, all_bank_txns)
-  new_txns = categorizer.categorize(new_txns)
-  google_stub.add_new_bank_txns(new_txns)
+  missing_bank_txns, new_bank_txns = TransactionMatcher.find_new_txns(old_bank_txns, all_bank_txns)
+  new_bank_txns = categorizer.categorize(new_bank_txns)
+  google_stub.add_new_bank_txns(new_bank_txns)
+  
+  old_cc_txns = google_stub.get_old_cc_txns()
+  all_cc_txns = google_stub.get_all_cc_txns()
+  missing_cc_txns, new_cc_txns = TransactionMatcher.find_new_txns(old_cc_txns, all_cc_txns)
+  new_cc_txns = categorizer.categorize(new_cc_txns)
+  google_stub.add_new_cc_txns(new_cc_txns)
 
 
 if __name__ == "__main__":
