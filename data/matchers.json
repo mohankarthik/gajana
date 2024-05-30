@@ -9,16 +9,11 @@
   },
   {
     "description": [
-      "/medic"
-    ],
-    "debit": true,
-    "category": "Expense:Medical"
-  },
-  {
-    "description": [
       "/grocer",
       "oidmilk",
-      "/veget"
+      "/veget",
+      "big basket",
+      "bigbasket"
     ],
     "debit": true,
     "category": "Bills:Groceries"
@@ -29,7 +24,8 @@
       "/cab",
       "ola",
       "uber",
-      "parkin"
+      "parkin",
+      "Bengaluru Metro"
     ],
     "debit": true,
     "category": "Expense:Local Travel"
@@ -40,7 +36,10 @@
       "cloth",
       "dress",
       "ANVIS DESIGNER",
-      "myntracom"
+      "myntracom",
+      "myntra",
+      "saree",
+      "fashion"
     ],
     "debit": true,
     "category": "Expense:Clothing"
@@ -51,14 +50,18 @@
       "/food",
       "swiggy",
       "/chaat",
-      "Restaurant"
+      "Restaurant",
+      "zomato",
+      "snacks",
+      "dinner"
     ],
     "debit": true,
     "category": "Expense:Dining"
   },
   {
     "description": [
-      "/A1106"
+      "/A1106",
+      "/A0505"
     ],
     "debit": true,
     "category": "Expense:Housing"
@@ -87,14 +90,17 @@
   },
   {
     "description": [
-      "medici",
+      "medic",
+      "medical",
       "aster dm",
       "manipal",
       "fortis",
       "wellspring",
       "physio",
       "doctor",
-      "ashalatha"
+      "ashalatha",
+      "apotek",
+      "sapna health"
     ],
     "debit": true,
     "category": "Expense:Medical"
@@ -119,7 +125,8 @@
     "description": [
       "payout",
       "TYCHE PAY",
-      "INSTAMOJO"
+      "INSTAMOJO",
+      "razorpay"
     ],
     "debit": false,
     "account": "bank-axis-mini",
