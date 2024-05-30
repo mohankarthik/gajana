@@ -19,6 +19,7 @@ TRANSACTIONS_SHEET_ID = '1I1NkOf2L5hVB6_yV896x9H-s1CIsRYWTR2T0ioBZDZU'
 BANK_TRANSACTIONS_RANGE = 'Bank transactions!B3:H'
 AXIS_BANK_STATEMENT_RANGE = 'transactions!A19:G'
 HDFC_BANK_STATEMENT_RANGE = 'transactions!A4:G'
+SKIP_TILL_YEAR = '2024'
 
 class GoogleWrapper:
   def __init__(self) -> None:
@@ -47,6 +48,8 @@ class GoogleWrapper:
   def get_all_bank_txns(self) -> list[dict]:
     txns = []
     for file in self.statement_files:
+      if SKIP_TILL_YEAR not in file['name']:
+        continue
       if 'bank-axis-karti' in file['name']:
         txns += self._get_axis_bank_txns(file['id'], 'bank-axis-karti')
       elif 'bank-axis-mini' in file['name']:
@@ -160,8 +163,8 @@ class GoogleWrapper:
       values = result.get("values", [])
       assert(values)
       return values
-    except:
-      logging.warning(f'Hit API resource limits, waiting for 1 minute and retrying')
+    except Exception as e:
+      logging.warning(f'Hit API resource limits, waiting for 1 minute and retrying, ${repr(e)}')
       time.sleep(60)
       return self._get_sheet_data(sheet_id, range, retry_count + 1)
     
