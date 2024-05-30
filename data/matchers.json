@@ -2,7 +2,9 @@
   {
     "description": [
       "car w",
-      "JAGADISH G"
+      "JAGADISH G",
+      "FUEL",
+      "PETROLEUM"
     ],
     "debit": true,
     "category": "Expense:Automobile"
@@ -13,7 +15,9 @@
       "oidmilk",
       "/veget",
       "big basket",
-      "bigbasket"
+      "bigbasket",
+      "SRANZ",
+      "ALL MARKET"
     ],
     "debit": true,
     "category": "Bills:Groceries"
@@ -39,21 +43,26 @@
       "myntracom",
       "myntra",
       "saree",
-      "fashion"
+      "fashion",
+      "RELIANCE TRENDS"
     ],
     "debit": true,
     "category": "Expense:Clothing"
   },
   {
     "description": [
-      "/dining",
-      "/food",
+      "dining",
+      "food",
       "swiggy",
-      "/chaat",
+      "chaat",
       "Restaurant",
       "zomato",
       "snacks",
-      "dinner"
+      "dinner",
+      "KFC",
+      "EAZYDINER",
+      "WISHVISH FOODS",
+      "MC DONALDS"
     ],
     "debit": true,
     "category": "Expense:Dining"
@@ -83,7 +92,9 @@
   },
   {
     "description": [
-      "entert"
+      "entert",
+      "BOOKMYSHOW",
+      "PVR"
     ],
     "debit": true,
     "category": "Expense:Entertainment"
@@ -100,7 +111,9 @@
       "doctor",
       "ashalatha",
       "apotek",
-      "sapna health"
+      "sapna health",
+      "ORTHOPAEDIC",
+      "CLINIC"
     ],
     "debit": true,
     "category": "Expense:Medical"
