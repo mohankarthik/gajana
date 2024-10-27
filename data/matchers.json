@@ -1,30 +1,32 @@
 [
   {
+    "category": "Expense:Automobile",
+    "debit": true,
     "description": [
       "car w",
       "JAGADISH G",
       "FUEL",
       "PETROLEUM"
-    ],
-    "debit": true,
-    "category": "Expense:Automobile"
+    ]
   },
   {
+    "category": "Expense:Electronics",
+    "debit": true,
     "description": [
       "googleplay",
       "google play"
-    ],
-    "debit": true,
-    "category": "Expense:Electronics"
+    ]
   },
   {
+    "category": "Expense:Baby",
+    "debit": true,
     "description": [
       "firstcry"
-    ],
-    "debit": true,
-    "category": "Expense:Baby"
+    ]
   },
   {
+    "category": "Bills:Groceries",
+    "debit": true,
     "description": [
       "/grocer",
       "oidmil",
@@ -35,11 +37,11 @@
       "blinkit",
       "SRANZ",
       "ALL MARKET"
-    ],
-    "debit": true,
-    "category": "Bills:Groceries"
+    ]
   },
   {
+    "category": "Expense:Local Travel",
+    "debit": true,
     "description": [
       "/auto",
       "/cab",
@@ -47,11 +49,11 @@
       "uber",
       "parkin",
       "Bengaluru Metro"
-    ],
-    "debit": true,
-    "category": "Expense:Local Travel"
+    ]
   },
   {
+    "category": "Expense:Clothing",
+    "debit": true,
     "description": [
       "/appar",
       "cloth",
@@ -62,11 +64,11 @@
       "saree",
       "fashion",
       "RELIANCE TRENDS"
-    ],
-    "debit": true,
-    "category": "Expense:Clothing"
+    ]
   },
   {
+    "category": "Expense:Dining",
+    "debit": true,
     "description": [
       "dining",
       "food",
@@ -84,46 +86,46 @@
       "third wave",
       "abids",
       "punjabi rasoi"
-    ],
-    "debit": true,
-    "category": "Expense:Dining"
+    ]
   },
   {
+    "category": "Expense:Housing",
+    "debit": true,
     "description": [
       "/A1106",
       "a1106",
       "/A0505",
       "a0505"
-    ],
-    "debit": true,
-    "category": "Expense:Housing"
+    ]
   },
   {
+    "category": "Bills:Laundry",
+    "debit": true,
     "description": [
       "/iron",
       "laundr"
-    ],
-    "debit": true,
-    "category": "Bills:Laundry"
+    ]
   },
   {
+    "category": "Expense:Personal Care",
+    "debit": true,
     "description": [
       "/yoga"
-    ],
-    "debit": true,
-    "category": "Expense:Personal Care"
+    ]
   },
   {
+    "category": "Expense:Entertainment",
+    "debit": true,
     "description": [
       "entert",
       "BOOKMYSHOW",
       "PVR",
       "youtube"
-    ],
-    "debit": true,
-    "category": "Expense:Entertainment"
+    ]
   },
   {
+    "category": "Expense:Medical",
+    "debit": true,
     "description": [
       "medic",
       "medical",
@@ -138,56 +140,54 @@
       "sapna health",
       "ORTHOPAEDIC",
       "CLINIC"
-    ],
-    "debit": true,
-    "category": "Expense:Medical"
+    ]
   },
   {
+    "category": "Income:Interest",
+    "debit": false,
     "description": [
       "int.pd",
       "CREDIT INTEREST CAPITALISED"
-    ],
-    "debit": false,
-    "category": "Income:Interest"
+    ]
   },
   {
+    "category": "Income:Rent",
+    "debit": false,
     "description": [
       "CPMS",
       "chethan r"
-    ],
-    "debit": false,
-    "category": "Income:Rent"
+    ]
   },
   {
+    "account": "bank-axis-mini",
+    "category": "Income:WOU",
+    "debit": false,
     "description": [
       "payout",
       "TYCHE PAY",
       "INSTAMOJO",
       "razorpay"
-    ],
-    "debit": false,
-    "account": "bank-axis-mini",
-    "category": "Income:WOU"
+    ]
   },
   {
+    "category": "Investment Expense:Mutual Funds",
+    "debit": true,
     "description": [
       "mf utilities"
-    ],
-    "debit": true,
-    "category": "Investment Expense:Mutual Funds"
+    ]
   },
   {
+    "category": "Transfer:Cash",
+    "debit": true,
     "description": [
       "atm"
-    ],
-    "debit": true,
-    "category": "Transfer:Cash"
+    ]
   },
   {
+    "category": "Transfer:Credit Card",
     "description": [
       "CreditCard Payment",
       "Amazon Pay Credit Car"
-    ],
-    "category": "Transfer:Credit Card"
+    ]
   }
 ]
