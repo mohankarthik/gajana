@@ -11,11 +11,28 @@
   },
   {
     "description": [
+      "googleplay",
+      "google play"
+    ],
+    "debit": true,
+    "category": "Expense:Electronics"
+  },
+  {
+    "description": [
+      "firstcry"
+    ],
+    "debit": true,
+    "category": "Expense:Baby"
+  },
+  {
+    "description": [
       "/grocer",
-      "oidmilk",
+      "oidmil",
       "/veget",
+      "grofer",
       "big basket",
       "bigbasket",
+      "blinkit",
       "SRANZ",
       "ALL MARKET"
     ],
@@ -38,9 +55,9 @@
     "description": [
       "/appar",
       "cloth",
+      "meesho",
       "dress",
       "ANVIS DESIGNER",
-      "myntracom",
       "myntra",
       "saree",
       "fashion",
@@ -62,7 +79,11 @@
       "KFC",
       "EAZYDINER",
       "WISHVISH FOODS",
-      "MC DONALDS"
+      "MC DONALDS",
+      "bundltech",
+      "third wave",
+      "abids",
+      "punjabi rasoi"
     ],
     "debit": true,
     "category": "Expense:Dining"
@@ -70,7 +91,9 @@
   {
     "description": [
       "/A1106",
-      "/A0505"
+      "a1106",
+      "/A0505",
+      "a0505"
     ],
     "debit": true,
     "category": "Expense:Housing"
@@ -94,7 +117,8 @@
     "description": [
       "entert",
       "BOOKMYSHOW",
-      "PVR"
+      "PVR",
+      "youtube"
     ],
     "debit": true,
     "category": "Expense:Entertainment"
@@ -128,10 +152,10 @@
   },
   {
     "description": [
-      "CPMS"
+      "CPMS",
+      "chethan r"
     ],
     "debit": false,
-    "account": "bank-axis-karti",
     "category": "Income:Rent"
   },
   {

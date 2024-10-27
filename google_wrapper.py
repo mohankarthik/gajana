@@ -120,7 +120,7 @@ class GoogleWrapper:
                 if cc_account not in file["name"]:
                     continue
 
-                if (
+                if cc_account not in latest_txn_by_account or (
                     latest_txn_by_account[cc_account].year <= statement_year
                     and latest_txn_by_account[cc_account].month <= statement_month
                 ):
@@ -237,13 +237,18 @@ class GoogleWrapper:
         txns = []
         values = self._get_sheet_data(sheet_id, HDFC_BANK_STATEMENT_RANGE, True)
         for row in values:
-            if len(row) != 7:
+            if len(row) != 7 or row[0] == "Date":
                 continue
+            try:
+                date = datetime.datetime.strptime(row[0], "%d/%m/%y")
+            except ValueError:
+                continue
+
             txns.append(
                 {
-                    "date": datetime.datetime.strptime(row[0], "%d/%m/%y"),
+                    "date": date,
                     "description": row[1],
-                    "amount": self._parse_amount(row[4]) - self._parse_amount(row[3]),
+                    "amount": self._parse_amount(row[5]) - self._parse_amount(row[4]),
                     "category": None,
                     "remarks": None,
                     "account": account_name,
@@ -257,19 +262,23 @@ class GoogleWrapper:
         for row in values:
             val = "".join(row)
             entries = val.split("~")
-            if len(entries) != 6:
+            if len(entries) != 7:
+                continue
+            try:
+                date = datetime.datetime.strptime(entries[2].split(" ")[0], "%d/%m/%Y")
+            except ValueError:
                 continue
             txns.append(
                 {
-                    "date": datetime.datetime.strptime(entries[2], "%d/%m/%Y"),
+                    "date": date,
                     "description": entries[3],
-                    "amount": self._parse_amount(entries[4]),
+                    "amount": self._parse_amount(entries[5]),
                     "category": None,
                     "remarks": None,
                     "account": account_name,
                 }
             )
-            if entries[5] != "Cr":
+            if entries[6] != "Cr":
                 txns[-1]["amount"] = -txns[-1]["amount"]
 
         return txns

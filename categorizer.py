@@ -36,7 +36,7 @@ class Categorizer:
                         break
             if not found:
                 total_uncategorized += 1
-                logging.debug(f"Could not categorize transaction {txn}")
+                logging.info(f"Could not categorize transaction {txn}")
 
         if total_uncategorized:
             logging.warning(
