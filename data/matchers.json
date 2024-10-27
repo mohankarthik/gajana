@@ -1,0 +1,193 @@
+[
+  {
+    "category": "Expense:Automobile",
+    "debit": true,
+    "description": [
+      "car w",
+      "JAGADISH G",
+      "FUEL",
+      "PETROLEUM"
+    ]
+  },
+  {
+    "category": "Expense:Electronics",
+    "debit": true,
+    "description": [
+      "googleplay",
+      "google play"
+    ]
+  },
+  {
+    "category": "Expense:Baby",
+    "debit": true,
+    "description": [
+      "firstcry"
+    ]
+  },
+  {
+    "category": "Bills:Groceries",
+    "debit": true,
+    "description": [
+      "/grocer",
+      "oidmil",
+      "/veget",
+      "grofer",
+      "big basket",
+      "bigbasket",
+      "blinkit",
+      "SRANZ",
+      "ALL MARKET"
+    ]
+  },
+  {
+    "category": "Expense:Local Travel",
+    "debit": true,
+    "description": [
+      "/auto",
+      "/cab",
+      "ola",
+      "uber",
+      "parkin",
+      "Bengaluru Metro"
+    ]
+  },
+  {
+    "category": "Expense:Clothing",
+    "debit": true,
+    "description": [
+      "/appar",
+      "cloth",
+      "meesho",
+      "dress",
+      "ANVIS DESIGNER",
+      "myntra",
+      "saree",
+      "fashion",
+      "RELIANCE TRENDS"
+    ]
+  },
+  {
+    "category": "Expense:Dining",
+    "debit": true,
+    "description": [
+      "dining",
+      "food",
+      "swiggy",
+      "chaat",
+      "Restaurant",
+      "zomato",
+      "snacks",
+      "dinner",
+      "KFC",
+      "EAZYDINER",
+      "WISHVISH FOODS",
+      "MC DONALDS",
+      "bundltech",
+      "third wave",
+      "abids",
+      "punjabi rasoi"
+    ]
+  },
+  {
+    "category": "Expense:Housing",
+    "debit": true,
+    "description": [
+      "/A1106",
+      "a1106",
+      "/A0505",
+      "a0505"
+    ]
+  },
+  {
+    "category": "Bills:Laundry",
+    "debit": true,
+    "description": [
+      "/iron",
+      "laundr"
+    ]
+  },
+  {
+    "category": "Expense:Personal Care",
+    "debit": true,
+    "description": [
+      "/yoga"
+    ]
+  },
+  {
+    "category": "Expense:Entertainment",
+    "debit": true,
+    "description": [
+      "entert",
+      "BOOKMYSHOW",
+      "PVR",
+      "youtube"
+    ]
+  },
+  {
+    "category": "Expense:Medical",
+    "debit": true,
+    "description": [
+      "medic",
+      "medical",
+      "aster dm",
+      "manipal",
+      "fortis",
+      "wellspring",
+      "physio",
+      "doctor",
+      "ashalatha",
+      "apotek",
+      "sapna health",
+      "ORTHOPAEDIC",
+      "CLINIC"
+    ]
+  },
+  {
+    "category": "Income:Interest",
+    "debit": false,
+    "description": [
+      "int.pd",
+      "CREDIT INTEREST CAPITALISED"
+    ]
+  },
+  {
+    "category": "Income:Rent",
+    "debit": false,
+    "description": [
+      "CPMS",
+      "chethan r"
+    ]
+  },
+  {
+    "account": "bank-axis-mini",
+    "category": "Income:WOU",
+    "debit": false,
+    "description": [
+      "payout",
+      "TYCHE PAY",
+      "INSTAMOJO",
+      "razorpay"
+    ]
+  },
+  {
+    "category": "Investment Expense:Mutual Funds",
+    "debit": true,
+    "description": [
+      "mf utilities"
+    ]
+  },
+  {
+    "category": "Transfer:Cash",
+    "debit": true,
+    "description": [
+      "atm"
+    ]
+  },
+  {
+    "category": "Transfer:Credit Card",
+    "description": [
+      "CreditCard Payment",
+      "Amazon Pay Credit Car"
+    ]
+  }
+]
