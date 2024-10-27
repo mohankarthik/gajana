@@ -50,8 +50,6 @@ BANK_ACCOUNTS = [
     "bank-sbi-mini-pallikarnai",
 ]
 
-CURRENT_YEAR = "2024"
-
 
 class GoogleWrapper:
     def __init__(self) -> None:
@@ -561,10 +559,6 @@ def find_latest_transaction_by_account(txns: list[dict]) -> dict:
 
 
 def main():
-    """Shows basic usage of the Drive Activity API.
-
-    Prints information about the last 10 events that occured the user's Drive.
-    """
     logging.basicConfig(level=logging.INFO)
     google_stub = GoogleWrapper()
     categorizer = Categorizer()
