@@ -4,9 +4,9 @@
     "debit": true,
     "description": [
       "car w",
-      "JAGADISH G",
-      "FUEL",
-      "PETROLEUM"
+      "jagadish",
+      "fuel",
+      "petrol"
     ]
   },
   {
@@ -21,7 +21,8 @@
     "category": "Expense:Baby",
     "debit": true,
     "description": [
-      "firstcry"
+      "firstcry",
+      "first cry"
     ]
   },
   {
@@ -35,8 +36,9 @@
       "big basket",
       "bigbasket",
       "blinkit",
-      "SRANZ",
-      "ALL MARKET"
+      "sranz",
+      "all market",
+      "blink commerce"
     ]
   },
   {
@@ -59,11 +61,11 @@
       "cloth",
       "meesho",
       "dress",
-      "ANVIS DESIGNER",
+      "anvis designer",
       "myntra",
       "saree",
       "fashion",
-      "RELIANCE TRENDS"
+      "reliance trends"
     ]
   },
   {
@@ -78,23 +80,23 @@
       "zomato",
       "snacks",
       "dinner",
-      "KFC",
-      "EAZYDINER",
-      "WISHVISH FOODS",
-      "MC DONALDS",
+      "kfc",
+      "eazydiner",
+      "wishvish foods",
+      "mc donalds",
       "bundltech",
       "third wave",
       "abids",
-      "punjabi rasoi"
+      "punjabi rasoi",
+      "hatti kaapi",
+      "blue tokai coffee"
     ]
   },
   {
     "category": "Expense:Housing",
     "debit": true,
     "description": [
-      "/A1106",
       "a1106",
-      "/A0505",
       "a0505"
     ]
   },
@@ -118,9 +120,10 @@
     "debit": true,
     "description": [
       "entert",
-      "BOOKMYSHOW",
-      "PVR",
-      "youtube"
+      "bookmyshow",
+      "pvr",
+      "youtube",
+      "blizzard us"
     ]
   },
   {
@@ -129,17 +132,25 @@
     "description": [
       "medic",
       "medical",
+      "hospital",
+      "clinic",
+      "physio",
+      "doctor",
+      "orthopedic",
+      "diagnostics",
       "aster dm",
       "manipal",
       "fortis",
       "wellspring",
-      "physio",
-      "doctor",
       "ashalatha",
       "apotek",
       "sapna health",
-      "ORTHOPAEDIC",
-      "CLINIC"
+      "mehta multi",
+      "devi eye",
+      "pharmeasy",
+      "miracle hospital",
+      "apollo pharmacies",
+      "the dental people"
     ]
   },
   {
@@ -147,14 +158,14 @@
     "debit": false,
     "description": [
       "int.pd",
-      "CREDIT INTEREST CAPITALISED"
+      "credit interest capital"
     ]
   },
   {
     "category": "Income:Rent",
     "debit": false,
     "description": [
-      "CPMS",
+      "cpms",
       "chethan r"
     ]
   },
@@ -164,8 +175,8 @@
     "debit": false,
     "description": [
       "payout",
-      "TYCHE PAY",
-      "INSTAMOJO",
+      "tyche pay",
+      "instamojo",
       "razorpay"
     ]
   },
@@ -186,8 +197,8 @@
   {
     "category": "Transfer:Credit Card",
     "description": [
-      "CreditCard Payment",
-      "Amazon Pay Credit Car"
+      "creditcard payment",
+      "amazon pay credit car"
     ]
   }
 ]
