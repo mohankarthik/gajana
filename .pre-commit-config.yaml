@@ -4,7 +4,6 @@ repos:
     hooks:
     -   id: check-yaml
     -   id: debug-statements
-    -   id: end-of-file-fixer
     -   id: trailing-whitespace
         exclude: ^tests/fixtures/
 -   repo: https://github.com/asottile/reorder-python-imports
