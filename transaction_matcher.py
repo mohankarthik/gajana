@@ -1,60 +1,97 @@
+# gajana/transaction_matcher.py
 from __future__ import annotations
 
 import logging
-from difflib import SequenceMatcher
+from operator import itemgetter
+
+logger = logging.getLogger(__name__)
 
 
 class TransactionMatcher:
+    """
+    Compares lists of transactions to find new ones.
+    Note: This is a basic implementation assuming unique transactions
+          can be identified by a combination of fields after sorting.
+          More robust duplicate handling might be needed depending on data.
+    """
+
     @staticmethod
-    def _is_txn_same(txn_a: dict, txn_b: dict) -> bool:
-        return (
-            (txn_a["date"] == txn_b["date"])
-            and (txn_a["account"] == txn_b["account"])
-            and (txn_a["amount"] == txn_b["amount"])
-            and SequenceMatcher(
-                None,
-                txn_a["description"].lower(),
-                txn_b["description"].lower(),
-            ).ratio()
-            > 0.5
+    def find_new_txns(
+        old_txns: list[dict], all_potential_txns: list[dict]
+    ) -> list[dict]:
+        """
+        Identifies transactions present in all_potential_txns but not in old_txns.
+
+        Args:
+            old_txns: List of transactions already processed (from the sheet).
+            all_potential_txns: List of transactions parsed from statements.
+
+        Returns:
+            A tuple containing:
+            - missing_txns: Placeholder, currently empty (logic not defined).
+            - new_txns: List of transactions deemed new.
+        """
+        if not all_potential_txns:
+            logger.info("No potential new transactions provided to match.")
+            return [], []
+        if not old_txns:
+            logger.info(
+                "No old transactions provided, considering all potential transactions as new."
+            )
+            all_potential_txns.sort(
+                key=itemgetter("date", "account", "amount", "description")
+            )
+            return [], all_potential_txns
+
+        try:
+            old_txn_ids = set(
+                (
+                    txn["date"].strftime("%Y-%m-%d"),
+                    txn["account"],
+                    f"{txn['amount']:.2f}",
+                    txn["description"],
+                )
+                for txn in old_txns
+            )
+        except KeyError as e:
+            logger.fatal(
+                f"Missing key {e} in old transactions during ID creation. Matching may be inaccurate."
+            )
+            old_txn_ids = set()
+
+        new_txns = []
+        processed_potential_ids = set()
+
+        for txn in all_potential_txns:
+            try:
+                potential_id = (
+                    txn["date"].strftime("%Y-%m-%d"),
+                    txn["account"],
+                    f"{txn['amount']:.2f}",
+                    txn["description"],
+                )
+
+                if (
+                    potential_id not in old_txn_ids
+                    and potential_id not in processed_potential_ids
+                ):
+                    new_txns.append(txn)
+                    processed_potential_ids.add(potential_id)  # Add to processed set
+                else:
+                    logger.debug(f"Skipping duplicate/old transaction: {potential_id}")
+
+            except KeyError as e:
+                logger.fatal(
+                    f"Missing key {e} in potential transaction. Skipping matching for: {txn}"
+                )
+            except Exception as e:
+                logger.fatal(
+                    f"Error creating ID for potential transaction: {e}. Skipping matching for: {txn}",
+                    exc_info=True,
+                )
+
+        new_txns.sort(key=itemgetter("date", "account", "amount", "description"))
+        logger.info(
+            f"Transaction matching complete. Identified {len(new_txns)} new transactions."
         )
-
-    @staticmethod
-    def _is_ignored_txn(txn: dict) -> bool:
-        if "ANALOG DE" in txn["description"] and txn["category"] != "Reversal":
-            return True
-        if "GOOGLE IT" in txn["description"] and txn["category"] != "Reversal":
-            return True
-        return False
-
-    @staticmethod
-    def find_new_txns(old_txns: list[dict], all_txns: list[dict]) -> list[dict]:
-        missing_txns = []
-        old_idx = 0
-        all_idx = 0
-        while old_idx < len(old_txns) and all_idx < len(all_txns):
-            if all_txns[all_idx]["date"] > old_txns[old_idx]["date"]:
-                # Skip past old transactions that no longer exist in the CSVs
-                old_idx += 1
-                continue
-            if TransactionMatcher._is_txn_same(old_txns[old_idx], all_txns[all_idx]):
-                old_idx += 1
-                all_idx += 1
-                continue
-            if TransactionMatcher._is_ignored_txn(old_txns[old_idx]):
-                old_idx += 1
-                continue
-            if TransactionMatcher._is_ignored_txn(all_txns[all_idx]):
-                all_idx += 1
-                continue
-            missing_txns.append(all_txns[all_idx])
-            all_idx += 1
-
-        if missing_txns:
-            logging.warning(f"Found total of {len(missing_txns)} missing transactions")
-            for txn in missing_txns:
-                print(txn)
-
-        new_txns = all_txns[all_idx:]
-        logging.info(f"Found total of {len(new_txns)} new transactions")
-        return missing_txns, new_txns
+        return new_txns
