@@ -1,23 +1,21 @@
-# gajana/categorizer.py
+"""Provides methods to categorize transactions."""
+
 from __future__ import annotations
 
 import json
 import logging
 import re
+from typing import Any
 
-from constants import DEFAULT_CATEGORY
-from constants import MATCHERS_FILE_PATH
+from constants import DEFAULT_CATEGORY, MATCHERS_FILE_PATH
+from utils import log_and_exit
 
-# Import constants
-
-# Configure logger for this module
 logger = logging.getLogger(__name__)
 
 
 class Categorizer:
-    """
-    Categorizes transactions based on rules loaded from a JSON file.
-    Assumes matchers.json contains a list of rule objects.
+    """Categorizes transactions based on rules loaded from a JSON file.
+
     Each rule object should have:
         - "category": string (the category to assign)
         - "description": list of strings/regex patterns to match against transaction description
@@ -28,31 +26,36 @@ class Categorizer:
     """
 
     def __init__(self, matchers_file: str = MATCHERS_FILE_PATH) -> None:
-        self.matchers: list[dict] = []
+        """Constructor.
+
+        Args:
+            matchers_file (str, optional): File path to the mathchers. Defaults to MATCHERS_FILE_PATH.
+        """
+        self.matchers: list[dict[str, Any]] = []
         try:
             logger.info(f"Loading categorization matchers from: {matchers_file}")
             with open(matchers_file, "r", encoding="utf-8") as f:
                 self.matchers = json.load(f)
             assert isinstance(self.matchers, list), "Matchers JSON root must be a list."
             logger.info(f"Successfully loaded {len(self.matchers)} matchers.")
-            # Optional: Add more detailed validation of matcher structure here if needed
         except FileNotFoundError:
-            logger.fatal(
-                f"Matchers file not found at '{matchers_file}'. Categorization will default."
+            log_and_exit(
+                logger,
+                f"Matchers file not found at '{matchers_file}'. Categorization will default.",
             )
-        except (json.JSONDecodeError, AssertionError) as e:
-            logger.fatal(
-                f"Error loading or validating matchers file '{matchers_file}': {e}"
+        except (json.JSONDecodeError, AssertionError):
+            log_and_exit(
+                logger, f"Error loading or validating matchers file '{matchers_file}'"
             )
         except Exception as e:
-            logger.fatal(
+            log_and_exit(
+                logger,
                 f"Unexpected error loading matchers from '{matchers_file}': {e}",
-                exc_info=True,
+                e,
             )
 
-    def categorize(self, txns: list[dict]) -> list[dict]:
-        """
-        Categorizes a list of transactions based on loaded rules.
+    def categorize(self, txns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Categorizes a list of transactions based on loaded rules.
 
         Args:
             txns: A list of transaction dictionaries. Expected keys: 'amount', 'description', 'account'.
@@ -61,8 +64,9 @@ class Categorizer:
             The list of transactions with the 'category' key added/updated.
         """
         if not self.matchers:
-            logger.fatal(
-                "No valid matchers loaded. Assigning default category to all transactions."
+            log_and_exit(
+                logger,
+                "No valid matchers loaded. Assigning default category to all transactions.",
             )
 
         total_uncategorized = 0
@@ -71,21 +75,20 @@ class Categorizer:
 
         for i, txn in enumerate(txns):
             if not all(k in txn for k in ["amount", "description", "account"]):
-                logger.warning(
-                    f"Skipping transaction index {i} due to missing keys. Txn: {txn}"
+                log_and_exit(
+                    logger,
+                    f"Skipping transaction index {i} due to missing keys. Txn: {txn}",
                 )
-                txn["category"] = DEFAULT_CATEGORY
-                continue
 
             txn["category"] = DEFAULT_CATEGORY
             found_match = False
 
-            # Ensure amount is float for comparison
             try:
                 is_debit = float(txn["amount"]) < 0
             except (TypeError, ValueError):
-                logger.fatal(f"Could not determine debit/credit for txn index {i}.")
-                is_debit = True
+                log_and_exit(
+                    logger, f"Could not determine debit/credit for txn index {i}."
+                )
 
             txn_description = str(txn.get("description", "")).lower()
             txn_account = str(txn.get("account", "")).lower()
@@ -93,14 +96,20 @@ class Categorizer:
             for matcher in self.matchers:
                 # --- Matcher Condition Checks ---
                 # Check Debit/Credit
-                if "debit" in matcher and isinstance(matcher["debit"], bool):
-                    if matcher["debit"] != is_debit:
-                        continue
+                if (
+                    "debit" in matcher
+                    and isinstance(matcher["debit"], bool)
+                    and matcher["debit"] != is_debit
+                ):
+                    continue
 
                 # Check Account Substring
-                if "account" in matcher and isinstance(matcher["account"], str):
-                    if matcher["account"].lower() not in txn_account:
-                        continue
+                if (
+                    "account" in matcher
+                    and isinstance(matcher["account"], str)
+                    and matcher["account"].lower() not in txn_account
+                ):
+                    continue
 
                 # Check Description Keywords/Regex
                 matcher_descriptions = matcher.get("description", [])
@@ -118,9 +127,11 @@ class Categorizer:
                             elif pattern_str.lower() in txn_description:
                                 match_found = True
                         except re.error as e:
-                            logger.fatal(
+                            log_and_exit(
+                                logger,
                                 f"Invalid regex pattern in matcher: '{pattern_str}'. Error: {e}."
-                                f"Matcher: {matcher}"
+                                f"Matcher: {matcher}",
+                                e,
                             )
 
                         if match_found:
@@ -136,8 +147,9 @@ class Categorizer:
                             )
                             break
                 else:
-                    logger.fatal(
-                        f"Matcher has invalid 'description' format (expected list): {matcher}"
+                    log_and_exit(
+                        logger,
+                        f"Matcher has invalid 'description' format (expected list): {matcher}",
                     )
 
                 if found_match:

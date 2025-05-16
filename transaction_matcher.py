@@ -33,7 +33,7 @@ class TransactionMatcher:
         """
         if not all_potential_txns:
             logger.info("No potential new transactions provided to match.")
-            return [], []
+            return []
         if not old_txns:
             logger.info(
                 "No old transactions provided, considering all potential transactions as new."
@@ -41,7 +41,7 @@ class TransactionMatcher:
             all_potential_txns.sort(
                 key=itemgetter("date", "account", "amount", "description")
             )
-            return [], all_potential_txns
+            return all_potential_txns
 
         try:
             old_txn_ids = set(
