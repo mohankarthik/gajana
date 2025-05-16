@@ -1,26 +1,38 @@
+---
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
-    -   id: check-yaml
-    -   id: debug-statements
-    -   id: trailing-whitespace
+      - id: check-yaml
+      - id: debug-statements
+      - id: trailing-whitespace
         exclude: ^tests/fixtures/
--   repo: https://github.com/asottile/reorder-python-imports
-    rev: v3.14.0
+  - repo: https://github.com/pycqa/isort
+    rev: 5.12.0
     hooks:
-    -   id: reorder-python-imports
-        args: [
-            --application-directories, '.:src',
-            --py38-plus,
-            --add-import, 'from __future__ import annotations',
-        ]
--   repo: https://github.com/psf/black
+      - id: isort
+        args: ["--profile", "black"]
+  - repo: https://github.com/psf/black
     rev: 24.10.0
     hooks:
-    - id: black
-      language_version: python3.12
--   repo: https://github.com/PyCQA/flake8
+      - id: black
+        language_version: python3.13
+  - repo: https://github.com/PyCQA/flake8
     rev: 7.1.1
     hooks:
-    -   id: flake8
+      - id: flake8
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.0
+    hooks:
+      - id: mypy
+        args: [--strict]
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+  - repo: https://github.com/PyCQA/pydocstyle
+    rev: '6.3.0'
+    hooks:
+      - id: pydocstyle
+        args:
+          - --convention=google
