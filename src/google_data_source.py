@@ -1,38 +1,44 @@
-# gajana/google_data_source.py
+"""Data source specific to GSuite."""
+
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
+from typing import Any, List, Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
 from oauth2client.service_account import ServiceAccountCredentials
 
-from constants import BANK_TRANSACTIONS_FULL_RANGE
-from constants import BANK_TRANSACTIONS_SHEET_NAME
-from constants import CC_TRANSACTIONS_FULL_RANGE
-from constants import CC_TRANSACTIONS_SHEET_NAME
-from constants import CSV_FOLDER
-from constants import SCOPES
-from constants import SERVICE_ACCOUNT_KEY_FILE
-from constants import TRANSACTIONS_SHEET_ID
-from interfaces import DataSourceInterface
-from utils import log_and_exit
+from src.constants import (
+    BANK_TRANSACTIONS_FULL_RANGE,
+    BANK_TRANSACTIONS_SHEET_NAME,
+    CC_TRANSACTIONS_FULL_RANGE,
+    CC_TRANSACTIONS_SHEET_NAME,
+    CSV_FOLDER,
+    SCOPES,
+    SERVICE_ACCOUNT_KEY_FILE,
+    TRANSACTIONS_SHEET_ID,
+)
+from src.interfaces import DataSourceFile, DataSourceInterface
+from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
 
 
 class GoogleDataSource(DataSourceInterface):
-    """
-    Google Sheets and Drive implementation of the DataSourceInterface.
+    """Google Sheets and Drive implementation of the DataSourceInterface.
+
     Handles all direct communication with Google APIs.
     """
 
     def __init__(self, max_retries: int = 3, initial_backoff: int = 5) -> None:
+        """Constructor.
+
+        Args:
+            max_retries (int, optional): Defaults to 3.
+            initial_backoff (int, optional): Defaults to 5.
+        """
         self.max_retries = max_retries
         self.initial_backoff = initial_backoff
         self.creds = self._get_credential()
@@ -82,8 +88,13 @@ class GoogleDataSource(DataSourceInterface):
             log_and_exit(logger, f"Failed to build Google Sheets service: {e}", e)
         return None
 
-    def list_statement_file_details(self) -> List[Dict[str, str]]:
-        files_details: List[Dict[str, str]] = []
+    def list_statement_file_details(self) -> List[DataSourceFile]:
+        """Lists all the statement files with details.
+
+        Returns:
+            List[DataSourceFile]: _description_
+        """
+        files_details: List[DataSourceFile] = []
         page_token = None
         logger.info(f"Listing Google Sheets from Drive folder ID: {CSV_FOLDER}")
         query = f"parents in '{CSV_FOLDER}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
@@ -101,7 +112,7 @@ class GoogleDataSource(DataSourceInterface):
                 )
                 for file_item in response.get("files", []):
                     files_details.append(
-                        {"id": file_item["id"], "name": file_item["name"]}
+                        DataSourceFile(file_item["id"], file_item["name"])
                     )
                 page_token = response.get("nextPageToken", None)
                 if page_token is None:

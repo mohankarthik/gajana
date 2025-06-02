@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import abc
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
+from typing import Any, List, Optional
+
+
+class DataSourceFile:
+    def __init__(self, id: str, name: str):
+        self.id = id
+        self.name = name
 
 
 class DataSourceInterface(abc.ABC):
@@ -16,7 +19,7 @@ class DataSourceInterface(abc.ABC):
     """
 
     @abc.abstractmethod
-    def list_statement_file_details(self) -> List[Dict[str, str]]:
+    def list_statement_file_details(self) -> List[DataSourceFile]:
         """
         Lists details of statement files (e.g., Sheets in Google Drive).
 
@@ -91,4 +94,9 @@ class DataSourceInterface(abc.ABC):
             log_type: Identifier for the log (e.g., "bank", "cc").
             data_values: A list of lists, where each inner list is a row to write.
         """
+        pass
+
+    @abc.abstractmethod
+    def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
+        """Gets the name (title) of the first visible sheet in a spreadsheet file."""
         pass

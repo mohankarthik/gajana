@@ -6,18 +6,17 @@ import datetime
 import json
 import logging
 import re
-from collections import Counter
-from collections import defaultdict
+from collections import Counter, defaultdict
 from operator import itemgetter
+from typing import Any, Hashable
 
-from categorizer import Categorizer
-from constants import BANK_ACCOUNTS
-from constants import CC_ACCOUNTS
-from constants import DEFAULT_CATEGORY
-from google_data_source import GoogleDataSource
-from transaction_matcher import TransactionMatcher
-from transaction_processor import TransactionProcessor
-from utils import log_and_exit
+from src.categorizer import Categorizer
+from src.constants import BANK_ACCOUNTS, CC_ACCOUNTS, DEFAULT_CATEGORY
+from src.google_data_source import GoogleDataSource
+from src.transaction_matcher import TransactionMatcher
+from src.transaction_processor import TransactionProcessor
+from src.utils import log_and_exit
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def find_latest_transaction_by_account(
-    txns: list[dict],
+    txns: list[dict[Hashable, Any]],
 ) -> dict[str, datetime.datetime]:
     latest: dict[str, datetime.datetime] = {}
     if not txns:
@@ -140,7 +139,9 @@ def run_learn_mode(processor: TransactionProcessor):
         return
 
     logger.info(f"Analyzing {len(categorized_txns)} categorized transactions...")
-    category_patterns = defaultdict(lambda: defaultdict(Counter))
+    category_patterns: dict[str, dict[str, Counter]] = defaultdict(
+        lambda: defaultdict(Counter)
+    )
     for txn in categorized_txns:
         try:
             cat, desc, amt = (

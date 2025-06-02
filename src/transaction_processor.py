@@ -4,20 +4,19 @@ from __future__ import annotations
 import datetime
 import logging
 from operator import itemgetter
-from typing import Any
-from typing import List
-from typing import Optional
-from typing import Tuple
+from typing import Any, List, Optional, Tuple, Hashable
 
 import pandas as pd
 
-from constants import BANK_ACCOUNTS
-from constants import CC_ACCOUNTS
-from constants import DEFAULT_CATEGORY
-from constants import INTERNAL_TXN_KEYS
-from constants import PARSING_CONFIG
-from interfaces import DataSourceInterface
-from utils import log_and_exit
+from src.constants import (
+    BANK_ACCOUNTS,
+    CC_ACCOUNTS,
+    DEFAULT_CATEGORY,
+    INTERNAL_TXN_KEYS,
+    PARSING_CONFIG,
+)
+from src.interfaces import DataSourceInterface
+from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +143,7 @@ class TransactionProcessor:
             return matched_account, None
 
     def _parse_statement_data_with_pandas(
-        self, statement_data: list[list[str]], config: dict
+        self, statement_data: list[list[str]], config: dict[str, Any]
     ) -> Optional[pd.DataFrame]:
         """Parses statement data (list of lists) using pandas, attempting dynamic header detection."""
         if not statement_data:
@@ -235,7 +234,7 @@ class TransactionProcessor:
             return None  # Return None on parsing failure
 
     def _standardize_parsed_df(
-        self, df: pd.DataFrame, config: dict, account_name: str
+        self, df: pd.DataFrame, config: dict[str, Any], account_name: str
     ) -> Optional[pd.DataFrame]:
         """Standardizes column names, parses dates, and calculates amount."""
         if df is None or df.empty:
@@ -320,7 +319,7 @@ class TransactionProcessor:
             if key in df.columns:
                 final_cols_data[key] = df[key]
             else:
-                default_value = None
+                default_value: Any = None
                 if key == "category":
                     default_value = None
                 elif key == "remarks":
@@ -384,7 +383,7 @@ class TransactionProcessor:
                     logger.warning(
                         f"Could not parse date string with any provided format or inference: '{cleaned_str}'"
                     )
-                    return pd.NaT
+                    return None
                 logger.debug(f"Parsed '{cleaned_str}' using pandas inference.")
                 return dt_obj.to_pydatetime()
             else:
@@ -397,7 +396,7 @@ class TransactionProcessor:
             )
             return None
 
-    def get_old_transactions(self, account_type: str) -> list[dict]:
+    def get_old_transactions(self, account_type: str) -> list[dict[Hashable, Any]]:
         logger.info(f"Fetching old {account_type} transactions for processing.")
         raw_data = self.data_source.get_transaction_log_data(account_type)
         if not raw_data or len(raw_data) <= 1:
@@ -452,7 +451,7 @@ class TransactionProcessor:
 
     def get_new_transactions_from_statements(
         self, account_type: str, latest_txn_by_account: dict[str, datetime.datetime]
-    ) -> list[dict]:
+    ) -> list[dict[Hashable, Any]]:
         all_parsed_txns = []
         account_list = BANK_ACCOUNTS if account_type == "bank" else CC_ACCOUNTS
         statement_files = self.data_source.list_statement_file_details()
@@ -461,7 +460,7 @@ class TransactionProcessor:
         )
 
         for file_info in statement_files:
-            file_name, file_id = file_info.get("name", ""), file_info.get("id")
+            file_name, file_id = file_info.name, file_info.id
             if not file_id or account_type not in file_name.lower():
                 continue
 
