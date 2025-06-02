@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from operator import itemgetter
+from typing import Any, Hashable
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +18,9 @@ class TransactionMatcher:
 
     @staticmethod
     def find_new_txns(
-        old_txns: list[dict], all_potential_txns: list[dict]
-    ) -> list[dict]:
+        old_txns: list[dict[Hashable, Any]],
+        all_potential_txns: list[dict[Hashable, Any]],
+    ) -> list[dict[Hashable, Any]]:
         """
         Identifies transactions present in all_potential_txns but not in old_txns.
 

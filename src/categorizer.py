@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Hashable
 
-from constants import DEFAULT_CATEGORY, MATCHERS_FILE_PATH
-from utils import log_and_exit
+from src.constants import DEFAULT_CATEGORY, MATCHERS_FILE_PATH
+from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class Categorizer:
                 e,
             )
 
-    def categorize(self, txns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def categorize(self, txns: list[dict[Hashable, Any]]) -> list[dict[Hashable, Any]]:
         """Categorizes a list of transactions based on loaded rules.
 
         Args:
