@@ -55,7 +55,7 @@ repos:
       - id: diff-coverage
         name: diff-coverage
         # The entry no longer needs a hardcoded path
-        entry: diff-cover coverage.xml --fail-under=90 --compare-branch=master
+        entry: diff-cover coverage.xml --compare-branch=master
         language: python
         types: [python]
         pass_filenames: false

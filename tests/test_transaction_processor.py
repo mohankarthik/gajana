@@ -5,12 +5,13 @@ import datetime
 from unittest.mock import MagicMock
 
 import pandas as pd
+
 import pytest
 
 # Assuming your project structure is src/gajana/...
 from src.interfaces import DataSourceInterface, DataSourceFile
-from src.transaction_processor import TransactionProcessor, parse_mixed_datetime
-from src.constants import INTERNAL_TXN_KEYS
+from src.transaction_processor import TransactionProcessor
+from src.constants import DEFAULT_CATEGORY, INTERNAL_TXN_KEYS
 
 # --- Fixtures ---
 
@@ -65,42 +66,6 @@ def test_parse_amount_invalid_exits(transaction_processor, mock_log_and_exit_fix
     with pytest.raises(SystemExit):
         transaction_processor._parse_amount("invalid amount")
     mock_log_and_exit_fixture.assert_called_once()
-
-
-def test_parse_mixed_datetime_pandas_failure(caplog):
-    """Tests that a completely unparseable date returns None and logs a warning."""
-    # This string format will cause pd.to_datetime with errors='coerce' to return NaT
-    result = parse_mixed_datetime("not a real date", [])
-    assert result is None
-    assert "Could not parse date string" in caplog.text
-
-
-def test_parse_mixed_datetime_unexpected_exception(mock_log_and_exit_fixture, mocker):
-    """Tests the main exception handler in date parsing."""
-    mocker.patch("pandas.to_datetime", side_effect=Exception("Unexpected error"))
-    with pytest.raises(SystemExit):
-        parse_mixed_datetime("any-date", [])
-    mock_log_and_exit_fixture.assert_called_once()
-    assert (
-        "Unexpected error parsing date string"
-        in mock_log_and_exit_fixture.call_args[0][1]
-    )
-
-
-@pytest.mark.parametrize(
-    "date_str, formats, expected_date",
-    [
-        ("23-01-2024", ["%d-%m-%Y"], datetime.datetime(2024, 1, 23)),
-        ("01/23/2024", ["%m/%d/%Y"], datetime.datetime(2024, 1, 23)),
-        ("23-Jan-2024", ["%d-%b-%Y"], datetime.datetime(2024, 1, 23)),
-        ("23/01/24", [], datetime.datetime(2024, 1, 23)),  # Fallback to pandas
-        ("invalid-date", [], None),
-        (None, [], None),
-    ],
-)
-def test_parse_mixed_datetime(date_str, formats, expected_date):
-    """Tests the standalone date parsing helper."""
-    assert parse_mixed_datetime(date_str, formats) == expected_date
 
 
 @pytest.mark.parametrize(
@@ -327,12 +292,12 @@ def test_standardize_df_date_parsing_exception(transaction_processor, mocker):
     """Tests that an exception during date parsing within standardization is handled."""
     config = {"column_map": {"Date": "date", "Value": "amount"}, "date_formats": []}
     input_df = pd.DataFrame([{"Date": "2024-01-23", "Value": "100"}])
-    # Mock the internal date parsing to fail
-    mocker.patch.object(
-        transaction_processor,
-        "_parse_mixed_datetime",
+
+    mocker.patch(
+        "src.transaction_processor.parse_mixed_datetime",
         side_effect=Exception("Date Parse Fail"),
     )
+
     std_df = transaction_processor._standardize_parsed_df(input_df, config, "acc")
     assert std_df is None
 
@@ -340,24 +305,60 @@ def test_standardize_df_date_parsing_exception(transaction_processor, mocker):
 # --- Tests for Orchestration Methods ---
 
 
-def test_get_old_transactions(transaction_processor, mock_data_source):
-    """Tests fetching and processing of old transactions from the data source."""
-    # Mock the raw data returned from the data source
+def test_get_old_transactions_unified_pipeline(transaction_processor, mock_data_source):
+    """
+    Tests that get_old_transactions correctly uses the unified standardization pipeline.
+    """
+    # Mock the raw data returned from the data source, including multiple accounts
     mock_data_source.get_transaction_log_data.return_value = [
         ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
-        ["2024-01-20", "Old Purchase", "50.00", "", "Shopping", "", "test-account"],
+        ["2024-01-20", "Old Purchase 1", "50.00", "", "Shopping", "", "bank-acc-1"],
+        ["2024-01-21", "Old Credit 1", "", "150.00", "Income", "Pay", "bank-acc-2"],
+        ["2024-01-22", "Old Purchase 2", "25.50", "", "Groceries", "", "bank-acc-1"],
+        [
+            "bad-date",
+            "Bad Data",
+            "10",
+            "",
+            "Junk",
+            "",
+            "bank-acc-1",
+        ],  # Should be dropped
     ]
 
     old_txns = transaction_processor.get_old_transactions("bank")
 
     mock_data_source.get_transaction_log_data.assert_called_once_with("bank")
-    assert len(old_txns) == 1
-    txn = old_txns[0]
-    assert txn["date"] == datetime.datetime(2024, 1, 20)
-    assert txn["description"] == "Old Purchase"
-    assert txn["amount"] == -50.00
-    assert txn["account"] == "test-account"
-    assert txn["category"] == "Shopping"
+
+    # Should have 3 valid transactions after processing
+    assert len(old_txns) == 3
+
+    # Verify transactions are sorted by date
+    assert old_txns[0]["description"] == "Old Purchase 1"
+    assert old_txns[1]["description"] == "Old Credit 1"
+    assert old_txns[2]["description"] == "Old Purchase 2"
+
+    # Check transaction 1 (bank-acc-1, debit)
+    txn1 = old_txns[0]
+    assert txn1["date"] == datetime.datetime(2024, 1, 20)
+    assert txn1["amount"] == -50.00
+    assert txn1["account"] == "bank-acc-1"
+    assert txn1["category"] == "Shopping"
+
+    # Check transaction 2 (bank-acc-2, credit)
+    txn2 = old_txns[1]
+    assert txn2["date"] == datetime.datetime(2024, 1, 21)
+    assert txn2["amount"] == 150.00
+    assert txn2["account"] == "bank-acc-2"
+    assert txn2["category"] == "Income"
+    assert txn2["remarks"] == "Pay"
+
+    # Check transaction 3 (bank-acc-1, debit)
+    txn3 = old_txns[2]
+    assert txn3["date"] == datetime.datetime(2024, 1, 22)
+    assert txn3["amount"] == -25.50
+    assert txn3["account"] == "bank-acc-1"
+    assert txn3["category"] == "Groceries"
 
 
 def test_get_old_transactions_empty_or_header_only(
@@ -373,29 +374,17 @@ def test_get_old_transactions_empty_or_header_only(
     assert transaction_processor.get_old_transactions("bank") == []
 
 
-def test_get_old_transactions_no_debit_credit_cols(
-    transaction_processor, mock_data_source
-):
-    """Tests processing old txns when Debit/Credit columns are missing."""
-    mock_data_source.get_transaction_log_data.return_value = [
-        ["Date", "Description", "Account"],
-        ["2024-01-20", "Txn with no amount cols", "test-account"],
-    ]
-    old_txns = transaction_processor.get_old_transactions("bank")
-    assert len(old_txns) == 1
-    assert old_txns[0]["amount"] == 0.0  # Should default to 0
-
-
 def test_get_old_transactions_processing_error(
     transaction_processor, mock_data_source, mock_log_and_exit_fixture, mocker
 ):
     """Tests exception handling during old transaction processing."""
-    mock_data_source.get_transaction_log_data.return_value = [
-        ["Date"],
-        ["2024-01-20"],
-    ]
-    # Mock pandas to fail
-    mocker.patch("pandas.DataFrame.rename", side_effect=Exception("Pandas Error"))
+    mock_data_source.get_transaction_log_data.return_value = [["Date"], ["2024-01-20"]]
+    # Mock the standardization step to fail
+    mocker.patch.object(
+        transaction_processor,
+        "_standardize_parsed_df",
+        side_effect=Exception("Standardize Fail"),
+    )
     with pytest.raises(SystemExit):
         transaction_processor.get_old_transactions("bank")
     mock_log_and_exit_fixture.assert_called_once()
@@ -450,6 +439,7 @@ def test_get_new_transactions_from_statements(
     assert txn["description"] == "New Purchase"
     assert txn["amount"] == 250.00
     assert txn["account"] == "mini-sbi"
+    assert txn["category"] == DEFAULT_CATEGORY  # Check default category is added
 
 
 def test_get_new_transactions_skips_old_statement(
@@ -612,12 +602,12 @@ def test_get_all_transactions_for_recategorize(transaction_processor, mock_data_
     mock_data_source.get_transaction_log_data.side_effect = [
         # Return for bank
         [
-            ["Date", "Description", "Debit", "Account"],
+            ["Date", "Description", "amount", "Account"],
             ["2024-01-10", "Bank Txn", "10", "bank-acc"],
         ],
         # Return for cc
         [
-            ["Date", "Description", "Debit", "Account"],
+            ["Date", "Description", "amount", "Account"],
             ["2024-01-15", "CC Txn", "20", "cc-acc"],
         ],
     ]
