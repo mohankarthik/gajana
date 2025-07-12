@@ -34,6 +34,34 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+  - repo: local
+    hooks:
+      - id: pytest-cov
+        name: pytest-cov
+        # The entry no longer needs a hardcoded path
+        entry: pytest tests --cov=src --cov-report=xml --cov-fail-under=85
+        language: python
+        types: [python]
+        pass_filenames: false
+        always_run: true
+        # pre-commit will install these dependencies in a managed environment
+        additional_dependencies:
+          - pytest
+          - pytest-cov
+          - pytest-mock
+          - pandas
+          - google-api-python-client
+          - oauth2client
+      - id: diff-coverage
+        name: diff-coverage
+        # The entry no longer needs a hardcoded path
+        entry: diff-cover coverage.xml --fail-under=90 --compare-branch=master
+        language: python
+        types: [python]
+        pass_filenames: false
+        always_run: true
+        # pre-commit installs diff-cover into the hook's environment
+        additional_dependencies: [diff-cover]
   # - repo: https://github.com/PyCQA/pydocstyle
   #   rev: '6.3.0'
   #   hooks:
