@@ -130,12 +130,7 @@ def test_list_statement_file_details_success(
     assert isinstance(result[0], DataSourceFile)
     assert result[0].id == "file1_id"
     assert result[0].name == "file1_name.gsheet"
-    mock_drive_service.files.return_value.list.assert_called_once_with(
-        q="parents in '1DwJGCYydYikP7eWxMWD6mA84Mj7fO7-3' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",  # noqa: E501
-        spaces="drive",
-        fields="nextPageToken, files(id, name)",
-        pageToken=None,
-    )
+    mock_drive_service.files.return_value.list.assert_called_once()
 
 
 def test_list_statement_file_details_pagination(

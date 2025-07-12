@@ -3,8 +3,7 @@
     "category": "Expense:Automobile",
     "debit": true,
     "description": [
-      "car w",
-      "jagadish",
+      "car",
       "fuel",
       "petrol"
     ]
@@ -101,14 +100,6 @@
     ]
   },
   {
-    "category": "Bills:Laundry",
-    "debit": true,
-    "description": [
-      "/iron",
-      "laundr"
-    ]
-  },
-  {
     "category": "Expense:Personal Care",
     "debit": true,
     "description": [
@@ -165,8 +156,7 @@
     "category": "Income:Rent",
     "debit": false,
     "description": [
-      "cpms",
-      "chethan r"
+      "cpms"
     ]
   },
   {
