@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import wraps
 import logging
 import time
 from typing import Any, List, Optional
@@ -26,6 +27,43 @@ from src.utils import log_and_exit
 logger = logging.getLogger(__name__)
 
 
+def retry_on_gcp_error(max_retries=3, initial_backoff=5):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            self_instance = args[0]
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except GoogleHttpError as e:
+                    if e.resp.status in [429, 500, 503] and attempt < max_retries - 1:
+                        wait_time = initial_backoff * (2**attempt)
+                        logging.warning(
+                            f"API error in {func.__name__}. Retrying in {wait_time}s..."
+                        )
+                        time.sleep(wait_time)
+                    else:
+                        log_and_exit(
+                            self_instance.logger,
+                            f"Final API error in {func.__name__}: {e}",
+                            e,
+                        )
+                except Exception as e:
+                    log_and_exit(
+                        self_instance.logger,
+                        f"Unexpected error in {func.__name__}: {e}",
+                        e,
+                    )
+            log_and_exit(
+                self_instance.logger,
+                f"Function {func.__name__} failed after all retries.",
+            )
+
+        return wrapper
+
+    return decorator
+
+
 class GoogleDataSource(DataSourceInterface):
     """Google Sheets and Drive implementation of the DataSourceInterface.
 
@@ -42,6 +80,7 @@ class GoogleDataSource(DataSourceInterface):
         self.max_retries = max_retries
         self.initial_backoff = initial_backoff
         self.creds = self._get_credential()
+        self.logger = logger
         self.drive_service = self._get_drive_service()
         self.sheets_service = self._get_sheets_service()
 
@@ -128,81 +167,47 @@ class GoogleDataSource(DataSourceInterface):
             )
         return files_details
 
+    @retry_on_gcp_error()
     def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
         """Gets the name (title) of the first visible sheet in a spreadsheet file."""
-        try:
-            spreadsheet_metadata = (
-                self.sheets_service.spreadsheets()
-                .get(
-                    spreadsheetId=file_id,
-                    fields="sheets(properties(title,hidden,sheetId))",
-                )
-                .execute()
+        spreadsheet_metadata = (
+            self.sheets_service.spreadsheets()
+            .get(
+                spreadsheetId=file_id,
+                fields="sheets(properties(title,hidden,sheetId))",
             )
-            sheets = spreadsheet_metadata.get("sheets", [])
-            for sheet in sheets:
-                properties = sheet.get("properties", {})
-                if not properties.get("hidden", False):
-                    title = properties.get("title")
-                    if title:
-                        logger.debug(
-                            f"Found first visible sheet name: '{title}' for file ID: {file_id}"
-                        )
-                        return title
-            logger.warning(f"No visible sheets found for file ID: {file_id}")
-            return None
-        except GoogleHttpError as e:
-            logger.error(
-                f"API error getting sheet metadata for file ID {file_id}: "
-                f"{e.resp.status} - {e.error_details if hasattr(e, 'error_details') else e}",
-                exc_info=True,
-            )
-            return None
-        except Exception as e:
-            log_and_exit(
-                logger,
-                "Unexpected error getting sheet metadata for file ID {file_id}: {e}",
-                e,
-            )
+            .execute()
+        )
+        sheets = spreadsheet_metadata.get("sheets", [])
+        for sheet in sheets:
+            properties = sheet.get("properties", {})
+            if not properties.get("hidden", False):
+                title = properties.get("title")
+                if title:
+                    logger.debug(
+                        f"Found first visible sheet name: '{title}' for file ID: {file_id}"
+                    )
+                    return title
+        logger.warning(f"No visible sheets found for file ID: {file_id}")
         return None
 
+    @retry_on_gcp_error()
     def get_sheet_data(
         self, source_id: str, sheet_name: Optional[str], range_spec: str
     ) -> List[List[Any]]:
         """Fetches raw data from a specific sheet or source using retry logic."""
-        # If sheet_name is part of range_spec, use it directly. Otherwise, construct.
         full_range = f"'{sheet_name}'!{range_spec}" if sheet_name else range_spec
 
-        for attempt in range(self.max_retries):
-            try:
-                logger.debug(
-                    f"Getting sheet data: ID={source_id}, Range='{full_range}', Attempt={attempt+1}"
-                )
-                result = (
-                    self.sheets_service.spreadsheets()
-                    .values()
-                    .get(spreadsheetId=source_id, range=full_range)
-                    .execute()
-                )
-                values = result.get("values", [])
-                logger.debug(f"Successfully got sheet data. Rows: {len(values)}")
-                return values
-            except GoogleHttpError as e:
-                if e.resp.status in [429, 500, 503] and attempt < self.max_retries - 1:
-                    wait_time = self.initial_backoff * (2**attempt)
-                    logger.warning(
-                        f"Sheets API error {e.resp.status}. Retrying get data in {wait_time}s..."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    log_and_exit(
-                        logger,
-                        f"Non-retryable or final Sheets API error getting data: {e}",
-                        e,
-                    )
-            except Exception as e:
-                log_and_exit(logger, f"Unexpected error getting sheet data: {e}", e)
-        return []  # Should not be reached
+        logger.debug(f"Getting sheet data: ID={source_id}, Range='{full_range}'")
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .get(spreadsheetId=source_id, range=full_range)
+            .execute()
+        )
+        values = result.get("values", [])
+        logger.debug(f"Successfully got sheet data. Rows: {len(values)}")
+        return values
 
     def get_transaction_log_data(self, log_type: str) -> List[List[Any]]:
         range_to_fetch = (
@@ -213,10 +218,9 @@ class GoogleDataSource(DataSourceInterface):
         logger.info(
             f"Getting {log_type} transaction log data from Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {range_to_fetch}"
         )
-        return self.get_sheet_data(
-            TRANSACTIONS_SHEET_ID, None, range_to_fetch
-        )  # sheet_name is in range_to_fetch
+        return self.get_sheet_data(TRANSACTIONS_SHEET_ID, None, range_to_fetch)
 
+    @retry_on_gcp_error()
     def append_transactions_to_log(
         self, log_type: str, data_values: List[List[Any]]
     ) -> None:
@@ -233,47 +237,22 @@ class GoogleDataSource(DataSourceInterface):
             f"Sheet: {sheet_name}"
         )
 
-        for attempt in range(self.max_retries):
-            try:
-                body = {"values": data_values}
-                result = (
-                    self.sheets_service.spreadsheets()
-                    .values()
-                    .append(
-                        spreadsheetId=TRANSACTIONS_SHEET_ID,
-                        range=sheet_name,
-                        valueInputOption="USER_ENTERED",
-                        insertDataOption="INSERT_ROWS",
-                        body=body,
-                    )
-                    .execute()
-                )
-                updated_cells = result.get("updates", {}).get("updatedCells", 0)
-                logger.info(
-                    f"Successfully appended {updated_cells} cells to {log_type} log."
-                )
-                return
-            except GoogleHttpError as e:
-                if e.resp.status in [429, 500, 503] and attempt < self.max_retries - 1:
-                    wait_time = self.initial_backoff * (2**attempt)
-                    logger.warning(
-                        f"Sheets API error {e.resp.status}. Retrying append to log in {wait_time}s..."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    log_and_exit(
-                        logger,
-                        f"Non-retryable or final Sheets API error appending to {log_type} log: {e}",
-                        e,
-                    )
-            except Exception as e:
-                log_and_exit(
-                    logger, f"Unexpected error appending to {log_type} log: {e}", e
-                )
-        log_and_exit(
-            logger,
-            f"Failed to append to {log_type} log after {self.max_retries} attempts.",
+        body = {"values": data_values}
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                range=sheet_name,
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body=body,
+            )
+            .execute()
         )
+        updated_cells = result.get("updates", {}).get("updatedCells", 0)
+        logger.info(f"Successfully appended {updated_cells} cells to {log_type} log.")
+        return
 
     def clear_transaction_log_range(self, log_type: str) -> None:
         range_to_clear = (
@@ -281,52 +260,28 @@ class GoogleDataSource(DataSourceInterface):
             if log_type == "bank"
             else CC_TRANSACTIONS_FULL_RANGE
         )
-        # Adjust range for clearing if headers are not to be cleared.
-        # Assuming B3:H means data starts at row 3.
-        data_clear_range = (
-            f"{range_to_clear.split('!')[0]}!B3:H"  # Example: "Bank transactions!B3:H"
-        )
+        data_clear_range = f"{range_to_clear.split('!')[0]}!B3:H"
 
         logger.info(
             f"Clearing {log_type} transaction log data in Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {data_clear_range}"
         )
-        for attempt in range(self.max_retries):
-            try:
-                result = (
-                    self.sheets_service.spreadsheets()
-                    .values()
-                    .clear(
-                        spreadsheetId=TRANSACTIONS_SHEET_ID,
-                        range=data_clear_range,
-                        body={},
-                    )
-                    .execute()
-                )
-                logger.info(
-                    f"Successfully cleared range {result.get('clearedRange', data_clear_range)} for {log_type} log."
-                )
-                return
-            except GoogleHttpError as e:
-                if e.resp.status in [429, 500, 503] and attempt < self.max_retries - 1:
-                    wait_time = self.initial_backoff * (2**attempt)
-                    logger.warning(
-                        f"Sheets API error {e.resp.status}. Retrying clear log in {wait_time}s..."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    log_and_exit(
-                        logger,
-                        f"Non-retryable or final Sheets API error clearing {log_type} log: {e}",
-                        e,
-                    )
-            except Exception as e:
-                log_and_exit(
-                    logger, f"Unexpected error clearing {log_type} log: {e}", e
-                )
-        log_and_exit(
-            logger, f"Failed to clear {log_type} log after {self.max_retries} attempts."
-        )
 
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .clear(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                range=data_clear_range,
+                body={},
+            )
+            .execute()
+        )
+        logger.info(
+            f"Successfully cleared range {result.get('clearedRange', data_clear_range)} for {log_type} log."
+        )
+        return
+
+    @retry_on_gcp_error()
     def write_transactions_to_log(
         self, log_type: str, data_values: List[List[Any]]
     ) -> None:
@@ -334,7 +289,6 @@ class GoogleDataSource(DataSourceInterface):
             logger.info(f"No data to write for {log_type} log.")
             return
 
-        # Data should be written starting from row 3 (B3)
         sheet_name = (
             BANK_TRANSACTIONS_SHEET_NAME
             if log_type == "bank"
@@ -346,44 +300,21 @@ class GoogleDataSource(DataSourceInterface):
             f"Range: {write_range}"
         )
 
-        for attempt in range(self.max_retries):
-            try:
-                body = {"values": data_values}
-                result = (
-                    self.sheets_service.spreadsheets()
-                    .values()
-                    .update(
-                        spreadsheetId=TRANSACTIONS_SHEET_ID,
-                        range=write_range,
-                        valueInputOption="USER_ENTERED",
-                        body=body,
-                    )
-                    .execute()
-                )
-                updated_cells = result.get("updatedCells", 0)
-                logger.info(
-                    f"Successfully wrote {updated_cells} cells to {log_type} log at "
-                    f"{result.get('updatedRange', write_range)}."
-                )
-                return
-            except GoogleHttpError as e:
-                if e.resp.status in [429, 500, 503] and attempt < self.max_retries - 1:
-                    wait_time = self.initial_backoff * (2**attempt)
-                    logger.warning(
-                        f"Sheets API error {e.resp.status}. Retrying write to log in {wait_time}s..."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    log_and_exit(
-                        logger,
-                        f"Non-retryable or final Sheets API error writing to {log_type} log: {e}",
-                        e,
-                    )
-            except Exception as e:
-                log_and_exit(
-                    logger, f"Unexpected error writing to {log_type} log: {e}", e
-                )
-        log_and_exit(
-            logger,
-            f"Failed to write to {log_type} log after {self.max_retries} attempts.",
+        body = {"values": data_values}
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                range=write_range,
+                valueInputOption="USER_ENTERED",
+                body=body,
+            )
+            .execute()
         )
+        updated_cells = result.get("updatedCells", 0)
+        logger.info(
+            f"Successfully wrote {updated_cells} cells to {log_type} log at "
+            f"{result.get('updatedRange', write_range)}."
+        )
+        return

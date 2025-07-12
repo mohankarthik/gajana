@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime
 import logging
 from operator import itemgetter
-from typing import Any, List, Optional, Tuple, Hashable
+from typing import Any, Hashable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -16,41 +16,9 @@ from src.constants import (
     PARSING_CONFIG,
 )
 from src.interfaces import DataSourceInterface
-from src.utils import log_and_exit
+from src.utils import log_and_exit, parse_mixed_datetime
 
 logger = logging.getLogger(__name__)
-
-
-# Helper function for robust date parsing with multiple formats (moved here or keep in a utils.py)
-def parse_mixed_datetime(
-    date_str: Any, formats: List[str]
-) -> Optional[datetime.datetime]:
-    if pd.isna(date_str) or date_str == "":
-        return None
-    try:
-        cleaned_str = str(date_str).strip("' ")
-        parsed_date = None
-        if formats:
-            for fmt in formats:
-                try:
-                    parsed_date = datetime.datetime.strptime(cleaned_str, fmt)
-                    break
-                except ValueError:
-                    continue
-        if not parsed_date:
-            dt_obj = pd.to_datetime(cleaned_str, dayfirst=True, errors="coerce")
-            if pd.isna(dt_obj):
-                logger.warning(
-                    f"Could not parse date string with any format/inference: '{cleaned_str}'"
-                )
-                return None
-            return dt_obj.to_pydatetime()
-        return parsed_date
-    except Exception as e:
-        log_and_exit(
-            logger, f"Unexpected error parsing date string '{date_str}': {e}", e
-        )
-        return None
 
 
 class TransactionProcessor:
@@ -234,7 +202,10 @@ class TransactionProcessor:
             return None  # Return None on parsing failure
 
     def _standardize_parsed_df(
-        self, df: pd.DataFrame, config: dict[str, Any], account_name: str
+        self,
+        df: pd.DataFrame,
+        config: dict[str, Any],
+        account_name: Optional[str] = None,
     ) -> Optional[pd.DataFrame]:
         """Standardizes column names, parses dates, and calculates amount."""
         if df is None or df.empty:
@@ -272,7 +243,7 @@ class TransactionProcessor:
         try:
             # Apply the robust parsing function using the configured formats
             df.loc[:, "date"] = df["date"].apply(
-                lambda x: self._parse_mixed_datetime(x, date_formats)
+                lambda x: parse_mixed_datetime(logger, x, date_formats)
             )
             df.dropna(subset=["date"], inplace=True)  # Modify in place
             if df.empty:
@@ -311,7 +282,9 @@ class TransactionProcessor:
             logger.error("Could not find columns to calculate amount.")
             return None
 
-        df.loc[:, "account"] = account_name  # Use .loc for this assignment too
+        # If an account name is passed, set it for all rows. Otherwise, assume it exists.
+        if account_name:
+            df.loc[:, "account"] = account_name
 
         # --- Select and Order Final Columns ---
         final_cols_data = {}
@@ -321,15 +294,15 @@ class TransactionProcessor:
             else:
                 default_value: Any = None
                 if key == "category":
-                    default_value = None
+                    default_value = DEFAULT_CATEGORY
                 elif key == "remarks":
-                    default_value = None
+                    default_value = ""
                 elif key == "description":
                     default_value = ""
                 elif key == "amount":
                     default_value = 0.0
                 elif key == "account":
-                    default_value = account_name
+                    default_value = account_name if account_name else "Unknown"
                 final_cols_data[key] = (
                     default_value  # This will be a scalar, pandas will broadcast
                 )
@@ -345,102 +318,62 @@ class TransactionProcessor:
         logger.debug(f"Standardized DataFrame shape: {final_df.shape}")
         return final_df if not final_df.empty else None
 
-    def _parse_mixed_datetime(
-        self, date_str: Any, formats: List[str]
-    ) -> Optional[datetime.datetime]:
-        """
-        Attempts to parse a date string using a list of provided formats.
-        Falls back to pandas inference if specific formats fail.
-        """
-        if pd.isna(date_str) or date_str == "":
-            return None
-        try:
-            cleaned_str = str(date_str).strip("' ")
-            parsed_date = None
-
-            # Try explicit formats first
-            if formats:
-                for fmt in formats:
-                    try:
-                        # Use Python's datetime.strptime for explicit format matching
-                        parsed_date = datetime.datetime.strptime(cleaned_str, fmt)
-                        logger.debug(f"Parsed '{cleaned_str}' using format '{fmt}'")
-                        break
-                    except ValueError:
-                        continue
-            else:
-                logger.warning(
-                    "No specific date formats provided, attempting inference only."
-                )
-                pass
-
-            # If specific formats fail or weren't provided, try pandas inference
-            if not parsed_date:
-                # logger.debug(f"Specific formats failed for '{cleaned_str}', trying pandas inference...")
-                # Use dayfirst=True for common Indian formats like dd/mm
-                dt_obj = pd.to_datetime(cleaned_str, dayfirst=True, errors="coerce")
-                if pd.isna(dt_obj):
-                    logger.warning(
-                        f"Could not parse date string with any provided format or inference: '{cleaned_str}'"
-                    )
-                    return None
-                logger.debug(f"Parsed '{cleaned_str}' using pandas inference.")
-                return dt_obj.to_pydatetime()
-            else:
-                return parsed_date
-        except Exception as e:
-            # Log this error if needed
-            logger.error(
-                f"Unexpected error parsing date string '{date_str}': {e}",
-                exc_info=True,
-            )
-            return None
-
     def get_old_transactions(self, account_type: str) -> list[dict[Hashable, Any]]:
+        """
+        Fetches and processes transactions from the main log sheet, using the
+        same robust standardization pipeline as new transactions.
+        """
         logger.info(f"Fetching old {account_type} transactions for processing.")
         raw_data = self.data_source.get_transaction_log_data(account_type)
         if not raw_data or len(raw_data) <= 1:
-            logger.warning(f"No old {account_type} data from data source.")
+            logger.warning(f"No old {account_type} data found in data source.")
             return []
+
         try:
             header = raw_data[0]
             df = pd.DataFrame(raw_data[1:], columns=header)
-            df.loc[:, "Date"] = pd.to_datetime(
-                df["Date"], format="%Y-%m-%d", errors="coerce"
-            )
-            if "Credit" in df.columns and "Debit" in df.columns:
-                df.loc[:, "amount"] = df.apply(
-                    lambda r: self._parse_amount(r["Credit"])
-                    - self._parse_amount(r["Debit"]),
-                    axis=1,
-                )
-            else:
-                df.loc[:, "amount"] = 0.0
-            rename_map = {
-                "Date": "date",
-                "Description": "description",
-                "Category": "category",
-                "Remarks": "remarks",
-                "Account": "account",
+            df.replace("", pd.NA, inplace=True)
+            df.dropna(how="all", inplace=True)
+
+            if df.empty:
+                return []
+
+            # A generic config that maps the log sheet columns to internal keys
+            log_config = {
+                "column_map": {
+                    "Date": "date",
+                    "Description": "description",
+                    "Category": "category",
+                    "Remarks": "remarks",
+                    "Account": "account",
+                    "Debit": "debit",
+                    "Credit": "credit",
+                },
+                "date_formats": ["%Y-%m-%d"],
             }
-            df.rename(
-                columns={k: v for k, v in rename_map.items() if k in df.columns},
-                inplace=True,
-            )
-            for key in INTERNAL_TXN_KEYS:
-                if key not in df.columns:
-                    df[key] = None
-            df = df[INTERNAL_TXN_KEYS].dropna(subset=["date"])
-            txns = df.to_dict("records")
+
+            # Since the log contains multiple accounts, we don't pass a single account_name.
+            # _standardize_parsed_df will use the 'Account' column from the sheet.
+            standardized_df = self._standardize_parsed_df(df, log_config)
+
+            if standardized_df is None or standardized_df.empty:
+                logger.warning(
+                    f"Standardization of old {account_type} txns resulted in empty data."
+                )
+                return []
+
+            txns = standardized_df.to_dict("records")
             for txn in txns:
                 if isinstance(txn["date"], pd.Timestamp):
                     txn["date"] = txn["date"].to_pydatetime()
+
             txns.sort(key=itemgetter("date", "account", "amount", "description"))
             if txns:
                 logger.info(
                     f"Processed {len(txns)} old {account_type} txns. Latest: {txns[-1]['date']:%Y-%m-%d}"
                 )
             return txns
+
         except Exception as e:
             log_and_exit(
                 logger,

@@ -226,9 +226,10 @@ def test_get_first_sheet_name_api_error(
     mock_sheets_service.spreadsheets.return_value.get.return_value.execute.side_effect = GoogleHttpError(
         resp=mock_response, content=b"Not Found"
     )
-    result = gds.get_first_sheet_name_from_file("test_file_id")
+    result = None
+    with pytest.raises(SystemExit):
+        result = gds.get_first_sheet_name_from_file("test_file_id")
     assert result is None
-    assert "API error getting sheet metadata" in caplog.text  # Check log message
 
 
 def test_get_sheet_data_retry_logic(
@@ -260,7 +261,7 @@ def test_get_sheet_data_retry_logic(
         mock_sheets_service.spreadsheets.return_value.values.return_value.get.call_count
         == 2
     )
-    time.sleep.assert_called_once_with(0.01 * (2**0))  # Check backoff
+    time.sleep.assert_called_once_with(5 * (2**0))  # Check backoff
 
 
 def test_get_sheet_data_final_failure(
@@ -283,7 +284,7 @@ def test_get_sheet_data_final_failure(
         gds.get_sheet_data("test_id", "Sheet1", "A1:B2")
     mock_log_and_exit_fixture.assert_called_once()
     args, kwargs = mock_log_and_exit_fixture.call_args
-    assert "Non-retryable or final Sheets API error getting data" in args[1]
+    assert "Final API error in get_sheet_data" in args[1]
 
 
 # --- Tests for append_transactions_to_log ---

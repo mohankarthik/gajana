@@ -1,13 +1,14 @@
 # tests/test_utils.py
 from __future__ import annotations
 
+import datetime
 import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 # Assuming utils.py is in gajana package (src/gajana/utils.py)
-from src.utils import log_and_exit
+from src.utils import log_and_exit, parse_mixed_datetime
 
 
 @pytest.fixture
@@ -15,6 +16,12 @@ def mock_logger():
     """Fixture to create a mock logger instance."""
     logger = MagicMock(spec=logging.Logger)
     return logger
+
+
+@pytest.fixture(autouse=True)
+def mock_log_and_exit_fixture(mocker):
+    """Mocks the log_and_exit utility to prevent tests from exiting."""
+    return mocker.patch("src.utils.log_and_exit", side_effect=SystemExit)
 
 
 def test_log_and_exit_no_exception(mock_logger):
@@ -63,3 +70,40 @@ def test_log_and_exit_default_exit_code(mock_logger):
         mock_sys_exit.assert_called_once_with(1)
 
     mock_logger.critical.assert_called_once_with(test_message)
+
+
+def test_parse_mixed_datetime_pandas_failure(mock_logger, caplog):
+    """Tests that a completely unparseable date returns None and logs a warning."""
+    # This string format will cause pd.to_datetime with errors='coerce' to return NaT
+    result = parse_mixed_datetime(mock_logger, "not a real date", [])
+    assert result is None
+
+
+def test_parse_mixed_datetime_unexpected_exception(
+    mock_logger, mock_log_and_exit_fixture, mocker
+):
+    """Tests the main exception handler in date parsing."""
+    mocker.patch("pandas.to_datetime", side_effect=Exception("Unexpected error"))
+    with pytest.raises(SystemExit):
+        parse_mixed_datetime(mock_logger, "any-date", [])
+    mock_log_and_exit_fixture.assert_called_once()
+    assert (
+        "Unexpected error parsing date string"
+        in mock_log_and_exit_fixture.call_args[0][1]
+    )
+
+
+@pytest.mark.parametrize(
+    "date_str, formats, expected_date",
+    [
+        ("23-01-2024", ["%d-%m-%Y"], datetime.datetime(2024, 1, 23)),
+        ("01/23/2024", ["%m/%d/%Y"], datetime.datetime(2024, 1, 23)),
+        ("23-Jan-2024", ["%d-%b-%Y"], datetime.datetime(2024, 1, 23)),
+        ("23/01/24", [], datetime.datetime(2024, 1, 23)),  # Fallback to pandas
+        ("invalid-date", [], None),
+        (None, [], None),
+    ],
+)
+def test_parse_mixed_datetime(mock_logger, date_str, formats, expected_date):
+    """Tests the standalone date parsing helper."""
+    assert parse_mixed_datetime(mock_logger, date_str, formats) == expected_date
