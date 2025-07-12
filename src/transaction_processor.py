@@ -132,7 +132,7 @@ class TransactionProcessor:
                     )
 
             logger.warning(
-                f"Could not parse standard date pattern from date part '{date_part}' in filename '{filename}'"
+                f"Could not parse standard date pattern from date part in filename '{filename}'"
             )
             return (
                 matched_account,
