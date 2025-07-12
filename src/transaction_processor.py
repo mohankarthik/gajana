@@ -61,28 +61,25 @@ class TransactionProcessor:
         matched_account = None
         filename_lower = filename.lower()
         for acc in account_list:
-            if acc.lower() in filename_lower:  # Case-insensitive match
+            if acc.lower() in filename_lower:
                 matched_account = acc
                 break
         if not matched_account:
             return None, None
 
-        # Date extraction logic (adjust based on your consistent naming convention)
         try:
-            # Remove extensions like .csv, .gsheet etc. before splitting
+            # Remove extensions
             base_name = filename_lower.split(".")[0]
             parts = base_name.split("-")
 
-            # Try parsing common date patterns found in statement names
             if account_type == "bank":
-                date_part = parts[-1].strip()  # Get last part
-                if len(date_part) == 4 and date_part.isdigit():  # YYYY
+                date_part = parts[-1].strip()
+                if len(date_part) == 4 and date_part.isdigit():
                     year = int(date_part)
                     return matched_account, datetime.datetime(year, 12, 31)
-                # Add other bank date patterns if needed
             else:  # cc
                 year_part = parts[-2].strip()
-                month_part = parts[-1].strip()  # Get last part
+                month_part = parts[-1].strip()
                 if (
                     len(year_part) == 4
                     and year_part.isdigit()
@@ -105,7 +102,7 @@ class TransactionProcessor:
             return (
                 matched_account,
                 None,
-            )  # Return account but no date if pattern unknown
+            )
         except (IndexError, ValueError, TypeError) as e:
             logger.warning(f"Error parsing date from filename '{filename}': {e}")
             return matched_account, None
@@ -123,13 +120,11 @@ class TransactionProcessor:
 
         # Attempt to find the header row index within the fetched data
         try:
-            max_check_rows = min(30, len(statement_data))  # Check first 30 rows
+            # Check first 30 rows
+            max_check_rows = min(30, len(statement_data))
             for i in range(max_check_rows):
-                row_content_lower = " ".join(
-                    map(str, statement_data[i])
-                ).lower()  # Join row elements for searching
+                row_content_lower = " ".join(map(str, statement_data[i])).lower()
                 for pattern in header_patterns:
-                    # Check if most keywords from a pattern exist in the row
                     matches = sum(
                         1
                         for header_word in pattern
@@ -149,7 +144,8 @@ class TransactionProcessor:
                     f"Could not reliably detect header row based on patterns: {header_patterns}. "
                     f"Attempting parse assuming header is first row."
                 )
-                best_header_row_index = 0  # Default to first row if detection fails
+                # Default to first row if detection fails
+                best_header_row_index = 0
 
         except Exception as e:
             logger.error(
@@ -195,11 +191,8 @@ class TransactionProcessor:
                 return None
             return df
         except Exception as e:
-            logger.error(
-                f"Pandas DataFrame creation/cleaning failed: {e}",
-                exc_info=True,
-            )
-            return None  # Return None on parsing failure
+            log_and_exit(logger, f"Pandas DataFrame creation/cleaning failed: {e}", e)
+            return None
 
     def _standardize_parsed_df(
         self,
@@ -211,11 +204,11 @@ class TransactionProcessor:
         if df is None or df.empty:
             return None
 
-        # Make a copy to avoid SettingWithCopyWarning on the original df passed in
+        # Make a copy
         df = df.copy()
 
         column_map = config["column_map"]
-        date_formats = config.get("date_formats", [])  # Get configured date formats
+        date_formats = config.get("date_formats", [])
         amount_sign_col = config.get("amount_sign_col")
         debit_value = str(config.get("debit_value", "")).lower()
 
@@ -233,26 +226,27 @@ class TransactionProcessor:
                 logger.warning(
                     f"Expected column '{source_key}' not found for config {config}. Skipping."
                 )
-        df.rename(columns=rename_dict, inplace=True)  # Modify in place on the copy
+        df.rename(columns=rename_dict, inplace=True)
         logger.debug(f"Columns after rename: {df.columns.tolist()}")
 
         # --- Date Parsing ---
         if "date" not in df.columns:
-            logger.error("Standardized 'date' column not found. Cannot proceed.")
+            log_and_exit(
+                logger, "Standardized 'date' column not found. Cannot proceed."
+            )
             return None
         try:
-            # Apply the robust parsing function using the configured formats
             df.loc[:, "date"] = df["date"].apply(
                 lambda x: parse_mixed_datetime(logger, x, date_formats)
             )
-            df.dropna(subset=["date"], inplace=True)  # Modify in place
+            df.dropna(subset=["date"], inplace=True)
             if df.empty:
                 logger.warning(
                     "DataFrame empty after date parsing/dropping failed dates."
                 )
                 return None
         except Exception as e:
-            logger.error(f"Error applying custom date parsing: {e}", exc_info=True)
+            log_and_exit(logger, f"Error applying custom date parsing: {e}", e)
             return None
 
         # --- Amount Calculation ---
@@ -303,9 +297,7 @@ class TransactionProcessor:
                     default_value = 0.0
                 elif key == "account":
                     default_value = account_name if account_name else "Unknown"
-                final_cols_data[key] = (
-                    default_value  # This will be a scalar, pandas will broadcast
-                )
+                final_cols_data[key] = default_value
                 if key not in ["category", "remarks"]:
                     logger.warning(
                         f"Internal key '{key}' missing. Added default: {default_value}"
@@ -352,8 +344,6 @@ class TransactionProcessor:
                 "date_formats": ["%Y-%m-%d"],
             }
 
-            # Since the log contains multiple accounts, we don't pass a single account_name.
-            # _standardize_parsed_df will use the 'Account' column from the sheet.
             standardized_df = self._standardize_parsed_df(df, log_config)
 
             if standardized_df is None or standardized_df.empty:
@@ -423,16 +413,14 @@ class TransactionProcessor:
             config = PARSING_CONFIG[config_key]
 
             # Use file_id (which is spreadsheet_id) and get first sheet name for data fetching
-            first_sheet_name = self.data_source.get_first_sheet_name_from_file(
-                file_id
-            )  # Method from GoogleDataSource
+            first_sheet_name = self.data_source.get_first_sheet_name_from_file(file_id)
             if not first_sheet_name:
                 logger.warning(f"Cannot get sheet name for {file_id}. Skipping.")
                 continue
 
             raw_statement_data = self.data_source.get_sheet_data(
                 file_id, first_sheet_name, "A:Z"
-            )  # Fetch all
+            )
             if not raw_statement_data:
                 logger.warning(f"No data from statement Sheet '{file_name}'. Skipping.")
                 continue
@@ -445,7 +433,7 @@ class TransactionProcessor:
                         logger.warning(f"Standardization empty for '{file_name}'.")
                         continue
                     file_txns = std_df.to_dict("records")
-                    for txn in file_txns:  # Ensure Python datetime
+                    for txn in file_txns:
                         if isinstance(txn["date"], pd.Timestamp):
                             txn["date"] = txn["date"].to_pydatetime()
                         if not isinstance(txn["date"], datetime.datetime):

@@ -181,7 +181,9 @@ def test_parse_statement_data_pandas_creation_fails(transaction_processor, mocke
     mocker.patch("pandas.DataFrame", side_effect=Exception("Pandas Error"))
     config = {"header_patterns": []}
     raw_data = [["Col1"], ["Val1"]]
-    df = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
+    df = None
+    with pytest.raises(SystemExit):
+        df = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
     assert df is None
 
 
@@ -297,8 +299,9 @@ def test_standardize_df_date_parsing_exception(transaction_processor, mocker):
         "src.transaction_processor.parse_mixed_datetime",
         side_effect=Exception("Date Parse Fail"),
     )
-
-    std_df = transaction_processor._standardize_parsed_df(input_df, config, "acc")
+    std_df = None
+    with pytest.raises(SystemExit):
+        std_df = transaction_processor._standardize_parsed_df(input_df, config, "acc")
     assert std_df is None
 
 

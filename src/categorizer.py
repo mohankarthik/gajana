@@ -115,42 +115,42 @@ class Categorizer:
                 matcher_descriptions = matcher.get("description", [])
                 use_regex = matcher.get("use_regex", False)
 
-                if isinstance(matcher_descriptions, list):
-                    for pattern in matcher_descriptions:
-                        pattern_str = str(pattern)
-                        match_found = False
-                        try:
-                            if use_regex and re.search(
-                                pattern_str, txn_description, re.IGNORECASE
-                            ):
-                                match_found = True
-                            elif pattern_str.lower() in txn_description:
-                                match_found = True
-                        except re.error as e:
-                            log_and_exit(
-                                logger,
-                                f"Invalid regex pattern in matcher: '{pattern_str}'. Error: {e}."
-                                f"Matcher: {matcher}",
-                                e,
-                            )
-
-                        if match_found:
-                            category_to_set = matcher.get("category", DEFAULT_CATEGORY)
-                            assert isinstance(
-                                category_to_set, str
-                            ), f"Invalid category type in matcher: {matcher}"
-                            txn["category"] = category_to_set
-                            found_match = True
-                            logger.debug(
-                                f"Matched txn desc '{txn['description']}' to category '{category_to_set}' "
-                                f"using pattern '{pattern_str}'"
-                            )
-                            break
-                else:
+                if not isinstance(matcher_descriptions, list):
                     log_and_exit(
                         logger,
                         f"Matcher has invalid 'description' format (expected list): {matcher}",
                     )
+
+                for pattern in matcher_descriptions:
+                    pattern_str = str(pattern)
+                    match_found = False
+                    try:
+                        if use_regex and re.search(
+                            pattern_str, txn_description, re.IGNORECASE
+                        ):
+                            match_found = True
+                        elif pattern_str.lower() in txn_description:
+                            match_found = True
+                    except re.error as e:
+                        log_and_exit(
+                            logger,
+                            f"Invalid regex pattern in matcher: '{pattern_str}'. Error: {e}."
+                            f"Matcher: {matcher}",
+                            e,
+                        )
+
+                    if match_found:
+                        category_to_set = matcher.get("category", DEFAULT_CATEGORY)
+                        assert isinstance(
+                            category_to_set, str
+                        ), f"Invalid category type in matcher: {matcher}"
+                        txn["category"] = category_to_set
+                        found_match = True
+                        logger.debug(
+                            f"Matched txn desc '{txn['description']}' to category '{category_to_set}' "
+                            f"using pattern '{pattern_str}'"
+                        )
+                        break
 
                 if found_match:
                     break
