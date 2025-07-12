@@ -48,6 +48,7 @@ def mock_log_and_exit_fixture(mocker):
         ("150.00 Dr", -150.00),
         ("₹250.75", 250.75),
         ("1.23E+2", 123.0),  # Scientific notation
+        ("50.0%", 50.0),  # Percentage
         (None, 0.0),
         ("", 0.0),
         (pd.NA, 0.0),
@@ -126,7 +127,12 @@ def test_parse_mixed_datetime(date_str, formats, expected_date):
     ],
 )
 def test_get_account_and_date_from_filename(
-    transaction_processor, filename, account_list, acc_type, expected_acc, expected_date
+    transaction_processor,
+    filename,
+    account_list,
+    acc_type,
+    expected_acc,
+    expected_date,
 ):
     """Tests filename parsing for account and date."""
     account, date = transaction_processor._get_account_and_date_from_filename(
@@ -157,7 +163,9 @@ def test_parse_statement_data_with_pandas_header_detection(transaction_processor
     assert df.iloc[0]["Amount"] == "100.00"
 
 
-def test_parse_statement_data_with_pandas_special_handling_tilde(transaction_processor):
+def test_parse_statement_data_with_pandas_special_handling_tilde(
+    transaction_processor,
+):
     """Tests the special handling for HDFC tilde-separated data."""
     config = {
         "special_handling": "hdfc_cc_tilde",
@@ -167,11 +175,13 @@ def test_parse_statement_data_with_pandas_special_handling_tilde(transaction_pro
         ["Header1~Header2"],  # some other header
         ["Date~Description~Amount"],  # The actual header
         ["23-Jan-2024~Purchase~1000"],
+        ["24-Jan-2024~Refund~500~Extra"],  # Malformed row, should be skipped
+        [""],  # Empty row, should be skipped
     ]
     df = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
     assert df is not None
     assert list(df.columns) == ["Date", "Description", "Amount"]
-    assert len(df) == 1
+    assert len(df) == 1  # Only the valid row should be parsed
     assert df.iloc[0]["Description"] == "Purchase"
 
 
@@ -188,16 +198,26 @@ def test_parse_statement_data_with_pandas_no_header_found(
     assert len(df) == 1
 
 
-def test_parse_statement_data_pandas_creation_fails(
-    transaction_processor, mock_log_and_exit_fixture, mocker
-):
+def test_parse_statement_data_empty_input(transaction_processor):
+    """Tests that empty raw data returns None."""
+    assert transaction_processor._parse_statement_data_with_pandas([], {}) is None
+
+
+def test_parse_statement_data_results_in_empty_df(transaction_processor):
+    """Tests that data resulting in an empty DataFrame after cleaning returns None."""
+    config = {"header_patterns": [["Header"]]}
+    raw_data = [["Header"], [pd.NA], [""]]  # All data rows are empty
+    df = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
+    assert df is None
+
+
+def test_parse_statement_data_pandas_creation_fails(transaction_processor, mocker):
     """Tests that an exception during DataFrame creation is handled."""
     mocker.patch("pandas.DataFrame", side_effect=Exception("Pandas Error"))
     config = {"header_patterns": []}
     raw_data = [["Col1"], ["Val1"]]
     df = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
     assert df is None
-    # Note: your code logs an error but doesn't exit here, which is fine. This test confirms it returns None.
 
 
 def test_standardize_parsed_df_empty_or_none_input(transaction_processor):
@@ -262,6 +282,27 @@ def test_standardize_parsed_df(transaction_processor):
     assert std_df.iloc[1]["amount"] == 50.25
 
 
+def test_standardize_parsed_df_with_amount_sign_col(transaction_processor):
+    """Tests standardization using amount_sign_col for debits."""
+    config = {
+        "column_map": {"Date": "date", "Value": "amount", "Type": "sign"},
+        "date_formats": [],
+        "amount_sign_col": "sign",
+        "debit_value": "dr",
+    }
+    input_df = pd.DataFrame(
+        [
+            {"Date": "2024-01-23", "Value": "100", "Type": "dr"},
+            {"Date": "2024-01-24", "Value": "200", "Type": "cr"},
+        ]
+    )
+    std_df = transaction_processor._standardize_parsed_df(input_df, config, "acc")
+    assert std_df is not None
+    assert len(std_df) == 2
+    assert std_df.iloc[0]["amount"] == -100.0
+    assert std_df.iloc[1]["amount"] == 200.0
+
+
 def test_standardize_parsed_df_no_amount_cols(transaction_processor, caplog):
     """Tests standardization when no amount columns are found."""
     config = {"column_map": {"Date": "date"}, "date_formats": []}
@@ -280,6 +321,20 @@ def test_standardize_parsed_df_missing_internal_key(transaction_processor, caplo
     assert "description" in std_df.columns
     assert std_df.iloc[0]["description"] == ""  # Default value
     assert "Internal key 'description' missing" in caplog.text
+
+
+def test_standardize_df_date_parsing_exception(transaction_processor, mocker):
+    """Tests that an exception during date parsing within standardization is handled."""
+    config = {"column_map": {"Date": "date", "Value": "amount"}, "date_formats": []}
+    input_df = pd.DataFrame([{"Date": "2024-01-23", "Value": "100"}])
+    # Mock the internal date parsing to fail
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_mixed_datetime",
+        side_effect=Exception("Date Parse Fail"),
+    )
+    std_df = transaction_processor._standardize_parsed_df(input_df, config, "acc")
+    assert std_df is None
 
 
 # --- Tests for Orchestration Methods ---
@@ -318,11 +373,27 @@ def test_get_old_transactions_empty_or_header_only(
     assert transaction_processor.get_old_transactions("bank") == []
 
 
+def test_get_old_transactions_no_debit_credit_cols(
+    transaction_processor, mock_data_source
+):
+    """Tests processing old txns when Debit/Credit columns are missing."""
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["Date", "Description", "Account"],
+        ["2024-01-20", "Txn with no amount cols", "test-account"],
+    ]
+    old_txns = transaction_processor.get_old_transactions("bank")
+    assert len(old_txns) == 1
+    assert old_txns[0]["amount"] == 0.0  # Should default to 0
+
+
 def test_get_old_transactions_processing_error(
     transaction_processor, mock_data_source, mock_log_and_exit_fixture, mocker
 ):
     """Tests exception handling during old transaction processing."""
-    mock_data_source.get_transaction_log_data.return_value = [["Date"], ["2024-01-20"]]
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["Date"],
+        ["2024-01-20"],
+    ]
     # Mock pandas to fail
     mocker.patch("pandas.DataFrame.rename", side_effect=Exception("Pandas Error"))
     with pytest.raises(SystemExit):
@@ -414,6 +485,31 @@ def test_get_new_transactions_skips_no_config(
     new_txns = transaction_processor.get_new_transactions_from_statements("bank", {})
     assert new_txns == []
     assert "No parsing config for 'bank-config'" in caplog.text
+
+
+def test_get_new_transactions_file_processing_fails(
+    transaction_processor, mock_data_source, mock_log_and_exit_fixture, mocker
+):
+    """Tests that a failure to process one sheet doesn't stop the whole process and calls log_and_exit."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["mini-sbi"])
+    mocker.patch("src.transaction_processor.PARSING_CONFIG", {"bank-sbi": {}})
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="file123", name="bank-mini-sbi-2024.csv")
+    ]
+    # Mock a failure deep inside the processing loop
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_statement_data_with_pandas",
+        side_effect=Exception("Parse Fail"),
+    )
+
+    with pytest.raises(SystemExit):
+        transaction_processor.get_new_transactions_from_statements("bank", {})
+    mock_log_and_exit_fixture.assert_called_once()
+    assert (
+        "Failed to process sheet 'bank-mini-sbi-2024.csv'"
+        in mock_log_and_exit_fixture.call_args[0][1]
+    )
 
 
 def test_format_txns_for_storage(transaction_processor):
