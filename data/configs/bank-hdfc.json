@@ -1,0 +1,12 @@
+{
+    "header_patterns": [
+        ["Date", "Narration", "Withdrawal Amt.", "Deposit Amt."]
+    ],
+    "column_map": {
+        "Date": "date",
+        "Narration": "description",
+        "Withdrawal Amt.": "debit",
+        "Deposit Amt.": "credit"
+    },
+    "date_formats": ["%d/%m/%y"]
+}

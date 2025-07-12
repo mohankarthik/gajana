@@ -1,0 +1,12 @@
+{
+    "header_patterns": [
+        ["Tran Date", "CHQNO", "PARTICULARS", "DR", "CR", "BAL", "SOL"]
+    ],
+    "column_map": {
+        "Tran Date": "date",
+        "PARTICULARS": "description",
+        "DR": "debit",
+        "CR": "credit"
+    },
+    "date_formats": ["%d-%m-%Y"]
+}
