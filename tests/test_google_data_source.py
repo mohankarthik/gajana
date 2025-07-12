@@ -238,9 +238,7 @@ def test_get_sheet_data_retry_logic(
     mock_log_and_exit_fixture,
     mocker,
 ):
-    gds = GoogleDataSource(
-        max_retries=2, initial_backoff=0.01
-    )  # Faster retries for test
+    gds = GoogleDataSource()
     _, mock_sheets_service = mock_google_services
 
     mock_response_error = MagicMock()
@@ -270,7 +268,7 @@ def test_get_sheet_data_final_failure(
     mock_log_and_exit_fixture,
     mocker,
 ):
-    gds = GoogleDataSource(max_retries=1, initial_backoff=0.01)
+    gds = GoogleDataSource()
     _, mock_sheets_service = mock_google_services
     mock_response_error = MagicMock()
     mock_response_error.status = 500

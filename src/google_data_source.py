@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 
 def retry_on_gcp_error(max_retries=3, initial_backoff=5):
+    """Decorator that retries the method on GCP error."""
+
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -70,15 +72,8 @@ class GoogleDataSource(DataSourceInterface):
     Handles all direct communication with Google APIs.
     """
 
-    def __init__(self, max_retries: int = 3, initial_backoff: int = 5) -> None:
-        """Constructor.
-
-        Args:
-            max_retries (int, optional): Defaults to 3.
-            initial_backoff (int, optional): Defaults to 5.
-        """
-        self.max_retries = max_retries
-        self.initial_backoff = initial_backoff
+    def __init__(self) -> None:
+        """Constructor."""
         self.creds = self._get_credential()
         self.logger = logger
         self.drive_service = self._get_drive_service()
@@ -131,7 +126,7 @@ class GoogleDataSource(DataSourceInterface):
         """Lists all the statement files with details.
 
         Returns:
-            List[DataSourceFile]: _description_
+            List[DataSourceFile]: List of statement files.
         """
         files_details: List[DataSourceFile] = []
         page_token = None

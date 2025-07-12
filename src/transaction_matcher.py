@@ -78,7 +78,7 @@ class TransactionMatcher:
                     and potential_id not in processed_potential_ids
                 ):
                     new_txns.append(txn)
-                    processed_potential_ids.add(potential_id)  # Add to processed set
+                    processed_potential_ids.add(potential_id)
                 else:
                     logger.debug(f"Skipping duplicate/old transaction: {potential_id}")
 

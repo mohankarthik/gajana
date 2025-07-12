@@ -9,7 +9,6 @@ from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
 
-# --- Configuration Loading ---
 CONFIG_DIR = "data/configs"
 
 
@@ -93,5 +92,4 @@ MATCHERS_FILE_PATH = "data/matchers.json"
 DEFAULT_CATEGORY = "Uncategorized"
 
 # --- Parsing Configuration ---
-# This is now loaded dynamically from the data/configs/ directory at startup.
 PARSING_CONFIG = load_parsing_config()

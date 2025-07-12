@@ -67,8 +67,6 @@ def parse_mixed_datetime(
 
         # If specific formats fail or weren't provided, try pandas inference
         if not parsed_date:
-            # logger.debug(f"Specific formats failed for '{cleaned_str}', trying pandas inference...")
-            # Use dayfirst=True for common Indian formats like dd/mm
             dt_obj = pd.to_datetime(cleaned_str, dayfirst=True, errors="coerce")
             if pd.isna(dt_obj):
                 logger_instance.warning(
@@ -80,7 +78,6 @@ def parse_mixed_datetime(
         else:
             return parsed_date
     except Exception as e:
-        # Log this error if needed
         log_and_exit(
             logger_instance,
             f"Unexpected error parsing date string '{date_str}': {e}",
