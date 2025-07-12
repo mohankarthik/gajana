@@ -1,0 +1,14 @@
+{
+    "header_patterns": [
+        ["Date", "Transaction Details", "Amount (INR)", "Debit/Credit"]
+    ],
+    "column_map": {
+        "Date": "date",
+        "Transaction Details": "description",
+        "Amount (INR)": "amount",
+        "Debit/Credit": "type"
+    },
+    "date_formats": ["%d %b %y"],
+    "amount_sign_col": "type",
+    "debit_value": "Debit"
+}

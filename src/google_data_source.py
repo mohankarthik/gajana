@@ -254,6 +254,7 @@ class GoogleDataSource(DataSourceInterface):
         logger.info(f"Successfully appended {updated_cells} cells to {log_type} log.")
         return
 
+    @retry_on_gcp_error()
     def clear_transaction_log_range(self, log_type: str) -> None:
         range_to_clear = (
             BANK_TRANSACTIONS_FULL_RANGE

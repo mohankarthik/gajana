@@ -1,0 +1,23 @@
+{
+    "header_patterns": [
+        [
+            "Transaction type",
+            "Primary / Addon Customer Name",
+            "DATE",
+            "Description",
+            "Feature Reward Points",
+            "AMT",
+            "Debit / Credit"
+        ]
+    ],
+    "column_map": {
+        "DATE": "date",
+        "Description": "description",
+        "AMT": "amount",
+        "Debit / Credit": "type"
+    },
+    "amount_sign_col": "type",
+    "debit_value": "",
+    "date_formats": ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y"],
+    "special_handling": "hdfc_cc_tilde"
+}
