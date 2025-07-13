@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import List
 
 from src.utils import log_and_exit
 
@@ -44,11 +43,14 @@ SCOPES = [
 ]
 SERVICE_ACCOUNT_KEY_FILE = "secrets/google.json"
 
+# --- Database Configuration ---
+DB_FILE_PATH = "backups/gajana.db"
+
 # --- Google Drive Configuration ---
-CSV_FOLDER = ""
+CSV_FOLDER = "1DwJGCYydYikP7eWxMWD6mA84Mj7fO7-3"
 
 # --- Google Sheets Configuration ---
-TRANSACTIONS_SHEET_ID = ""
+TRANSACTIONS_SHEET_ID = "1I1NkOf2L5hVB6_yV896x9H-s1CIsRYWTR2T0ioBZDZU"
 
 # --- Sheet Ranges for Consolidated Data ---
 BANK_TRANSACTIONS_SHEET_NAME = "Bank transactions"
@@ -76,8 +78,17 @@ EXPECTED_SHEET_COLUMNS = [
 INTERNAL_TXN_KEYS = ["date", "description", "amount", "category", "remarks", "account"]
 
 # --- Account Identifiers ---
-CC_ACCOUNTS: List[str] = []
-BANK_ACCOUNTS: List[str] = []
+CC_ACCOUNTS = [
+    "cc-axis-magnus",
+    "cc-icici-amazonpay",
+    "cc-hdfc-infiniametal",
+]
+BANK_ACCOUNTS = [
+    "bank-axis-karti",
+    "bank-axis-mini",
+    "bank-hdfc-karti",
+    "bank-hdfc-mini",
+]
 
 # --- Categorization ---
 MATCHERS_FILE_PATH = "data/matchers.json"

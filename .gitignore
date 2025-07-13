@@ -8,3 +8,6 @@ venv/
 
 # Secrets
 secrets/
+
+# Backups
+backups/

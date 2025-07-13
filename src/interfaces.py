@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 
 
 class DataSourceFile:
@@ -99,4 +99,30 @@ class DataSourceInterface(abc.ABC):
     @abc.abstractmethod
     def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
         """Gets the name (title) of the first visible sheet in a spreadsheet file."""
+        pass
+
+
+class BackupInterface(abc.ABC):
+    """
+    Abstract Base Class defining the interface for backup operations.
+    """
+
+    @abc.abstractmethod
+    def backup(self, transactions: List[Dict[str, Any]]) -> None:
+        """
+        Backs up a list of transactions to a persistent store.
+
+        Args:
+            transactions: A list of standardized transaction dictionaries.
+        """
+        pass
+
+    @abc.abstractmethod
+    def restore(self) -> List[Dict[str, Any]]:
+        """
+        Restores all transactions from the persistent store.
+
+        Returns:
+            A list of all standardized transaction dictionaries from the backup.
+        """
         pass
