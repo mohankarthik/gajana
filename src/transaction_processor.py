@@ -372,9 +372,9 @@ class TransactionProcessor:
     ) -> list[dict[Hashable, Any]]:
         all_parsed_txns = []
         account_list = (
-            config_manager.settings.bank_accounts
+            config_manager.get_settings().bank_accounts
             if account_type == "bank"
-            else config_manager.settings.cc_accounts
+            else config_manager.get_settings().cc_accounts
         )
         statement_files = self.data_source.list_statement_file_details()
         logger.info(
@@ -404,12 +404,12 @@ class TransactionProcessor:
                 f"Processing statement Sheet: '{file_name}' (ID: {file_id}) for '{matched_account}'"
             )
             config_key = f"{account_type}-{matched_account.split('-')[1]}"
-            if config_key not in config_manager.settings.parser_configs:
+            if config_key not in config_manager.get_settings().parser_configs:
                 logger.warning(
                     f"No parsing config for '{config_key}'. Skipping '{file_name}'."
                 )
                 continue
-            config = config_manager.settings.parser_configs[config_key]
+            config = config_manager.get_settings().parser_configs[config_key]
 
             # Use file_id (which is spreadsheet_id) and get first sheet name for data fetching
             first_sheet_name = self.data_source.get_first_sheet_name_from_file(file_id)

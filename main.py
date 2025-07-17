@@ -110,12 +110,12 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
     bank_txns = [
         t
         for t in all_existing_txns
-        if t.get("account") in config_manager.settings.bank_accounts
+        if t.get("account") in config_manager.get_settings().bank_accounts
     ]
     cc_txns = [
         t
         for t in all_existing_txns
-        if t.get("account") in config_manager.settings.cc_accounts
+        if t.get("account") in config_manager.get_settings().cc_accounts
     ]
     bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
     cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))

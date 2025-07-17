@@ -5,7 +5,7 @@ import configparser
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.constants import CONFIG_DIR, SETTINGS_FILE
 from src.utils import log_and_exit
@@ -20,22 +20,11 @@ class ConfigManager:
     """
 
     def __init__(self, settings_path: str = SETTINGS_FILE):
-        if not os.path.exists(settings_path):
-            log_and_exit(
-                logger,
-                f"Configuration file '{settings_path}' not found. "
-                "Please copy 'settings.example.ini' to 'settings.ini' and fill it out, "
-                "or run the setup.",
-            )
-
         self.config = configparser.ConfigParser()
         self.config.read(settings_path)
         logger.info(f"Successfully loaded settings from '{settings_path}'.")
 
-        # Load parser configurations dynamically
         self.parser_configs = self._load_parsing_config()
-
-        # Load and parse account lists
         self.bank_accounts = self._parse_list_setting("accounts", "bank_accounts")
         self.cc_accounts = self._parse_list_setting("accounts", "cc_accounts")
 
@@ -56,23 +45,21 @@ class ConfigManager:
         raw_value = self.get_setting(section, key)
         if not raw_value:
             return []
-        # Split by comma and strip whitespace from each item
         return [item.strip() for item in raw_value.split(",")]
 
     def _load_parsing_config(self) -> Dict[str, Any]:
         """Loads all .json parsing configurations from the specified directory."""
-        config_dir = CONFIG_DIR
         loaded_config = {}
-        logger.info(f"Loading parsing configs from: {config_dir}")
-        if not os.path.exists(config_dir):
+        logger.info(f"Loading parsing configs from: {CONFIG_DIR}")
+        if not os.path.exists(CONFIG_DIR):
             log_and_exit(
-                logger, f"Parser configuration directory not found: {config_dir}"
+                logger, f"Parser configuration directory not found: {CONFIG_DIR}"
             )
 
-        for filename in os.listdir(config_dir):
+        for filename in os.listdir(CONFIG_DIR):
             if filename.endswith(".json"):
                 config_key = filename[:-5]
-                file_path = os.path.join(config_dir, filename)
+                file_path = os.path.join(CONFIG_DIR, filename)
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         loaded_config[config_key] = json.load(f)
@@ -88,5 +75,16 @@ class ConfigManager:
         return loaded_config
 
 
-# Create a singleton instance to be used throughout the application
-settings = ConfigManager()
+# --- Singleton Accessor Function ---
+_settings_instance: Optional[ConfigManager] = None
+
+
+def get_settings() -> ConfigManager:
+    """
+    Returns the singleton instance of the ConfigManager.
+    The instance is created on the first call.
+    """
+    global _settings_instance
+    if _settings_instance is None:
+        _settings_instance = ConfigManager()
+    return _settings_instance

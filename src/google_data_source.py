@@ -129,7 +129,7 @@ class GoogleDataSource(DataSourceInterface):
         """
         files_details: List[DataSourceFile] = []
         page_token = None
-        folder_id = config_manager.settings.get_setting("gcp", "drive_folder_id")
+        folder_id = config_manager.get_settings().get_setting("gcp", "drive_folder_id")
         logger.info(f"Listing Google Sheets from Drive folder ID: {folder_id}")
         query = f"parents in '{folder_id}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
         try:
@@ -210,7 +210,7 @@ class GoogleDataSource(DataSourceInterface):
             if log_type == "bank"
             else CC_TRANSACTIONS_FULL_RANGE
         )
-        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
+        sheets_id = config_manager.get_settings().get_setting("gcp", "sheets_id")
         logger.info(
             f"Getting {log_type} transaction log data from Sheet ID: {sheets_id}, Range: {range_to_fetch}"
         )
@@ -228,7 +228,7 @@ class GoogleDataSource(DataSourceInterface):
             if log_type == "bank"
             else CC_TRANSACTIONS_SHEET_NAME
         )
-        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
+        sheets_id = config_manager.get_settings().get_setting("gcp", "sheets_id")
         logger.info(
             f"Appending {len(data_values)} rows to {log_type} log in Sheet ID: {sheets_id}, "
             f"Sheet: {sheet_name}"
@@ -260,7 +260,7 @@ class GoogleDataSource(DataSourceInterface):
         )
         data_clear_range = f"{range_to_clear.split('!')[0]}!B3:H"
 
-        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
+        sheets_id = config_manager.get_settings().get_setting("gcp", "sheets_id")
         logger.info(
             f"Clearing {log_type} transaction log data in Sheet ID: {sheets_id}, Range: {data_clear_range}"
         )
@@ -295,7 +295,7 @@ class GoogleDataSource(DataSourceInterface):
         )
         write_range = f"{sheet_name}!B3"
 
-        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
+        sheets_id = config_manager.get_settings().get_setting("gcp", "sheets_id")
         logger.info(
             f"Writing {len(data_values)} rows to {log_type} log in Sheet ID: {sheets_id}, "
             f"Range: {write_range}"
