@@ -11,15 +11,14 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
 from oauth2client.service_account import ServiceAccountCredentials
 
+from src import config_manager
 from src.constants import (
     BANK_TRANSACTIONS_FULL_RANGE,
     BANK_TRANSACTIONS_SHEET_NAME,
     CC_TRANSACTIONS_FULL_RANGE,
     CC_TRANSACTIONS_SHEET_NAME,
-    CSV_FOLDER,
     SCOPES,
     SERVICE_ACCOUNT_KEY_FILE,
-    TRANSACTIONS_SHEET_ID,
 )
 from src.interfaces import DataSourceFile, DataSourceInterface
 from src.utils import log_and_exit
@@ -130,8 +129,9 @@ class GoogleDataSource(DataSourceInterface):
         """
         files_details: List[DataSourceFile] = []
         page_token = None
-        logger.info(f"Listing Google Sheets from Drive folder ID: {CSV_FOLDER}")
-        query = f"parents in '{CSV_FOLDER}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+        folder_id = config_manager.settings.get_setting("gcp", "drive_folder_id")
+        logger.info(f"Listing Google Sheets from Drive folder ID: {folder_id}")
+        query = f"parents in '{folder_id}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
         try:
             while True:
                 response = (
@@ -210,10 +210,11 @@ class GoogleDataSource(DataSourceInterface):
             if log_type == "bank"
             else CC_TRANSACTIONS_FULL_RANGE
         )
+        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
         logger.info(
-            f"Getting {log_type} transaction log data from Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {range_to_fetch}"
+            f"Getting {log_type} transaction log data from Sheet ID: {sheets_id}, Range: {range_to_fetch}"
         )
-        return self.get_sheet_data(TRANSACTIONS_SHEET_ID, None, range_to_fetch)
+        return self.get_sheet_data(sheets_id, None, range_to_fetch)
 
     @retry_on_gcp_error()
     def append_transactions_to_log(
@@ -227,8 +228,9 @@ class GoogleDataSource(DataSourceInterface):
             if log_type == "bank"
             else CC_TRANSACTIONS_SHEET_NAME
         )
+        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
         logger.info(
-            f"Appending {len(data_values)} rows to {log_type} log in Sheet ID: {TRANSACTIONS_SHEET_ID}, "
+            f"Appending {len(data_values)} rows to {log_type} log in Sheet ID: {sheets_id}, "
             f"Sheet: {sheet_name}"
         )
 
@@ -237,7 +239,7 @@ class GoogleDataSource(DataSourceInterface):
             self.sheets_service.spreadsheets()
             .values()
             .append(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                spreadsheetId=sheets_id,
                 range=sheet_name,
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
@@ -258,15 +260,16 @@ class GoogleDataSource(DataSourceInterface):
         )
         data_clear_range = f"{range_to_clear.split('!')[0]}!B3:H"
 
+        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
         logger.info(
-            f"Clearing {log_type} transaction log data in Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {data_clear_range}"
+            f"Clearing {log_type} transaction log data in Sheet ID: {sheets_id}, Range: {data_clear_range}"
         )
 
         result = (
             self.sheets_service.spreadsheets()
             .values()
             .clear(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                spreadsheetId=sheets_id,
                 range=data_clear_range,
                 body={},
             )
@@ -291,8 +294,10 @@ class GoogleDataSource(DataSourceInterface):
             else CC_TRANSACTIONS_SHEET_NAME
         )
         write_range = f"{sheet_name}!B3"
+
+        sheets_id = config_manager.settings.get_setting("gcp", "sheets_id")
         logger.info(
-            f"Writing {len(data_values)} rows to {log_type} log in Sheet ID: {TRANSACTIONS_SHEET_ID}, "
+            f"Writing {len(data_values)} rows to {log_type} log in Sheet ID: {sheets_id}, "
             f"Range: {write_range}"
         )
 
@@ -301,7 +306,7 @@ class GoogleDataSource(DataSourceInterface):
             self.sheets_service.spreadsheets()
             .values()
             .update(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                spreadsheetId=sheets_id,
                 range=write_range,
                 valueInputOption="USER_ENTERED",
                 body=body,

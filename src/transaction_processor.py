@@ -8,13 +8,8 @@ from typing import Any, Hashable, List, Optional, Tuple
 
 import pandas as pd
 
-from src.constants import (
-    BANK_ACCOUNTS,
-    CC_ACCOUNTS,
-    DEFAULT_CATEGORY,
-    INTERNAL_TXN_KEYS,
-    PARSING_CONFIG,
-)
+from src import config_manager
+from src.constants import DEFAULT_CATEGORY, INTERNAL_TXN_KEYS
 from src.interfaces import DataSourceInterface
 from src.utils import log_and_exit, parse_mixed_datetime
 
@@ -376,7 +371,11 @@ class TransactionProcessor:
         self, account_type: str, latest_txn_by_account: dict[str, datetime.datetime]
     ) -> list[dict[Hashable, Any]]:
         all_parsed_txns = []
-        account_list = BANK_ACCOUNTS if account_type == "bank" else CC_ACCOUNTS
+        account_list = (
+            config_manager.settings.bank_accounts
+            if account_type == "bank"
+            else config_manager.settings.cc_accounts
+        )
         statement_files = self.data_source.list_statement_file_details()
         logger.info(
             f"Scanning {len(statement_files)} statement files for {account_type} transactions."
@@ -405,12 +404,12 @@ class TransactionProcessor:
                 f"Processing statement Sheet: '{file_name}' (ID: {file_id}) for '{matched_account}'"
             )
             config_key = f"{account_type}-{matched_account.split('-')[1]}"
-            if config_key not in PARSING_CONFIG:
+            if config_key not in config_manager.settings.parser_configs:
                 logger.warning(
                     f"No parsing config for '{config_key}'. Skipping '{file_name}'."
                 )
                 continue
-            config = PARSING_CONFIG[config_key]
+            config = config_manager.settings.parser_configs[config_key]
 
             # Use file_id (which is spreadsheet_id) and get first sheet name for data fetching
             first_sheet_name = self.data_source.get_first_sheet_name_from_file(file_id)

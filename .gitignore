@@ -8,3 +8,6 @@ venv/
 
 # Secrets
 secrets/
+
+# User-specific settings
+settings.ini

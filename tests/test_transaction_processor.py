@@ -395,25 +395,22 @@ def test_get_old_transactions_processing_error(
 
 
 def test_get_new_transactions_from_statements(
-    transaction_processor, mock_data_source, mocker
+    transaction_processor, mock_data_source, mocker, mock_settings_fixture
 ):
     """Tests the end-to-end flow of finding and parsing new transactions."""
     # Mock constants to simplify the test
-    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["mini-sbi"])
-    mocker.patch(
-        "src.transaction_processor.PARSING_CONFIG",
-        {
-            "bank-sbi": {
-                "header_patterns": [["Date", "Description", "Amount"]],
-                "column_map": {
-                    "Date": "date",
-                    "Description": "description",
-                    "Amount": "amount",
-                },
-                "date_formats": ["%d-%b-%y"],
-            }
-        },
-    )
+    mock_settings_fixture.bank_accounts = ["mini-sbi"]
+    mock_settings_fixture.parser_configs = {
+        "bank-sbi": {
+            "header_patterns": [["Date", "Description", "Amount"]],
+            "column_map": {
+                "Date": "date",
+                "Description": "description",
+                "Amount": "amount",
+            },
+            "date_formats": ["%d-%b-%y"],
+        }
+    }
 
     # Mock data source calls
     mock_data_source.list_statement_file_details.return_value = [
@@ -442,14 +439,14 @@ def test_get_new_transactions_from_statements(
     assert txn["description"] == "New Purchase"
     assert txn["amount"] == 250.00
     assert txn["account"] == "mini-sbi"
-    assert txn["category"] == DEFAULT_CATEGORY  # Check default category is added
+    assert txn["category"] == DEFAULT_CATEGORY
 
 
 def test_get_new_transactions_skips_old_statement(
-    transaction_processor, mock_data_source, mocker
+    transaction_processor, mock_data_source, mocker, mock_settings_fixture
 ):
     """Tests that a statement is skipped if it's older than the last known transaction."""
-    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["hdfc"])
+    mock_settings_fixture.cc_accounts = ["hdfc"]
     mock_data_source.list_statement_file_details.return_value = [
         DataSourceFile(id="file123", name="cc-hdfc-2023-04.gsheet")  # April 2023
     ]
@@ -466,11 +463,11 @@ def test_get_new_transactions_skips_old_statement(
 
 
 def test_get_new_transactions_skips_no_config(
-    transaction_processor, mock_data_source, mocker, caplog
+    transaction_processor, mock_data_source, mocker, caplog, mock_settings_fixture
 ):
     """Tests that a file is skipped if no parsing config is found."""
-    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["no-config-bank"])
-    mocker.patch("src.transaction_processor.PARSING_CONFIG", {})  # Empty config
+    mock_settings_fixture.bank_accounts = ["no-config-bank"]
+    mock_settings_fixture.parser_configs = {}
     mock_data_source.list_statement_file_details.return_value = [
         DataSourceFile(id="file123", name="bank-no-config-bank-2024.csv")
     ]
@@ -481,11 +478,15 @@ def test_get_new_transactions_skips_no_config(
 
 
 def test_get_new_transactions_file_processing_fails(
-    transaction_processor, mock_data_source, mock_log_and_exit_fixture, mocker
+    transaction_processor,
+    mock_data_source,
+    mock_log_and_exit_fixture,
+    mocker,
+    mock_settings_fixture,
 ):
     """Tests that a failure to process one sheet doesn't stop the whole process and calls log_and_exit."""
-    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["mini-sbi"])
-    mocker.patch("src.transaction_processor.PARSING_CONFIG", {"bank-sbi": {}})
+    mock_settings_fixture.bank_accounts = ["mini-sbi"]
+    mock_settings_fixture.parser_configs = {"bank-sbi": {}}
     mock_data_source.list_statement_file_details.return_value = [
         DataSourceFile(id="file123", name="bank-mini-sbi-2024.csv")
     ]

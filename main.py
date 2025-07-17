@@ -11,7 +11,8 @@ from operator import itemgetter
 from typing import Any, Hashable
 
 from src.categorizer import Categorizer
-from src.constants import BANK_ACCOUNTS, CC_ACCOUNTS, DEFAULT_CATEGORY
+from src import config_manager
+from src.constants import DEFAULT_CATEGORY
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
 from src.transaction_processor import TransactionProcessor
@@ -61,7 +62,6 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 acc_type, latest_by_account
             )
 
-            # TransactionMatcher.find_new_txns now returns only new_txns
             new_txns_to_add = TransactionMatcher.find_new_txns(
                 old_txns, potential_new_txns
             )
@@ -75,11 +75,10 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 all_new_txns_added_count += len(categorized_txns)
             else:
                 logger.info(f"No new {acc_type} transactions found to add.")
-        except Exception as e:  # Catch exceptions per account type processing
+        except Exception as e:
             logger.error(
                 f"Error processing {acc_type} transactions in normal mode: {e}", e
             )
-            # Decide if you want to continue to the next account type or assert False here
 
     logger.info(
         f"Normal mode finished. Added {all_new_txns_added_count} new transactions."
@@ -106,10 +105,18 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
     logger.info(
         f"Recategorizing {len(txns_to_categorize)} '{DEFAULT_CATEGORY}' transactions..."
     )
-    categorizer.categorize(txns_to_categorize)  # Modifies in-place
+    categorizer.categorize(txns_to_categorize)
 
-    bank_txns = [t for t in all_existing_txns if t.get("account") in BANK_ACCOUNTS]
-    cc_txns = [t for t in all_existing_txns if t.get("account") in CC_ACCOUNTS]
+    bank_txns = [
+        t
+        for t in all_existing_txns
+        if t.get("account") in config_manager.settings.bank_accounts
+    ]
+    cc_txns = [
+        t
+        for t in all_existing_txns
+        if t.get("account") in config_manager.settings.cc_accounts
+    ]
     bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
     cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))
 
@@ -150,7 +157,7 @@ def run_learn_mode(processor: TransactionProcessor):
                 float(txn["amount"]),
             )
             _, dc_key = amt < 0, "debit" if amt < 0 else "credit"
-            words = re.findall(r"\b[a-z0-9]{3,}\b", desc)  # Words 3+ chars
+            words = re.findall(r"\b[a-z0-9]{3,}\b", desc)
             for word in words:
                 if not word.isdigit():
                     category_patterns[cat][dc_key][word] += 1
@@ -164,9 +171,7 @@ def run_learn_mode(processor: TransactionProcessor):
     suggestions_found = 0
     for cat, dc_data in category_patterns.items():
         for dc_key, word_counter in dc_data.items():
-            suggested_keywords = [
-                w for w, c in word_counter.most_common(10) if c >= 3
-            ]  # Min count 3
+            suggested_keywords = [w for w, c in word_counter.most_common(10) if c >= 3]
             if suggested_keywords:
                 suggestions_found += 1
                 rule = {
@@ -202,17 +207,19 @@ def main():
     logger.info("Gajana script started.")
     start_time = datetime.datetime.now()
     try:
-        data_source = GoogleDataSource()  # Instantiate the concrete data source
-        processor = TransactionProcessor(data_source)  # Pass it to the processor
+        # The settings object is now the single source of truth for configuration
+        data_source = GoogleDataSource()
+        processor = TransactionProcessor(data_source)
 
         if args.learn_categories:
             run_learn_mode(processor)
         else:
-            categorizer = Categorizer()  # Needed for normal and recategorize
+            categorizer = Categorizer()
             if args.recategorize_only:
                 run_recategorize_mode(processor, categorizer)
             else:
                 run_normal_mode(processor, categorizer)
+
     except AssertionError as e:
         log_and_exit(logger, f"Critical assertion failed: {e}", e)
     except Exception as e:

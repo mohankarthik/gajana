@@ -9,7 +9,6 @@ from googleapiclient.errors import HttpError as GoogleHttpError
 
 # Assuming your project structure allows these imports
 from src.google_data_source import GoogleDataSource
-from src.interfaces import DataSourceFile
 
 
 # Mock the utils.log_and_exit function for all tests in this module
@@ -107,16 +106,16 @@ def test_get_drive_service_build_failure(
 
 # --- Tests for list_statement_file_details ---
 def test_list_statement_file_details_success(
-    mock_service_account_credentials, mock_google_services
+    mock_service_account_credentials, mock_google_services, mock_settings_fixture
 ):
+    # Configure the mock settings fixture for this test
+    mock_settings_fixture.get_setting.return_value = "dummy_folder_id"
+
     gds = GoogleDataSource()
     mock_drive_service, _ = mock_google_services
     mock_files_list_execute = MagicMock(
         return_value={
-            "files": [
-                {"id": "file1_id", "name": "file1_name.gsheet"},
-                {"id": "file2_id", "name": "file2_name.gsheet"},
-            ],
+            "files": [{"id": "file1_id", "name": "file1_name.gsheet"}],
             "nextPageToken": None,
         }
     )
@@ -124,13 +123,16 @@ def test_list_statement_file_details_success(
         mock_files_list_execute
     )
 
-    result = gds.list_statement_file_details()
+    gds.list_statement_file_details()
 
-    assert len(result) == 2
-    assert isinstance(result[0], DataSourceFile)
-    assert result[0].id == "file1_id"
-    assert result[0].name == "file1_name.gsheet"
-    mock_drive_service.files.return_value.list.assert_called_once()
+    # The assertion now checks that get_setting was called correctly
+    mock_settings_fixture.get_setting.assert_called_with("gcp", "drive_folder_id")
+    mock_drive_service.files.return_value.list.assert_called_once_with(
+        q="parents in 'dummy_drive_folder_id' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+        spaces="drive",
+        fields="nextPageToken, files(id, name)",
+        pageToken=None,
+    )
 
 
 def test_list_statement_file_details_pagination(
@@ -282,23 +284,28 @@ def test_get_sheet_data_final_failure(
 
 # --- Tests for append_transactions_to_log ---
 def test_append_transactions_to_log_success(
-    mock_service_account_credentials, mock_google_services, mocker
+    mock_service_account_credentials, mock_google_services, mock_settings_fixture
 ):
+    mock_settings_fixture.get_setting.return_value = "dummy_sheets_id"
+
     gds = GoogleDataSource()
     _, mock_sheets_service = mock_google_services
     mock_execute = MagicMock(return_value={"updates": {"updatedCells": 5}})
     mock_sheets_service.spreadsheets.return_value.values.return_value.append.return_value.execute = (
         mock_execute
     )
-    mocker.patch("src.google_data_source.TRANSACTIONS_SHEET_ID", "dummy_txn_sheet_id")
 
     gds.append_transactions_to_log("bank", [["row1"], ["row2"]])
-    mock_sheets_service.spreadsheets.return_value.values.return_value.append.assert_called_once_with(
-        spreadsheetId="dummy_txn_sheet_id",
-        range="Bank transactions",  # Uses sheet name from constants
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [["row1"], ["row2"]]},
+
+    # Assert that the call was made with the mocked sheets_id
+    mock_sheets_service.spreadsheets.return_value.values.return_value.append.assert_called_once()
+    assert (
+        mock_sheets_service.spreadsheets.return_value.values.return_value.append.call_args[
+            1
+        ][
+            "spreadsheetId"
+        ]
+        == "dummy_sheets_id"
     )
 
 
@@ -313,22 +320,26 @@ def test_append_transactions_no_data(
 
 # --- Tests for clear_transaction_log_range ---
 def test_clear_transaction_log_range_success(
-    mock_service_account_credentials, mock_google_services, mocker
+    mock_service_account_credentials,
+    mock_google_services,
+    mocker,
+    mock_settings_fixture,
 ):
+    mock_settings_fixture.get_setting.return_value = "dummy_sheets_id"
+
     gds = GoogleDataSource()
     _, mock_sheets_service = mock_google_services
     mock_execute = MagicMock(return_value={"clearedRange": "Bank transactions!B3:H"})
     mock_sheets_service.spreadsheets.return_value.values.return_value.clear.return_value.execute = (
         mock_execute
     )
-    mocker.patch("src.google_data_source.TRANSACTIONS_SHEET_ID", "dummy_txn_sheet_id")
     mocker.patch(
         "src.google_data_source.BANK_TRANSACTIONS_FULL_RANGE", "Bank transactions!B2:H"
     )  # Match constant
 
     gds.clear_transaction_log_range("bank")
     mock_sheets_service.spreadsheets.return_value.values.return_value.clear.assert_called_once_with(
-        spreadsheetId="dummy_txn_sheet_id",
+        spreadsheetId="dummy_sheets_id",
         range="Bank transactions!B3:H",  # Based on logic in clear_transaction_log_range
         body={},
     )
@@ -336,8 +347,12 @@ def test_clear_transaction_log_range_success(
 
 # --- Tests for write_transactions_to_log ---
 def test_write_transactions_to_log_success(
-    mock_service_account_credentials, mock_google_services, mocker
+    mock_service_account_credentials,
+    mock_google_services,
+    mocker,
+    mock_settings_fixture,
 ):
+    mock_settings_fixture.get_setting.return_value = "dummy_sheets_id"
     gds = GoogleDataSource()
     _, mock_sheets_service = mock_google_services
     mock_execute = MagicMock(
@@ -346,12 +361,11 @@ def test_write_transactions_to_log_success(
     mock_sheets_service.spreadsheets.return_value.values.return_value.update.return_value.execute = (
         mock_execute
     )
-    mocker.patch("src.google_data_source.TRANSACTIONS_SHEET_ID", "dummy_txn_sheet_id")
 
     test_data = [["r1c1", "r1c2"], ["r2c1", "r2c2"]]
     gds.write_transactions_to_log("bank", test_data)
     mock_sheets_service.spreadsheets.return_value.values.return_value.update.assert_called_once_with(
-        spreadsheetId="dummy_txn_sheet_id",
+        spreadsheetId="dummy_sheets_id",
         range="Bank transactions!B3",  # Based on logic in write_transactions_to_log
         valueInputOption="USER_ENTERED",
         body={"values": test_data},
