@@ -40,6 +40,14 @@ This is the central database where all your processed transactions will be store
 -   **Column Headers:** Both sheets must have the following headers in the first row, starting from cell A1:
     `Date` | `Description` | `Debit` | `Credit` | `Category` | `Remarks` | `Account`
 
+### 3. Local SQLite Database (for Backup)
+
+For data safety, Gajana uses a local SQLite database as a reliable backup.
+
+-   **Location:** The database file is stored at `DB_FILE_PATH`.
+-   **Creation:** This file is created automatically the first time you run the backup command.
+-   **Git Ignore:** The `DB_FILE_PATH` file is included in `.gitignore` and should **never** be committed to the repository.
+
 ---
 
 ## Installation
@@ -120,7 +128,7 @@ Gajana is run from the command line from the root of the project directory.
 This is the default mode. It fetches new statements, processes new transactions, and appends them to your Google Sheet.
 
 ```bash
-python src/main.py
+python main.py
 ```
 
 ### Recategorize Mode
@@ -128,7 +136,7 @@ python src/main.py
 This mode re-applies the rules in `data/matchers.json` to all existing transactions in your Google Sheet. This is useful after you've updated your categorization rules.
 
 ```bash
-python src/main.py --recategorize-only
+python main.py --recategorize-only
 ```
 
 ### Learn Mode
@@ -136,4 +144,21 @@ python src/main.py --recategorize-only
 This mode analyzes your already-categorized transactions to find common patterns and suggests new rules that you can add to `data/matchers.json` to reduce uncategorized items.
 
 ```bash
-python src/main.py --learn-categories
+python main.py --learn-categories
+
+### Backup and Restore
+
+These commands allow you to sync data between your primary Google Sheet and your local SQLite database backup.
+
+**Backup from Google Sheets to Local DB:**
+This command reads all data from your Google Sheets and saves it to the local `DB_FILE_PATH` file. This is the recommended way to create a safe, local backup.
+
+```bash
+python main.py --backup-db
+```
+
+**Restore from Local DB to Google Sheets (DESTRUCTIVE):**
+This command will completely erase the data in your Google Sheets and replace it with the data from your local `DB_FILE_PATH` file. Use this with caution.
+
+```bash
+python main.py --restore-db
