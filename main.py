@@ -223,8 +223,8 @@ def run_restore_mode(
         logger.warning("No transactions found in the local database to restore.")
         return
 
-    bank_txns = [t for t in restored_transactions if t.get("account") in BANK_ACCOUNTS]
-    cc_txns = [t for t in restored_transactions if t.get("account") in CC_ACCOUNTS]
+    bank_txns = [t for t in restored_transactions if t.get("account") in config_manager.get_settings().bank_accounts]
+    cc_txns = [t for t in restored_transactions if t.get("account") in config_manager.get_settings().cc_accounts]
     bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
     cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))
 
