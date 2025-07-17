@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from operator import itemgetter
 from typing import Any, Hashable
 
+from src.backup_manager import SQLiteBackupManager
 from src.categorizer import Categorizer
 from src import config_manager
 from src.constants import DEFAULT_CATEGORY
@@ -187,6 +188,53 @@ def run_learn_mode(processor: TransactionProcessor):
     logger.info("Learn categories mode finished.")
 
 
+def run_backup_mode(
+    processor: TransactionProcessor, backup_manager: SQLiteBackupManager
+):
+    """Fetches all transactions from Google Sheets and backs them up to the local SQLite DB."""
+    logger.info("Running in BACKUP mode.")
+    all_transactions = processor.get_all_transactions_for_recategorize()
+    if not all_transactions:
+        logger.warning("No transactions found in Google Sheets to back up.")
+        return
+
+    backup_manager.backup(all_transactions)
+    logger.info("Backup mode finished.")
+
+
+def run_restore_mode(
+    processor: TransactionProcessor, backup_manager: SQLiteBackupManager
+):
+    """Restores all transactions from the local SQLite DB to Google Sheets."""
+    logger.info("Running in RESTORE mode.")
+
+    # Critical confirmation step due to destructive nature of the operation
+    confirm = input(
+        "WARNING: This will ERASE all data in the 'Bank transactions' and 'CC Transactions' sheets "
+        "and replace it with the data from the local database. This action cannot be undone.\n"
+        "Are you sure you want to continue? (yes/no): "
+    )
+    if confirm.lower() != "yes":
+        logger.warning("Restore operation cancelled by user.")
+        return
+
+    restored_transactions = backup_manager.restore()
+    if not restored_transactions:
+        logger.warning("No transactions found in the local database to restore.")
+        return
+
+    bank_txns = [t for t in restored_transactions if t.get("account") in BANK_ACCOUNTS]
+    cc_txns = [t for t in restored_transactions if t.get("account") in CC_ACCOUNTS]
+    bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
+    cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))
+
+    logger.info("--- Overwriting Bank Transactions Sheet from Restore ---")
+    processor.overwrite_transaction_log(bank_txns, "bank")
+    logger.info("--- Overwriting CC Transactions Sheet from Restore ---")
+    processor.overwrite_transaction_log(cc_txns, "cc")
+    logger.info("Restore mode finished.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Gajana - Personal Finance Transaction Processor"
@@ -202,16 +250,31 @@ def main():
         action="store_true",
         help="Suggest new categorization rules.",
     )
+    mode_group.add_argument(
+        "--backup-db",
+        action="store_true",
+        help="Backup all data from Google Sheets to a local SQLite database.",
+    )
+    mode_group.add_argument(
+        "--restore-db",
+        action="store_true",
+        help="Restore all data from the local SQLite database to Google Sheets (DESTRUCTIVE).",
+    )
     args = parser.parse_args()
 
     logger.info("Gajana script started.")
     start_time = datetime.datetime.now()
     try:
-        # The settings object is now the single source of truth for configuration
         data_source = GoogleDataSource()
         processor = TransactionProcessor(data_source)
 
-        if args.learn_categories:
+        if args.backup_db:
+            backup_manager = SQLiteBackupManager()
+            run_backup_mode(processor, backup_manager)
+        elif args.restore_db:
+            backup_manager = SQLiteBackupManager()
+            run_restore_mode(processor, backup_manager)
+        elif args.learn_categories:
             run_learn_mode(processor)
         else:
             categorizer = Categorizer()

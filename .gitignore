@@ -11,3 +11,6 @@ secrets/
 
 # User-specific settings
 settings.ini
+
+# Backups
+backups/
