@@ -145,8 +145,9 @@ This mode analyzes your already-categorized transactions to find common patterns
 
 ```bash
 python main.py --learn-categories
+```
 
-### Backup and Restore
+### Backup and Restore Mode
 
 These commands allow you to sync data between your primary Google Sheet and your local SQLite database backup.
 
