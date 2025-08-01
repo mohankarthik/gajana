@@ -8,7 +8,8 @@ import os
 import sqlite3
 from typing import Any, Dict, List
 
-from src.constants import DB_FILE_PATH, INTERNAL_TXN_KEYS
+from src.constants import INTERNAL_TXN_KEYS
+from src.config_manager import get_settings
 from src.interfaces import BackupInterface
 from src.utils import log_and_exit
 
@@ -20,7 +21,7 @@ class SQLiteBackupManager(BackupInterface):
     Manages backing up and restoring transaction data to a local SQLite database.
     """
 
-    def __init__(self, db_path: str = DB_FILE_PATH):
+    def __init__(self, db_path: str = get_settings().db_file_path):
         self.db_path = db_path
         db_dir = os.path.dirname(self.db_path)
         if db_dir:

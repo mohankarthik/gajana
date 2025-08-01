@@ -7,7 +7,8 @@ import logging
 import re
 from typing import Any, Hashable
 
-from src.constants import DEFAULT_CATEGORY, MATCHERS_FILE_PATH
+from src.constants import DEFAULT_CATEGORY
+from src.config_manager import get_settings
 from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class Categorizer:
         - "use_regex": boolean (true if description strings are regex patterns)
     """
 
-    def __init__(self, matchers_file: str = MATCHERS_FILE_PATH) -> None:
+    def __init__(self, matchers_file: str = get_settings().matchers_file) -> None:
         """Constructor.
 
         Args:

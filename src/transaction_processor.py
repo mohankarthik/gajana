@@ -9,12 +9,11 @@ from typing import Any, Hashable, List, Optional, Tuple
 import pandas as pd
 
 from src.constants import (
-    BANK_ACCOUNTS,
-    CC_ACCOUNTS,
     DEFAULT_CATEGORY,
     INTERNAL_TXN_KEYS,
     PARSING_CONFIG,
 )
+from src.config_manager import get_settings
 from src.interfaces import DataSourceInterface
 from src.utils import log_and_exit, parse_mixed_datetime
 
@@ -376,7 +375,7 @@ class TransactionProcessor:
         self, account_type: str, latest_txn_by_account: dict[str, datetime.datetime]
     ) -> list[dict[Hashable, Any]]:
         all_parsed_txns = []
-        account_list = BANK_ACCOUNTS if account_type == "bank" else CC_ACCOUNTS
+        account_list = get_settings().bank_accounts if account_type == "bank" else get_settings().cc_accounts
         statement_files = self.data_source.list_statement_file_details()
         logger.info(
             f"Scanning {len(statement_files)} statement files for {account_type} transactions."

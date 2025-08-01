@@ -12,7 +12,8 @@ from typing import Any, Hashable
 
 from src.backup_manager import SQLiteBackupManager
 from src.categorizer import Categorizer
-from src.constants import BANK_ACCOUNTS, CC_ACCOUNTS, DEFAULT_CATEGORY
+from src.constants import DEFAULT_CATEGORY
+from src.config_manager import get_settings
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
 from src.transaction_processor import TransactionProcessor
@@ -109,8 +110,8 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
     )
     categorizer.categorize(txns_to_categorize)  # Modifies in-place
 
-    bank_txns = [t for t in all_existing_txns if t.get("account") in BANK_ACCOUNTS]
-    cc_txns = [t for t in all_existing_txns if t.get("account") in CC_ACCOUNTS]
+    bank_txns = [t for t in all_existing_txns if t.get("account") in get_settings().bank_accounts]
+    cc_txns = [t for t in all_existing_txns if t.get("account") in get_settings().cc_accounts]
     bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
     cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))
 
@@ -255,7 +256,29 @@ def main():
         action="store_true",
         help="Restore all data from the local SQLite database to Google Sheets (DESTRUCTIVE).",
     )
+    mode_group.add_argument(
+       "--setup", 
+       action="store_true", 
+       help="Run interactive setup.",
+    )
     args = parser.parse_args()
+    
+    # setup_manager = SetupManager()
+
+    # # --- Setup Flow ---
+    # if args.setup:
+    #     setup_manager.run_update_menu()
+    #     return # Exit after setup
+
+    # if not os.path.exists(SETTINGS_FILE):
+    #     logger.warning(f"Settings file '{SETTINGS_FILE}' not found.")
+    #     setup_manager.run_initial_setup()
+    #     logger.info("Initial setup complete. Run the application again to process transactions.")
+    #     return # Exit after initial setup
+
+    # --- Main Application Flow ---
+    # It's now safe to get the settings instance
+    settings = get_settings()
 
     logger.info("Gajana script started.")
     start_time = datetime.datetime.now()

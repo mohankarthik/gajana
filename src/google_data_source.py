@@ -16,11 +16,10 @@ from src.constants import (
     BANK_TRANSACTIONS_SHEET_NAME,
     CC_TRANSACTIONS_FULL_RANGE,
     CC_TRANSACTIONS_SHEET_NAME,
-    CSV_FOLDER,
     SCOPES,
-    SERVICE_ACCOUNT_KEY_FILE,
-    TRANSACTIONS_SHEET_ID,
 )
+
+from src.config_manager import get_settings
 from src.interfaces import DataSourceFile, DataSourceInterface
 from src.utils import log_and_exit
 
@@ -81,11 +80,11 @@ class GoogleDataSource(DataSourceInterface):
 
     def _get_credential(self) -> ServiceAccountCredentials:
         logger.info(
-            f"Authenticating using service account key: {SERVICE_ACCOUNT_KEY_FILE}"
+            f"Authenticating using service account key: {get_settings().service_account_key_file}"
         )
         try:
             credential = ServiceAccountCredentials.from_json_keyfile_name(
-                SERVICE_ACCOUNT_KEY_FILE, SCOPES
+                get_settings().service_account_key_file, SCOPES
             )
             assert credential is not None, "Failed to load credentials."
             logger.info("Authentication successful.")
@@ -93,7 +92,7 @@ class GoogleDataSource(DataSourceInterface):
         except FileNotFoundError as e:
             log_and_exit(
                 logger,
-                f"Service account key file not found: {SERVICE_ACCOUNT_KEY_FILE}",
+                f"Service account key file not found: {get_settings().service_account_key_file}",
                 e,
             )
         except Exception as e:
@@ -130,8 +129,8 @@ class GoogleDataSource(DataSourceInterface):
         """
         files_details: List[DataSourceFile] = []
         page_token = None
-        logger.info(f"Listing Google Sheets from Drive folder ID: {CSV_FOLDER}")
-        query = f"parents in '{CSV_FOLDER}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+        logger.info(f"Listing Google Sheets from Drive folder ID: {get_settings().drive_folder_id}")
+        query = f"parents in '{get_settings().drive_folder_id}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
         try:
             while True:
                 response = (
@@ -211,9 +210,9 @@ class GoogleDataSource(DataSourceInterface):
             else CC_TRANSACTIONS_FULL_RANGE
         )
         logger.info(
-            f"Getting {log_type} transaction log data from Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {range_to_fetch}"
+            f"Getting {log_type} transaction log data from Sheet ID: {get_settings().sheets_id}, Range: {range_to_fetch}"
         )
-        return self.get_sheet_data(TRANSACTIONS_SHEET_ID, None, range_to_fetch)
+        return self.get_sheet_data(get_settings().sheets_id, None, range_to_fetch)
 
     @retry_on_gcp_error()
     def append_transactions_to_log(
@@ -228,7 +227,7 @@ class GoogleDataSource(DataSourceInterface):
             else CC_TRANSACTIONS_SHEET_NAME
         )
         logger.info(
-            f"Appending {len(data_values)} rows to {log_type} log in Sheet ID: {TRANSACTIONS_SHEET_ID}, "
+            f"Appending {len(data_values)} rows to {log_type} log in Sheet ID: {get_settings().sheets_id}, "
             f"Sheet: {sheet_name}"
         )
 
@@ -237,7 +236,7 @@ class GoogleDataSource(DataSourceInterface):
             self.sheets_service.spreadsheets()
             .values()
             .append(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                spreadsheetId=get_settings().sheets_id,
                 range=sheet_name,
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
@@ -259,14 +258,14 @@ class GoogleDataSource(DataSourceInterface):
         data_clear_range = f"{range_to_clear.split('!')[0]}!B3:H"
 
         logger.info(
-            f"Clearing {log_type} transaction log data in Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {data_clear_range}"
+            f"Clearing {log_type} transaction log data in Sheet ID: {get_settings().sheets_id}, Range: {data_clear_range}"
         )
 
         result = (
             self.sheets_service.spreadsheets()
             .values()
             .clear(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                spreadsheetId=get_settings().sheets_id,
                 range=data_clear_range,
                 body={},
             )
@@ -292,7 +291,7 @@ class GoogleDataSource(DataSourceInterface):
         )
         write_range = f"{sheet_name}!B3"
         logger.info(
-            f"Writing {len(data_values)} rows to {log_type} log in Sheet ID: {TRANSACTIONS_SHEET_ID}, "
+            f"Writing {len(data_values)} rows to {log_type} log in Sheet ID: {get_settings().sheets_id}, "
             f"Range: {write_range}"
         )
 
@@ -301,7 +300,7 @@ class GoogleDataSource(DataSourceInterface):
             self.sheets_service.spreadsheets()
             .values()
             .update(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                spreadsheetId=get_settings().sheets_id,
                 range=write_range,
                 valueInputOption="USER_ENTERED",
                 body=body,
