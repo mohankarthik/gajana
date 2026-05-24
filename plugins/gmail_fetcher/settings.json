@@ -1,0 +1,16 @@
+{
+  "gajana_folder_id": "1WkQUCUv44WvTr2pX51waJpRYnVvEWDjH",
+  "configs": [
+    { "subject": "Axis Bank Statement : Money Quotient for", "from": "statements@axis.bank.in", "prefix": "bank-axis-karti" },
+    { "subject": "HDFC Bank Combined Email Statement", "from": "hdfcbanksmartstatement@hdfcbank.bank.in", "prefix": "bank-hdfc-karti" },
+    { "subject": "Fwd: AXIS BANK : Statement for", "from": "mini.asthana@gmail.com", "prefix": "bank-axis-mini" },
+    { "subject": "Your Axis Bank Platinum Credit Card Statement", "prefix": "cc-axis-platinum" },
+    { "subject": "Your Axis Bank Select Credit Card Statement", "prefix": "cc-axis-select" },
+    { "subject": "Your Axis Bank Magnus Credit Card", "prefix": "cc-axis-magnus" },
+    { "subject": "Your HDFC Bank - MoneyBack+ Credit Card Statement", "prefix": "cc-hdfc-moneybackplus" },
+    { "subject": "Your HDFC Bank - MoneyBack Credit Card Statement", "prefix": "cc-hdfc-moneyback" },
+    { "subject": "Your HDFC Bank MoneyBack Credit Card Statement", "prefix": "cc-hdfc-moneyback" },
+    { "subject": "HDFC Bank Regalia Gold Credit Card Statement", "prefix": "cc-hdfc-regaliagold" },
+    { "subject": "HDFC Bank - Infinia Credit Card Statement", "prefix": "cc-hdfc-infiniametal" }
+  ]
+}
