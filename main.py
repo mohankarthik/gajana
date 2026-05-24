@@ -256,6 +256,16 @@ def main():
         help="Restore all data from the local SQLite database to Google Sheets (DESTRUCTIVE).",
     )
     parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Run in normal mode (fetches and processes new statements). Default.",
+    )
+    parser.add_argument(
+        "--csv-db-path",
+        type=str,
+        help="Path to local CSV database root. If provided, uses CSV instead of Google Sheets.",
+    )
+    parser.add_argument(
         "--fetch-emails",
         action="store_true",
         help="Run the optional Gmail Fetcher plugin to download statements before processing.",
@@ -265,11 +275,18 @@ def main():
     logger.info("Gajana script started.")
     start_time = datetime.datetime.now()
     try:
-        data_source = GoogleDataSource()
-        
+        if args.csv_db_path:
+            from src.csv_data_source import CSVDataSource
+            data_source = CSVDataSource(args.csv_db_path)
+        else:
+            data_source = GoogleDataSource()
+            
         if args.fetch_emails:
-            from plugins.gmail_fetcher.fetcher import run_plugin
-            run_plugin(data_source.drive_service)
+            if isinstance(data_source, GoogleDataSource):
+                from plugins.gmail_fetcher.fetcher import run_plugin
+                run_plugin(data_source.drive_service)
+            else:
+                logger.warning("--fetch-emails requires GoogleDataSource. Skipping email fetch.")
             
         processor = TransactionProcessor(data_source)
 
