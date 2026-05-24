@@ -29,16 +29,16 @@ class CSVDataSource(DataSourceInterface):
 
         Args:
             root_path: The base directory where CSV files are stored.
-                       It should contain a 'statements' directory and 
+                       It should contain a 'statements' directory and
                        the master log files.
         """
         self.root_path = root_path
         self.statements_path = os.path.join(root_path, "statements")
         self.logger = logger
-        
+
         # Ensure directories exist
         os.makedirs(self.statements_path, exist_ok=True)
-        
+
         # Initialize master log files if they don't exist
         self._init_log_file(BANK_TRANSACTIONS_SHEET_NAME)
         self._init_log_file(CC_TRANSACTIONS_SHEET_NAME)
@@ -59,10 +59,10 @@ class CSVDataSource(DataSourceInterface):
             self.logger.info(f"Initializing master log: {path}")
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                # First column is usually empty in the sheet or contains an ID, 
+                # First column is usually empty in the sheet or contains an ID,
                 # but based on range B2:H, we map to EXPECTED_SHEET_COLUMNS directly.
                 # However, the Google Sheets range is B2:H, and the interface returns List[List[Any]].
-                # To match Google Sheet behavior exactly, we should store data 
+                # To match Google Sheet behavior exactly, we should store data
                 # consistent with how it's retrieved.
                 writer.writerow(EXPECTED_SHEET_COLUMNS)
 
@@ -70,7 +70,7 @@ class CSVDataSource(DataSourceInterface):
         """Lists details of CSV files in the statements directory."""
         files_details: List[DataSourceFile] = []
         self.logger.info(f"Listing CSV statements from: {self.statements_path}")
-        
+
         if not os.path.exists(self.statements_path):
             return files_details
 
@@ -78,7 +78,7 @@ class CSVDataSource(DataSourceInterface):
             if filename.endswith(".csv") or filename.endswith(".gsheet.csv"):
                 # We use the filename as the ID for local files
                 files_details.append(DataSourceFile(filename, filename))
-        
+
         self.logger.info(f"Found {len(files_details)} CSV statement files.")
         return files_details
 
@@ -86,14 +86,17 @@ class CSVDataSource(DataSourceInterface):
         self, source_id: str, sheet_name: Optional[str], range_spec: str
     ) -> List[List[Any]]:
         """Fetches raw data from a specific local CSV file.
-        
+
         For statements, source_id is the filename.
         range_spec is currently ignored for simplicity or could be implemented if needed.
         """
         file_path = os.path.join(self.statements_path, source_id)
         # If not in statements, check if it's one of the master logs
         if not os.path.exists(file_path):
-            file_path = os.path.join(self.root_path, source_id if source_id.endswith(".csv") else f"{source_id}.csv")
+            file_path = os.path.join(
+                self.root_path,
+                source_id if source_id.endswith(".csv") else f"{source_id}.csv",
+            )
 
         if not os.path.exists(file_path):
             self.logger.warning(f"File not found: {file_path}")
@@ -112,10 +115,10 @@ class CSVDataSource(DataSourceInterface):
         """Fetches data from the local master CSV log."""
         path = self._get_log_path(log_type)
         self.logger.info(f"Reading {log_type} log from: {path}")
-        
+
         if not os.path.exists(path):
             return []
-            
+
         try:
             with open(path, "r", encoding="utf-8") as f:
                 reader = csv.reader(f)
@@ -133,10 +136,10 @@ class CSVDataSource(DataSourceInterface):
         """Appends rows to the local master CSV log."""
         if not data_values:
             return
-            
+
         path = self._get_log_path(log_type)
         self.logger.info(f"Appending {len(data_values)} rows to {path}")
-        
+
         try:
             with open(path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
@@ -148,7 +151,7 @@ class CSVDataSource(DataSourceInterface):
         """Clears data from the local master CSV log (keeps header)."""
         path = self._get_log_path(log_type)
         self.logger.info(f"Clearing log: {path}")
-        
+
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
