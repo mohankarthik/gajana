@@ -255,12 +255,22 @@ def main():
         action="store_true",
         help="Restore all data from the local SQLite database to Google Sheets (DESTRUCTIVE).",
     )
+    parser.add_argument(
+        "--fetch-emails",
+        action="store_true",
+        help="Run the optional Gmail Fetcher plugin to download statements before processing.",
+    )
     args = parser.parse_args()
 
     logger.info("Gajana script started.")
     start_time = datetime.datetime.now()
     try:
         data_source = GoogleDataSource()
+        
+        if args.fetch_emails:
+            from plugins.gmail_fetcher.fetcher import run_plugin
+            run_plugin(data_source.drive_service)
+            
         processor = TransactionProcessor(data_source)
 
         if args.backup_db:
