@@ -236,7 +236,7 @@ class TransactionProcessor:
             )
             return None
         try:
-            df.loc[:, "date"] = df["date"].apply(
+            df["date"] = df["date"].apply(
                 lambda x: parse_mixed_datetime(logger, x, date_formats)
             )
             df.dropna(subset=["date"], inplace=True)
@@ -251,7 +251,7 @@ class TransactionProcessor:
 
         # --- Amount Calculation ---
         if "debit" in df.columns and "credit" in df.columns:
-            df.loc[:, "amount"] = df.apply(
+            df["amount"] = df.apply(
                 lambda row: self._parse_amount(row.get("credit"))
                 - self._parse_amount(row.get("debit")),
                 axis=1,
@@ -260,8 +260,8 @@ class TransactionProcessor:
             "amount" in df.columns and amount_sign_col and amount_sign_col in df.columns
         ):
             # Ensure the 'amount' column is numeric before applying sign
-            df.loc[:, "amount"] = df["amount"].apply(self._parse_amount)
-            df.loc[:, "amount"] = df.apply(
+            df["amount"] = df["amount"].apply(self._parse_amount)
+            df["amount"] = df.apply(
                 lambda r: (
                     -r["amount"]
                     if (not debit_value and pd.isna(r.get(amount_sign_col)))
@@ -271,14 +271,14 @@ class TransactionProcessor:
                 axis=1,
             )
         elif "amount" in df.columns:
-            df.loc[:, "amount"] = df["amount"].apply(self._parse_amount)
+            df["amount"] = df["amount"].apply(self._parse_amount)
         else:
             logger.error("Could not find columns to calculate amount.")
             return None
 
         # If an account name is passed, set it for all rows. Otherwise, assume it exists.
         if account_name:
-            df.loc[:, "account"] = account_name
+            df["account"] = account_name
 
         # --- Select and Order Final Columns ---
         final_cols_data = {}

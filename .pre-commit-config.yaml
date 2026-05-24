@@ -34,6 +34,13 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+      - id: run-e2e-tests
+        name: run-e2e-tests
+        entry: ./venv/bin/pytest tests/test_e2e.py
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
   - repo: local
     hooks:
       - id: pytest-cov

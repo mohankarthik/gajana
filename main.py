@@ -277,17 +277,21 @@ def main():
     try:
         if args.csv_db_path:
             from src.csv_data_source import CSVDataSource
+
             data_source = CSVDataSource(args.csv_db_path)
         else:
             data_source = GoogleDataSource()
-            
+
         if args.fetch_emails:
             if isinstance(data_source, GoogleDataSource):
                 from plugins.gmail_fetcher.fetcher import run_plugin
+
                 run_plugin(data_source.drive_service)
             else:
-                logger.warning("--fetch-emails requires GoogleDataSource. Skipping email fetch.")
-            
+                logger.warning(
+                    "--fetch-emails requires GoogleDataSource. Skipping email fetch."
+                )
+
         processor = TransactionProcessor(data_source)
 
         if args.backup_db:
