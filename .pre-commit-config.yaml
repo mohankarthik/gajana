@@ -59,6 +59,9 @@ repos:
           - pandas
           - google-api-python-client
           - oauth2client
+          - pypdf
+          - google-generativeai
+          - reportlab
       - id: diff-coverage
         name: diff-coverage
         # The entry no longer needs a hardcoded path

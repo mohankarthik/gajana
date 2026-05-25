@@ -31,3 +31,6 @@ pytest
 pytest-mock
 pytest-cov
 mypy
+pypdf
+google-generativeai
+reportlab

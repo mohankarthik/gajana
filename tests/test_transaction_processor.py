@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -181,10 +181,8 @@ def test_parse_statement_data_pandas_creation_fails(transaction_processor, mocke
     mocker.patch("pandas.DataFrame", side_effect=Exception("Pandas Error"))
     config = {"header_patterns": []}
     raw_data = [["Col1"], ["Val1"]]
-    df = None
-    with pytest.raises(SystemExit):
-        df = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
-    assert df is None
+    result = transaction_processor._parse_statement_data_with_pandas(raw_data, config)
+    assert result is None
 
 
 def test_standardize_parsed_df_empty_or_none_input(transaction_processor):
@@ -445,6 +443,54 @@ def test_get_new_transactions_from_statements(
     assert txn["category"] == DEFAULT_CATEGORY  # Check default category is added
 
 
+@patch("src.pdf_parser.PDFParser")
+def test_get_new_transactions_from_statements_pdf(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """Tests that PDF statement files are correctly routed to PDFParser."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["mini-sbi"])
+    mocker.patch(
+        "src.transaction_processor.PARSING_CONFIG",
+        {"bank-sbi": {}},
+    )
+
+    # Mock PDFParser and parse_pdf
+    mock_parser_instance = MagicMock()
+    mock_pdf_parser_class.return_value = mock_parser_instance
+    mock_parser_instance.parse_pdf.return_value = [
+        {
+            "date": "2024-01-25",
+            "description": "New PDF Purchase",
+            "debit": "150.00",
+            "credit": "",
+        },
+    ]
+
+    # Mock data source calls
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="filepdf123", name="bank-mini-sbi-2024.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"pdf binary content"
+
+    latest_txn_by_account = {}
+
+    new_txns = transaction_processor.get_new_transactions_from_statements(
+        "bank", latest_txn_by_account
+    )
+
+    mock_data_source.list_statement_file_details.assert_called_once()
+    mock_data_source.download_file.assert_called_once_with("filepdf123")
+    mock_pdf_parser_class.assert_called_once()
+    mock_parser_instance.parse_pdf.assert_called_once_with(b"pdf binary content", "")
+
+    assert len(new_txns) == 1
+    txn = new_txns[0]
+    assert txn["date"] == datetime.datetime(2024, 1, 25)
+    assert txn["description"] == "New PDF Purchase"
+    assert txn["amount"] == -150.00  # Debit amount is converted to negative amount
+    assert txn["account"] == "mini-sbi"
+
+
 def test_get_new_transactions_skips_old_statement(
     transaction_processor, mock_data_source, mocker
 ):
@@ -496,13 +542,8 @@ def test_get_new_transactions_file_processing_fails(
         side_effect=Exception("Parse Fail"),
     )
 
-    with pytest.raises(SystemExit):
-        transaction_processor.get_new_transactions_from_statements("bank", {})
-    mock_log_and_exit_fixture.assert_called_once()
-    assert (
-        "Failed to process sheet 'bank-mini-sbi-2024.csv'"
-        in mock_log_and_exit_fixture.call_args[0][1]
-    )
+    result = transaction_processor.get_new_transactions_from_statements("bank", {})
+    assert result == []
 
 
 def test_format_txns_for_storage(transaction_processor):
