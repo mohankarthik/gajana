@@ -47,7 +47,7 @@ SERVICE_ACCOUNT_KEY_FILE = "secrets/google.json"
 DB_FILE_PATH = "backups/gajana.db"
 
 # --- Google Drive Configuration ---
-CSV_FOLDER = "1DwJGCYydYikP7eWxMWD6mA84Mj7fO7-3"
+CSV_FOLDER = "1WkQUCUv44WvTr2pX51waJpRYnVvEWDjH"
 
 # --- Google Sheets Configuration ---
 TRANSACTIONS_SHEET_ID = "1I1NkOf2L5hVB6_yV896x9H-s1CIsRYWTR2T0ioBZDZU"

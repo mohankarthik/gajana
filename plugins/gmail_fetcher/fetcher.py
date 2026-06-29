@@ -34,6 +34,8 @@ class GmailFetcher:
             logger.error(f"Failed to load settings.json: {e}")
             return None
 
+    _OAUTH_PORT = 8081
+
     def _get_gmail_service(self):
         creds = None
         # Put credentials in the root secrets/ folder
@@ -54,24 +56,31 @@ class GmailFetcher:
                     )
                     return None
                 flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-                # Headless server support: print URL, user opens locally, then redirects to localhost
+                port = self._OAUTH_PORT
                 logger.info("\n" + "=" * 80)
-                logger.info("HEADLESS AUTHENTICATION REQUIRED")
                 logger.info(
-                    "1. Copy the URL printed below and open it in a browser on your local computer."
+                    "HEADLESS AUTHENTICATION — two steps before opening the URL:"
                 )
-                logger.info("2. Complete the Google login.")
+                logger.info("")
                 logger.info(
-                    "3. You will be redirected to a 'This site can't be reached' page (localhost:8080)."
-                )
-                logger.info(
-                    "4. Copy the ENTIRE localhost URL from your browser's address bar."
+                    "STEP 1: In a NEW terminal on your LOCAL machine, open an SSH tunnel:"
                 )
                 logger.info(
-                    '5. Open a NEW terminal on this server and run: curl "<PASTE_URL_HERE>"'
+                    f"        ssh -L {port}:localhost:{port} <user>@<this-server-ip>"
+                )
+                logger.info("")
+                logger.info("STEP 2: Open this URL in your local browser:")
+                # Generate and print the URL so user can see it before run_local_server blocks
+                flow.redirect_uri = f"http://localhost:{port}/"
+                auth_url, _ = flow.authorization_url(prompt="consent")
+                logger.info(f"        {auth_url}")
+                logger.info("")
+                logger.info(
+                    "After you approve access, the browser will redirect to localhost "
+                    f"(port {port}) through the tunnel. Auth completes automatically."
                 )
                 logger.info("=" * 80 + "\n")
-                creds = flow.run_local_server(port=0, open_browser=False)
+                creds = flow.run_local_server(port=port, open_browser=False)
 
             with open(token_path, "w") as token:
                 token.write(creds.to_json())

@@ -5,7 +5,6 @@ import csv
 import os
 from unittest.mock import patch
 import pytest
-
 from src.csv_data_source import CSVDataSource
 from src.constants import (
     BANK_TRANSACTIONS_SHEET_NAME,
@@ -40,34 +39,34 @@ def test_csv_data_source_init(temp_csv_dir):
 
 
 def test_list_statement_file_details(temp_csv_dir):
-    """Tests listing statement files in statements directory."""
+    """Tests listing statement files in statements directory (including PDFs)."""
     ds = CSVDataSource(temp_csv_dir)
 
     # Initially should be empty
     assert ds.list_statement_file_details() == []
 
-    # Add some CSV files
+    # Add some files
     statements_dir = os.path.join(temp_csv_dir, "statements")
     with open(os.path.join(statements_dir, "stat1.csv"), "w") as f:
         f.write("a,b,c")
     with open(os.path.join(statements_dir, "stat2.gsheet.csv"), "w") as f:
         f.write("x,y,z")
+    with open(os.path.join(statements_dir, "stat3.pdf"), "w") as f:
+        f.write("pdf")
     with open(os.path.join(statements_dir, "not_a_csv.txt"), "w") as f:
         f.write("hello")
 
     details = ds.list_statement_file_details()
-    assert len(details) == 2
-    # Ensure they are returned as DataSourceFile objects with filename as ID and name
+    assert len(details) == 3
     ids = {d.id for d in details}
     names = {d.name for d in details}
-    assert ids == {"stat1.csv", "stat2.gsheet.csv"}
-    assert names == {"stat1.csv", "stat2.gsheet.csv"}
+    assert ids == {"stat1.csv", "stat2.gsheet.csv", "stat3.pdf"}
+    assert names == {"stat1.csv", "stat2.gsheet.csv", "stat3.pdf"}
 
 
 def test_list_statement_file_details_nonexistent_dir(temp_csv_dir):
     """Tests listing statement files when statements directory does not exist."""
     ds = CSVDataSource(temp_csv_dir)
-    # Remove directory
     os.rmdir(ds.statements_path)
     assert ds.list_statement_file_details() == []
 
@@ -93,7 +92,6 @@ def test_get_sheet_data_statements(temp_csv_dir):
 def test_get_sheet_data_master_logs(temp_csv_dir):
     """Tests fetching sheet data for a master log when not found in statements."""
     ds = CSVDataSource(temp_csv_dir)
-    # Get sheet data for bank
     data = ds.get_sheet_data(BANK_TRANSACTIONS_SHEET_NAME, None, "A1:G2")
     assert data == [EXPECTED_SHEET_COLUMNS]
 
@@ -108,7 +106,6 @@ def test_get_sheet_data_not_found(temp_csv_dir):
 def test_get_sheet_data_exception(temp_csv_dir):
     """Tests exception handling during reading sheet data."""
     ds = CSVDataSource(temp_csv_dir)
-    # We patch builtins.open to raise an exception
     with patch("builtins.open", side_effect=Exception("Read error")):
         data = ds.get_sheet_data(f"{BANK_TRANSACTIONS_SHEET_NAME}.csv", None, "A1")
         assert data == []
@@ -187,7 +184,6 @@ def test_append_transactions_to_log_exception(temp_csv_dir):
     """Tests exception handling when appending transactions."""
     ds = CSVDataSource(temp_csv_dir)
     with patch("builtins.open", side_effect=Exception("Append error")):
-        # Should not raise exception
         ds.append_transactions_to_log("bank", [["row"]])
 
 
@@ -199,7 +195,6 @@ def test_clear_transaction_log_range(temp_csv_dir):
     ds.append_transactions_to_log("bank", [["2026-05-24", "Desc1"]])
     assert len(ds.get_transaction_log_data("bank")) == 2
 
-    # Clear
     ds.clear_transaction_log_range("bank")
     data = ds.get_transaction_log_data("bank")
     assert len(data) == 1
@@ -210,7 +205,6 @@ def test_clear_transaction_log_range_exception(temp_csv_dir):
     """Tests exception handling when clearing log range."""
     ds = CSVDataSource(temp_csv_dir)
     with patch("builtins.open", side_effect=Exception("Clear error")):
-        # Should not raise exception
         ds.clear_transaction_log_range("bank")
 
 
@@ -235,3 +229,15 @@ def test_get_first_sheet_name_from_file(temp_csv_dir):
     """Tests getting first sheet name."""
     ds = CSVDataSource(temp_csv_dir)
     assert ds.get_first_sheet_name_from_file("file.csv") == "Sheet1"
+
+
+def test_csv_data_source_download_file(temp_csv_dir):
+    """Tests downloading/reading local file bytes."""
+    ds = CSVDataSource(temp_csv_dir)
+    file_path = os.path.join(ds.statements_path, "statement.pdf")
+
+    with open(file_path, "wb") as f:
+        f.write(b"dummy pdf content")
+
+    content = ds.download_file("statement.pdf")
+    assert content == b"dummy pdf content"

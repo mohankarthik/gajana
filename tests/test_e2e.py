@@ -48,10 +48,9 @@ class TestGajanaE2E(unittest.TestCase):
                 f"CSV mismatch between {actual_path} and {expected_path}",
             )
 
-    def test_e2e_skeleton_no_op(self):
+    def test_e2e_csv_flow(self):
         """
-        Runs the E2E test skeleton with empty initial state and no statements.
-        This should result in an 'expected' state that remains empty (only headers).
+        Runs the E2E test for the CSV statement pathway.
         """
         # 1. Setup initial state by copying fixtures
         bank_initial = os.path.join(self.fixtures_dir, "bank_initial.csv")
@@ -68,14 +67,16 @@ class TestGajanaE2E(unittest.TestCase):
         shutil.copy(bank_initial, bank_work_path)
         shutil.copy(cc_initial, cc_work_path)
 
-        # Copy statement fixtures
+        # Copy ONLY CSV statement fixtures
         statements_fixture_dir = os.path.join(self.fixtures_dir, "statements")
-        if os.path.exists(self.statements_work_dir):
-            shutil.rmtree(self.statements_work_dir)
-        shutil.copytree(statements_fixture_dir, self.statements_work_dir)
+        for filename in os.listdir(statements_fixture_dir):
+            if filename.endswith(".csv"):
+                shutil.copy(
+                    os.path.join(statements_fixture_dir, filename),
+                    os.path.join(self.statements_work_dir, filename),
+                )
 
         # 2. Run the entire main.py in --update mode
-        # (Using --update flag which we added as an alias for normal mode)
         result = self._run_main(["--update"])
 
         if result.returncode != 0:
@@ -91,7 +92,58 @@ class TestGajanaE2E(unittest.TestCase):
         self._compare_csv_files(bank_work_path, bank_expected)
         self._compare_csv_files(cc_work_path, cc_expected)
 
-        # (File deletion happens in tearDown via directory removal)
+    def test_e2e_pdf_flow(self):
+        """
+        Runs the E2E test for the PDF statement pathway (live LLM call).
+        """
+        from src.pdf_parser import configure_api_keys, has_any_api_key
+
+        configure_api_keys()
+        if not has_any_api_key():
+            raise unittest.SkipTest(
+                "No LLM API keys configured (GEMINI_API_KEY or ANTHROPIC_API_KEY). Skipping live LLM E2E test."
+            )
+
+        # 1. Setup initial state by copying fixtures
+        bank_initial = os.path.join(self.fixtures_dir, "bank_initial.csv")
+        cc_initial = os.path.join(self.fixtures_dir, "cc_initial.csv")
+
+        bank_work_path = os.path.join(
+            self.working_dir, f"{BANK_TRANSACTIONS_SHEET_NAME}.csv"
+        )
+        cc_work_path = os.path.join(
+            self.working_dir, f"{CC_TRANSACTIONS_SHEET_NAME}.csv"
+        )
+
+        shutil.copy(bank_initial, bank_work_path)
+        shutil.copy(cc_initial, cc_work_path)
+
+        # Copy the PDF statement and credit card CSV statement
+        statements_fixture_dir = os.path.join(self.fixtures_dir, "statements")
+        shutil.copy(
+            os.path.join(statements_fixture_dir, "bank-axis-karti-2026-05.pdf"),
+            os.path.join(self.statements_work_dir, "bank-axis-karti-2026-05.pdf"),
+        )
+        shutil.copy(
+            os.path.join(statements_fixture_dir, "cc-axis-magnus-2026-05.csv"),
+            os.path.join(self.statements_work_dir, "cc-axis-magnus-2026-05.csv"),
+        )
+
+        # 2. Run the entire main.py in --update mode
+        result = self._run_main(["--update"])
+
+        if result.returncode != 0:
+            print(result.stdout)
+            print(result.stderr)
+
+        self.assertEqual(result.returncode, 0, "main.py failed to run")
+
+        # 3. Compare against expected output
+        bank_expected = os.path.join(self.fixtures_dir, "bank_expected.csv")
+        cc_expected = os.path.join(self.fixtures_dir, "cc_expected.csv")
+
+        self._compare_csv_files(bank_work_path, bank_expected)
+        self._compare_csv_files(cc_work_path, cc_expected)
 
 
 if __name__ == "__main__":
