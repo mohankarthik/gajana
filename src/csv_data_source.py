@@ -75,11 +75,15 @@ class CSVDataSource(DataSourceInterface):
             return files_details
 
         for filename in os.listdir(self.statements_path):
-            if filename.endswith(".csv") or filename.endswith(".gsheet.csv"):
+            if (
+                filename.endswith(".csv")
+                or filename.endswith(".gsheet.csv")
+                or filename.endswith(".pdf")
+            ):
                 # We use the filename as the ID for local files
                 files_details.append(DataSourceFile(filename, filename))
 
-        self.logger.info(f"Found {len(files_details)} CSV statement files.")
+        self.logger.info(f"Found {len(files_details)} statement files.")
         return files_details
 
     def get_sheet_data(
@@ -169,3 +173,14 @@ class CSVDataSource(DataSourceInterface):
     def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
         """For CSV, we just return the filename or a dummy value."""
         return "Sheet1"
+
+    def download_file(self, file_id: str) -> bytes:
+        """Reads and returns the raw bytes of a local statement file."""
+        file_path = os.path.join(self.statements_path, file_id)
+        if not os.path.exists(file_path):
+            file_path = os.path.join(self.root_path, file_id)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        self.logger.debug(f"Downloading/reading local file bytes: {file_path}")
+        with open(file_path, "rb") as f:
+            return f.read()

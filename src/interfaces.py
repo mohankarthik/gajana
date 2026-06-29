@@ -101,6 +101,11 @@ class DataSourceInterface(abc.ABC):
         """Gets the name (title) of the first visible sheet in a spreadsheet file."""
         pass
 
+    @abc.abstractmethod
+    def download_file(self, file_id: str) -> bytes:
+        """Downloads/reads a file's raw content and returns its bytes."""
+        pass
+
 
 class BackupInterface(abc.ABC):
     """

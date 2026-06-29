@@ -131,7 +131,11 @@ class GoogleDataSource(DataSourceInterface):
         files_details: List[DataSourceFile] = []
         page_token = None
         logger.info(f"Listing Google Sheets from Drive folder ID: {CSV_FOLDER}")
-        query = f"parents in '{CSV_FOLDER}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+        query = (
+            f"parents in '{CSV_FOLDER}' and "
+            "(mimeType='application/vnd.google-apps.spreadsheet' or "
+            "mimeType='application/pdf') and trashed=false"
+        )
         try:
             while True:
                 response = (
@@ -183,8 +187,23 @@ class GoogleDataSource(DataSourceInterface):
                         f"Found first visible sheet name: '{title}' for file ID: {file_id}"
                     )
                     return title
-        logger.warning(f"No visible sheets found for file ID: {file_id}")
         return None
+
+    @retry_on_gcp_error()
+    def download_file(self, file_id: str) -> bytes:
+        """Downloads a file (e.g., PDF) from Google Drive."""
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+
+        logger.info(f"Downloading file ID: {file_id}")
+        request = self.drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        logger.info(f"Successfully downloaded file ID: {file_id}")
+        return fh.getvalue()
 
     @retry_on_gcp_error()
     def get_sheet_data(

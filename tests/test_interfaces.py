@@ -76,6 +76,9 @@ def test_data_source_interface_requires_all_methods_implemented():
         def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
             return None  # Implemented
 
+        def download_file(self, file_id: str) -> bytes:
+            return b""
+
     with pytest.raises(TypeError) as excinfo:
         IncompleteDataSource()  # type: ignore
     # The error message will list the missing abstract methods
@@ -110,6 +113,9 @@ def test_data_source_interface_requires_all_methods_implemented():
 
         def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
             return "Sheet1"
+
+        def download_file(self, file_id: str) -> bytes:
+            return b"dummy file contents"
 
     # This should not raise an error
     try:

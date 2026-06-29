@@ -68,33 +68,35 @@ class TransactionProcessor:
             return None, None
 
         try:
-            # Remove extensions
+            import re as _re
+
             base_name = filename_lower.split(".")[0]
+            base_name = _re.sub(r"_copy\d+$", "", base_name)
             parts = base_name.split("-")
 
+            year_part = parts[-2].strip()
+            month_part = parts[-1].strip()
+            if (
+                len(year_part) == 4
+                and year_part.isdigit()
+                and len(month_part) == 2
+                and month_part.isdigit()
+            ):
+                year = int(year_part)
+                month = int(month_part)
+                next_month_start = datetime.datetime(year, month, 1) + pd.DateOffset(
+                    months=1
+                )
+                return (
+                    matched_account,
+                    next_month_start - datetime.timedelta(days=1),
+                )
             if account_type == "bank":
+                # Legacy year-only format: bank-account-YYYY.pdf
                 date_part = parts[-1].strip()
                 if len(date_part) == 4 and date_part.isdigit():
                     year = int(date_part)
                     return matched_account, datetime.datetime(year, 12, 31)
-            else:  # cc
-                year_part = parts[-2].strip()
-                month_part = parts[-1].strip()
-                if (
-                    len(year_part) == 4
-                    and year_part.isdigit()
-                    and len(month_part) == 2
-                    and month_part.isdigit()
-                ):
-                    year = int(year_part)
-                    month = int(month_part)
-                    next_month_start = datetime.datetime(
-                        year, month, 1
-                    ) + pd.DateOffset(months=1)
-                    return (
-                        matched_account,
-                        next_month_start - datetime.timedelta(days=1),
-                    )
 
             logger.warning(
                 f"Could not parse standard date pattern from date part in filename '{filename}'"
@@ -191,7 +193,7 @@ class TransactionProcessor:
                 return None
             return df
         except Exception as e:
-            log_and_exit(logger, f"Pandas DataFrame creation/cleaning failed: {e}", e)
+            logger.error(f"Pandas DataFrame creation/cleaning failed: {e}", exc_info=e)
             return None
 
     def _standardize_parsed_df(
@@ -231,12 +233,11 @@ class TransactionProcessor:
 
         # --- Date Parsing ---
         if "date" not in df.columns:
-            log_and_exit(
-                logger, "Standardized 'date' column not found. Cannot proceed."
-            )
+            logger.error("Standardized 'date' column not found. Cannot proceed.")
             return None
         try:
-            df["date"] = df["date"].apply(
+            df["date"] = df["date"].astype(object)
+            df.loc[:, "date"] = df["date"].apply(
                 lambda x: parse_mixed_datetime(logger, x, date_formats)
             )
             df.dropna(subset=["date"], inplace=True)
@@ -260,8 +261,9 @@ class TransactionProcessor:
             "amount" in df.columns and amount_sign_col and amount_sign_col in df.columns
         ):
             # Ensure the 'amount' column is numeric before applying sign
-            df["amount"] = df["amount"].apply(self._parse_amount)
-            df["amount"] = df.apply(
+            df["amount"] = df["amount"].astype(object)
+            df.loc[:, "amount"] = df["amount"].apply(self._parse_amount)
+            df.loc[:, "amount"] = df.apply(
                 lambda r: (
                     -r["amount"]
                     if (not debit_value and pd.isna(r.get(amount_sign_col)))
@@ -271,7 +273,8 @@ class TransactionProcessor:
                 axis=1,
             )
         elif "amount" in df.columns:
-            df["amount"] = df["amount"].apply(self._parse_amount)
+            df["amount"] = df["amount"].astype(object)
+            df.loc[:, "amount"] = df["amount"].apply(self._parse_amount)
         else:
             logger.error("Could not find columns to calculate amount.")
             return None
@@ -382,6 +385,7 @@ class TransactionProcessor:
             f"Scanning {len(statement_files)} statement files for {account_type} transactions."
         )
 
+        seen_account_dates: set[tuple[str, Any]] = set()
         for file_info in statement_files:
             file_name, file_id = file_info.name, file_info.id
             if not file_id or account_type not in file_name.lower():
@@ -392,6 +396,15 @@ class TransactionProcessor:
             )
             if not matched_account:
                 continue
+
+            dedup_key = (matched_account, stmt_end_date)
+            if stmt_end_date and dedup_key in seen_account_dates:
+                logger.info(
+                    f"Skipping duplicate statement '{file_name}' (already processing this period)."
+                )
+                continue
+            if stmt_end_date:
+                seen_account_dates.add(dedup_key)
 
             last_txn_date = latest_txn_by_account.get(matched_account)
             if (
@@ -412,21 +425,77 @@ class TransactionProcessor:
                 continue
             config = PARSING_CONFIG[config_key]
 
-            # Use file_id (which is spreadsheet_id) and get first sheet name for data fetching
-            first_sheet_name = self.data_source.get_first_sheet_name_from_file(file_id)
-            if not first_sheet_name:
-                logger.warning(f"Cannot get sheet name for {file_id}. Skipping.")
-                continue
-
-            raw_statement_data = self.data_source.get_sheet_data(
-                file_id, first_sheet_name, "A:Z"
-            )
-            if not raw_statement_data:
-                logger.warning(f"No data from statement Sheet '{file_name}'. Skipping.")
-                continue
-
             try:
-                df = self._parse_statement_data_with_pandas(raw_statement_data, config)
+                if file_name.lower().endswith(".pdf"):
+                    logger.info(f"Processing statement PDF: '{file_name}'")
+                    pdf_bytes = self.data_source.download_file(file_id)
+                    password = ""
+                    try:
+                        import json
+                        import os
+
+                        pw_path = os.path.join("secrets", "passwords.json")
+                        if os.path.exists(pw_path):
+                            with open(pw_path, "r") as f:
+                                pw_data = json.load(f)
+                                # Try account-specific key first (e.g. "axis-secondary"),
+                                # fall back to bank-level key (e.g. "axis")
+                                parts = matched_account.split("-")
+                                specific_key = "-".join(parts[1:]).lower()
+                                bank_key = (
+                                    parts[1].lower()
+                                    if len(parts) > 1
+                                    else matched_account.lower()
+                                )
+                                password = pw_data.get(
+                                    specific_key, pw_data.get(bank_key, "")
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to load password for {matched_account}: {e}"
+                        )
+
+                    from src.pdf_parser import PDFParser
+
+                    parser = PDFParser()
+                    parsed_txns = parser.parse_pdf(pdf_bytes, password)
+                    if parsed_txns:
+                        df = pd.DataFrame(parsed_txns)
+                        df.replace("", pd.NA, inplace=True)
+                        config = {
+                            "column_map": {
+                                "date": "date",
+                                "description": "description",
+                                "debit": "debit",
+                                "credit": "credit",
+                            },
+                            "date_formats": ["%Y-%m-%d"],
+                        }
+                    else:
+                        df = None
+                else:
+                    first_sheet_name = self.data_source.get_first_sheet_name_from_file(
+                        file_id
+                    )
+                    if not first_sheet_name:
+                        logger.warning(
+                            f"Cannot get sheet name for {file_id}. Skipping."
+                        )
+                        continue
+
+                    raw_statement_data = self.data_source.get_sheet_data(
+                        file_id, first_sheet_name, "A:Z"
+                    )
+                    if not raw_statement_data:
+                        logger.warning(
+                            f"No data from statement Sheet '{file_name}'. Skipping."
+                        )
+                        continue
+
+                    df = self._parse_statement_data_with_pandas(
+                        raw_statement_data, config
+                    )
+
                 if df is not None and not df.empty:
                     std_df = self._standardize_parsed_df(df, config, matched_account)
                     if std_df is None or std_df.empty:
@@ -462,7 +531,7 @@ class TransactionProcessor:
                 else:
                     logger.info(f"0 txns or empty DataFrame from '{file_name}'.")
             except Exception as e:
-                log_and_exit(logger, f"Failed to process sheet '{file_name}': {e}", e)
+                logger.error(f"Failed to process sheet '{file_name}': {e}", exc_info=e)
 
         if all_parsed_txns:
             all_parsed_txns.sort(
