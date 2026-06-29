@@ -14,3 +14,6 @@ backups/
 
 # Gemini
 GEMINI.md
+
+# Personal settings (copy settings.example.json → settings.json and fill in)
+settings.json

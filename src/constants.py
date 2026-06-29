@@ -5,7 +5,28 @@ import json
 import logging
 import os
 
+from src.settings import (  # re-exported for backward compat
+    BANK_ACCOUNTS,
+    BANK_TRANSACTIONS_FULL_RANGE,
+    BANK_TRANSACTIONS_SHEET_NAME,
+    CC_ACCOUNTS,
+    CC_TRANSACTIONS_FULL_RANGE,
+    CC_TRANSACTIONS_SHEET_NAME,
+    CSV_FOLDER,
+    TRANSACTIONS_SHEET_ID,
+)
 from src.utils import log_and_exit
+
+__all__ = [
+    "BANK_ACCOUNTS",
+    "BANK_TRANSACTIONS_FULL_RANGE",
+    "BANK_TRANSACTIONS_SHEET_NAME",
+    "CC_ACCOUNTS",
+    "CC_TRANSACTIONS_FULL_RANGE",
+    "CC_TRANSACTIONS_SHEET_NAME",
+    "CSV_FOLDER",
+    "TRANSACTIONS_SHEET_ID",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +34,6 @@ CONFIG_DIR = "data/configs"
 
 
 def load_parsing_config(config_path: str = CONFIG_DIR) -> dict:
-    """Loads all .json parsing configurations from the specified directory."""
     loaded_config = {}
     logger.info(f"Loading parsing configs from: {config_path}")
     if not os.path.exists(config_path):
@@ -21,7 +41,7 @@ def load_parsing_config(config_path: str = CONFIG_DIR) -> dict:
 
     for filename in os.listdir(config_path):
         if filename.endswith(".json"):
-            config_key = filename[:-5]  # Remove .json extension
+            config_key = filename[:-5]
             file_path = os.path.join(config_path, filename)
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -46,24 +66,9 @@ SERVICE_ACCOUNT_KEY_FILE = "secrets/google.json"
 # --- Database Configuration ---
 DB_FILE_PATH = "backups/gajana.db"
 
-# --- Google Drive Configuration ---
-CSV_FOLDER = "1WkQUCUv44WvTr2pX51waJpRYnVvEWDjH"
-
-# --- Google Sheets Configuration ---
-TRANSACTIONS_SHEET_ID = "1I1NkOf2L5hVB6_yV896x9H-s1CIsRYWTR2T0ioBZDZU"
-
-# --- Sheet Ranges for Consolidated Data ---
-BANK_TRANSACTIONS_SHEET_NAME = "Bank transactions"
+# --- Sheet Data Ranges ---
 BANK_TRANSACTIONS_DATA_RANGE = "B2:H"
-BANK_TRANSACTIONS_FULL_RANGE = (
-    f"{BANK_TRANSACTIONS_SHEET_NAME}!{BANK_TRANSACTIONS_DATA_RANGE}"
-)
-
-CC_TRANSACTIONS_SHEET_NAME = "CC Transactions"
 CC_TRANSACTIONS_DATA_RANGE = "B2:H"
-CC_TRANSACTIONS_FULL_RANGE = (
-    f"{CC_TRANSACTIONS_SHEET_NAME}!{CC_TRANSACTIONS_DATA_RANGE}"
-)
 
 # Standardized column names used internally after parsing
 EXPECTED_SHEET_COLUMNS = [
@@ -76,19 +81,6 @@ EXPECTED_SHEET_COLUMNS = [
     "Account",
 ]
 INTERNAL_TXN_KEYS = ["date", "description", "amount", "category", "remarks", "account"]
-
-# --- Account Identifiers ---
-CC_ACCOUNTS = [
-    "cc-axis-magnus",
-    "cc-icici-amazonpay",
-    "cc-hdfc-infiniametal",
-]
-BANK_ACCOUNTS = [
-    "bank-axis-karti",
-    "bank-axis-mini",
-    "bank-hdfc-karti",
-    "bank-hdfc-mini",
-]
 
 # --- Categorization ---
 MATCHERS_FILE_PATH = "data/matchers.json"
