@@ -89,6 +89,22 @@ def test_parse_amount_invalid_exits(transaction_processor, mock_log_and_exit_fix
         ("other-file.csv", ["sbi"], "bank", None, None),
         # Test case where date parsing from filename fails
         ("bank-sbi-baddate.csv", ["sbi"], "bank", "sbi", None),
+        # Prefix collision: longer/more-specific name must win regardless of
+        # account_list order (cc-axis-neo is a substring of cc-axis-neorupay).
+        (
+            "cc-axis-neorupay-2026-05.pdf",
+            ["cc-axis-neo", "cc-axis-neorupay"],
+            "cc",
+            "cc-axis-neorupay",
+            datetime.datetime(2026, 5, 31),
+        ),
+        (
+            "cc-axis-neo-2026-05.pdf",
+            ["cc-axis-neo", "cc-axis-neorupay"],
+            "cc",
+            "cc-axis-neo",
+            datetime.datetime(2026, 5, 31),
+        ),
     ],
 )
 def test_get_account_and_date_from_filename(

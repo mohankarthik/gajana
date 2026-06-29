@@ -106,10 +106,13 @@ class GmailFetcher:
             subject = config["subject"]
             prefix = config["prefix"]
             sender = config.get("from")
+            recipient = config.get("to")
 
             query = ""
             if sender:
                 query += f"from:{sender} "
+            if recipient:
+                query += f"to:{recipient} "
             query += f'subject:"{subject}" has:attachment -in:trash after:{date_from}'
 
             logger.info(f"Searching Gmail for: {query}")
