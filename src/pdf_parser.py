@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import io
+import time
 import base64
 from pypdf import PdfReader, PdfWriter
 import litellm
@@ -12,6 +13,33 @@ PRIMARY_MODEL = "gemini/gemini-2.5-flash"
 FALLBACK_MODEL = "anthropic/claude-sonnet-4-6"
 
 _quota_exhausted_models: set[str] = set()
+
+# The free-tier Gemini quota is per-minute (~15-20 requests). Space out primary
+# (Gemini) calls so batch runs stay under it and don't fall back to the paid
+# Claude model. Override via GAJANA_GEMINI_MIN_INTERVAL (seconds; 0 disables).
+_DEFAULT_PRIMARY_INTERVAL = 4.0
+_last_primary_call = 0.0
+
+
+def _is_primary_model(model: str) -> bool:
+    return not ("anthropic" in model or "claude" in model)
+
+
+def _throttle_primary() -> None:
+    """Sleep so consecutive primary-model calls are spaced out, avoiding the
+    free-tier per-minute rate limit."""
+    global _last_primary_call
+    interval = float(
+        os.environ.get("GAJANA_GEMINI_MIN_INTERVAL", _DEFAULT_PRIMARY_INTERVAL)
+    )
+    if interval <= 0:
+        return
+    wait = interval - (time.monotonic() - _last_primary_call)
+    if wait > 0:
+        logger.info(f"Throttling {wait:.1f}s before primary call (rate limit).")
+        time.sleep(wait)
+    _last_primary_call = time.monotonic()
+
 
 _EXTRACTION_PROMPT = """
 You are a precise data extraction assistant.
@@ -123,6 +151,8 @@ class PDFParser:
                 "type": "image_url",
                 "image_url": {"url": f"data:application/pdf;base64,{pdf_b64}"},
             }
+        if _is_primary_model(model):
+            _throttle_primary()
         try:
             response = litellm.completion(
                 model=model,
@@ -150,6 +180,8 @@ class PDFParser:
                 llm_provider="",
                 model=model,
             )
+        if _is_primary_model(model):
+            _throttle_primary()
         try:
             response = litellm.completion(
                 model=model,

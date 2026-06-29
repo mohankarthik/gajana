@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
+# Processed emails are tagged with this label (instead of being trashed) so the
+# source email is preserved for recovery and excluded from future fetches.
+PROCESSED_LABEL = "GajanaProcessed"
+
 
 class GmailFetcher:
     def __init__(self, drive_service):
@@ -92,12 +96,45 @@ class GmailFetcher:
             logger.error(f"An error occurred setting up Gmail service: {error}")
             return None
 
+    def _get_or_create_label_id(self):
+        """Returns the id of the processed-marker label, creating it if needed."""
+        try:
+            labels = (
+                self.gmail_service.users()
+                .labels()
+                .list(userId="me")
+                .execute()
+                .get("labels", [])
+            )
+            for lbl in labels:
+                if lbl["name"] == PROCESSED_LABEL:
+                    return lbl["id"]
+            created = (
+                self.gmail_service.users()
+                .labels()
+                .create(
+                    userId="me",
+                    body={
+                        "name": PROCESSED_LABEL,
+                        "labelListVisibility": "labelShow",
+                        "messageListVisibility": "show",
+                    },
+                )
+                .execute()
+            )
+            logger.info(f"Created Gmail label '{PROCESSED_LABEL}'.")
+            return created["id"]
+        except HttpError as error:
+            logger.error(f"Could not get/create label '{PROCESSED_LABEL}': {error}")
+            return None
+
     def fetch_and_upload(self, days_back=7):
         if not self.gmail_service or not self.settings:
             return
 
         folder_id = self.settings.get("gajana_folder_id")
         configs = self.settings.get("configs", [])
+        label_id = self._get_or_create_label_id()
 
         # Calculate date for search query
         date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y/%m/%d")
@@ -106,11 +143,17 @@ class GmailFetcher:
             subject = config["subject"]
             prefix = config["prefix"]
             sender = config.get("from")
+            recipient = config.get("to")
 
             query = ""
             if sender:
                 query += f"from:{sender} "
-            query += f'subject:"{subject}" has:attachment -in:trash after:{date_from}'
+            if recipient:
+                query += f"to:{recipient} "
+            query += (
+                f'subject:"{subject}" has:attachment '
+                f"-in:trash -label:{PROCESSED_LABEL} after:{date_from}"
+            )
 
             logger.info(f"Searching Gmail for: {query}")
 
@@ -207,13 +250,22 @@ class GmailFetcher:
                                 f"Successfully created {file_name} with ID: {uploaded_file.get('id')}"
                             )
 
-                            # Trash the email so we don't process it again
-                            self.gmail_service.users().messages().trash(
-                                userId="me", id=msg["id"]
-                            ).execute()
-                            logger.info(
-                                f"Trashed email {msg['id']} to prevent reprocessing."
-                            )
+                            # Label the email as processed (instead of trashing)
+                            # so the source email is preserved for recovery and
+                            # excluded from future fetches.
+                            if label_id:
+                                self.gmail_service.users().messages().modify(
+                                    userId="me",
+                                    id=msg["id"],
+                                    body={"addLabelIds": [label_id]},
+                                ).execute()
+                                logger.info(
+                                    f"Labeled email {msg['id']} '{PROCESSED_LABEL}'."
+                                )
+                            else:
+                                logger.warning(
+                                    f"No label id; email {msg['id']} left as-is."
+                                )
                             break  # Found the attachment
 
             except HttpError as error:
