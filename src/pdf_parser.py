@@ -2,69 +2,185 @@ import os
 import json
 import logging
 import io
+import base64
 from pypdf import PdfReader, PdfWriter
-import google.generativeai as genai
+import litellm
 
 logger = logging.getLogger(__name__)
 
+PRIMARY_MODEL = "gemini/gemini-2.5-flash"
+FALLBACK_MODEL = "anthropic/claude-sonnet-4-6"
 
-def load_gemini_api_key() -> str:
-    # 1. Try secrets/gemini.json
-    json_path = os.path.join(os.getcwd(), "secrets", "gemini.json")
+_quota_exhausted_models: set[str] = set()
+
+_EXTRACTION_PROMPT = """
+You are a precise data extraction assistant.
+Extract all financial transactions from the provided bank statement.
+Only extract actual transactions. Ignore opening/closing balances, rewards points, page headers, or other summary text.
+
+Return a JSON object with a single key "transactions" containing an array of objects.
+Each object must have exactly these fields:
+- "date": The transaction date in YYYY-MM-DD format.
+- "description": The exact transaction details, description, narration, or payee.
+- "debit": The outgoing amount (withdrawal/debit). Use empty string if no debit occurred. No currency symbols or commas.
+- "credit": The incoming amount (deposit/credit). Use empty string if no credit occurred. No currency symbols or commas.
+"""
+
+
+def _load_secret_key(filename: str, env_var: str) -> str:
+    import re
+
+    json_path = os.path.join(os.getcwd(), "secrets", filename)
     if os.path.exists(json_path):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
-            # If missing curly braces, wrap it
             if not content.startswith("{"):
                 content = "{" + content + "}"
-            data = json.loads(content)
-            if "api_key" in data:
-                return str(data["api_key"]).strip()
+            try:
+                data = json.loads(content)
+                if "api_key" in data:
+                    return str(data["api_key"]).strip()
+            except Exception:
+                match = re.search(r'"api_key"\s*:\s*"([^"]+)"', content)
+                if match:
+                    return match.group(1).strip()
         except Exception:
-            # Fallback regex extraction if JSON parsing is still problematic
-            import re
+            pass
+    return os.environ.get(env_var, "")
 
-            match = re.search(r'"api_key"\s*:\s*"([^"]+)"', content)
-            if match:
-                return match.group(1).strip()
 
-    # 2. Try environment variable
-    return os.environ.get("GEMINI_API_KEY", "")
+def configure_api_keys() -> None:
+    """Load API keys from secrets files into env vars for LiteLLM."""
+    gemini_key = _load_secret_key("gemini.json", "GEMINI_API_KEY")
+    if gemini_key:
+        os.environ.setdefault("GEMINI_API_KEY", gemini_key)
+
+    anthropic_key = _load_secret_key("anthropic.json", "ANTHROPIC_API_KEY")
+    if anthropic_key:
+        os.environ.setdefault("ANTHROPIC_API_KEY", anthropic_key)
+
+
+def has_any_api_key() -> bool:
+    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
 
 
 class PDFParser:
-    def __init__(self, model_name: str = "gemini-3.5-flash"):
-        api_key = load_gemini_api_key()
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel(model_name)
-            logger.info(f"PDFParser initialized with model: {model_name}")
+    def __init__(
+        self,
+        primary_model: str = PRIMARY_MODEL,
+        fallback_model: str = FALLBACK_MODEL,
+    ):
+        configure_api_keys()
+        self.primary_model = primary_model
+        self.fallback_model = fallback_model
+        if not has_any_api_key():
+            logger.warning("No LLM API keys configured. PDF parsing will fail.")
         else:
-            logger.warning(
-                "GEMINI_API_KEY environment variable or secrets/gemini.json not set. PDF parsing will fail."
+            logger.info(
+                f"PDFParser ready. Primary: {primary_model}, Fallback: {fallback_model}"
             )
-            self.model = None
+
+    def _parse_response(self, content: str, tool_calls=None) -> list[dict]:
+        if not content and tool_calls:
+            content = tool_calls[0].function.arguments
+        text = content.strip()
+        # Strip markdown code fences (```json ... ``` or ``` ... ```)
+        if text.startswith("```"):
+            lines = text.splitlines()
+            lines = lines[1:]  # drop opening fence line
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for val in data.values():
+                if isinstance(val, list):
+                    return val
+        return []
+
+    def _call_llm_with_pdf(self, model: str, pdf_b64: str) -> list[dict]:
+        if model in _quota_exhausted_models:
+            raise litellm.RateLimitError(
+                f"Skipping {model}: quota known exhausted this session.",
+                llm_provider="",
+                model=model,
+            )
+        # Anthropic requires "document" content block; others use image_url
+        if "anthropic" in model or "claude" in model:
+            pdf_content: dict = {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": pdf_b64,
+                },
+            }
+        else:
+            pdf_content = {
+                "type": "image_url",
+                "image_url": {"url": f"data:application/pdf;base64,{pdf_b64}"},
+            }
+        try:
+            response = litellm.completion(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": _EXTRACTION_PROMPT},
+                            pdf_content,
+                        ],
+                    }
+                ],
+                response_format={"type": "json_object"},
+            )
+        except litellm.RateLimitError:
+            _quota_exhausted_models.add(model)
+            raise
+        msg = response.choices[0].message
+        return self._parse_response(msg.content or "", msg.tool_calls)
+
+    def _call_llm_with_text(self, model: str, text: str) -> list[dict]:
+        if model in _quota_exhausted_models:
+            raise litellm.RateLimitError(
+                f"Skipping {model}: quota known exhausted this session.",
+                llm_provider="",
+                model=model,
+            )
+        try:
+            response = litellm.completion(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"{_EXTRACTION_PROMPT}\n\nStatement Text:\n{text}",
+                    }
+                ],
+                response_format={"type": "json_object"},
+            )
+        except litellm.RateLimitError:
+            _quota_exhausted_models.add(model)
+            raise
+        msg = response.choices[0].message
+        return self._parse_response(msg.content or "", msg.tool_calls)
 
     def parse_pdf(self, pdf_bytes: bytes, password: str = "") -> list[dict]:
-        if not self.model:
-            logger.error("GEMINI_API_KEY not configured. Cannot parse PDF.")
+        if not has_any_api_key():
+            logger.error("No LLM API keys configured. Cannot parse PDF.")
             return []
 
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             if reader.is_encrypted:
-                if password:
-                    res = reader.decrypt(password)
-                    if res == 0:
-                        logger.error("Failed to decrypt PDF. Incorrect password.")
-                        return []
-                else:
+                if not password:
                     logger.error("PDF is encrypted but no password provided.")
                     return []
-
-            # If it was encrypted, write the decrypted PDF to bytes
-            if reader.is_encrypted:
+                if reader.decrypt(password) == 0:
+                    logger.error("Failed to decrypt PDF. Incorrect password.")
+                    return []
                 writer = PdfWriter()
                 for page in reader.pages:
                     writer.add_page(page)
@@ -74,108 +190,53 @@ class PDFParser:
             else:
                 pdf_payload_bytes = pdf_bytes
 
-            prompt = """
-You are a precise data extraction assistant.
-Extract all financial transactions from the provided bank statement document.
-Only extract actual transactions. Ignore opening/closing balances, rewards points, page headers, or other summary text.
+            pdf_b64 = base64.b64encode(pdf_payload_bytes).decode("utf-8")
 
-For each transaction, extract:
-- 'date': The transaction date in YYYY-MM-DD format.
-- 'description': The exact transaction details, description, narration, or payee.
-- 'debit': The outgoing amount (withdrawal / debit). Use empty string if no debit occurred.
-  Do not include currency symbols or commas.
-- 'credit': The incoming amount (deposit / credit). Use empty string if no credit occurred.
-  Do not include currency symbols or commas.
-"""
-
-            # Define standard schema for structured JSON output
-            generation_config = {
-                "response_mime_type": "application/json",
-                "response_schema": {
-                    "type": "ARRAY",
-                    "description": "List of extracted transactions",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "date": {
-                                "type": "STRING",
-                                "description": "Transaction date in YYYY-MM-DD format",
-                            },
-                            "description": {
-                                "type": "STRING",
-                                "description": "Transaction description/narration",
-                            },
-                            "debit": {
-                                "type": "STRING",
-                                "description": "Debit amount as string",
-                            },
-                            "credit": {
-                                "type": "STRING",
-                                "description": "Credit amount as string",
-                            },
-                        },
-                        "required": ["date", "description", "debit", "credit"],
-                    },
-                },
-            }
-
-            response_text = ""
-            # Try native PDF modality first
+            # 1. Primary model with PDF
             try:
+                logger.info(f"Parsing PDF with primary model: {self.primary_model}")
+                txns = self._call_llm_with_pdf(self.primary_model, pdf_b64)
                 logger.info(
-                    "Attempting to parse PDF using Gemini native PDF modality..."
+                    f"Parsed {len(txns)} transactions via {self.primary_model}."
                 )
-                response = self.model.generate_content(
-                    contents=[
-                        {
-                            "mime_type": "application/pdf",
-                            "data": pdf_payload_bytes,
-                        },
-                        prompt,
-                    ],
-                    generation_config=generation_config,
-                )
-                response_text = response.text.strip()
-                transactions = json.loads(response_text)
+                return txns
+            except Exception as e:
+                logger.warning(f"Primary model failed: {e}. Trying fallback...")
+
+            # 2. Fallback model with PDF
+            try:
+                logger.info(f"Parsing PDF with fallback model: {self.fallback_model}")
+                txns = self._call_llm_with_pdf(self.fallback_model, pdf_b64)
                 logger.info(
-                    f"Successfully parsed {len(transactions)} transactions via Gemini PDF modality."
+                    f"Parsed {len(txns)} transactions via {self.fallback_model}."
                 )
-                return transactions
+                return txns
+            except Exception as e:
+                logger.warning(f"Fallback model failed: {e}. Trying text extraction...")
 
-            except Exception as pdf_err:
-                logger.warning(
-                    f"Native PDF modality parsing failed or timed out: {pdf_err}. Falling back to text extraction..."
-                )
-                # Fallback: Extract text using pypdf
-                text = ""
-                for page in reader.pages:
-                    extracted = page.extract_text()
-                    if extracted:
-                        text += extracted + "\n"
+            # 3. Text extraction — try primary then fallback
+            text = "".join(page.extract_text() or "" for page in reader.pages)
+            if not text.strip():
+                logger.error("No text extractable from PDF. Cannot parse.")
+                return []
 
-                if not text.strip():
-                    logger.error(
-                        "No text could be extracted from PDF using pypdf. Cannot parse."
+            for model in (self.primary_model, self.fallback_model):
+                try:
+                    logger.info(f"Parsing extracted text with: {model}")
+                    txns = self._call_llm_with_text(model, text)
+                    logger.info(
+                        f"Parsed {len(txns)} transactions via text extraction ({model})."
                     )
-                    return []
+                    return txns
+                except Exception as e:
+                    logger.warning(f"Text extraction with {model} failed: {e}")
 
-                logger.info("Attempting to parse extracted text using Gemini...")
-                text_prompt = f"{prompt}\n\nStatement Text:\n{text}"
-                response = self.model.generate_content(
-                    contents=text_prompt, generation_config=generation_config
-                )
-                response_text = response.text.strip()
-                transactions = json.loads(response_text)
-                logger.info(
-                    f"Successfully parsed {len(transactions)} transactions via extracted text."
-                )
-                return transactions
+            logger.error("All models failed on text extraction.")
+            return []
 
         except json.JSONDecodeError as e:
-            logger.error(
-                f"Failed to decode JSON from Gemini response: {e}\nResponse: {response_text}"
-            )
+            logger.error(f"Failed to parse LLM JSON response: {e}")
             return []
         except Exception as e:
-            logger.error(f"Failed to parse PDF statement: {e}")
+            logger.error(f"Failed to parse PDF: {e}")
             return []

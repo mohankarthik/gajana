@@ -96,11 +96,12 @@ class TestGajanaE2E(unittest.TestCase):
         """
         Runs the E2E test for the PDF statement pathway (live LLM call).
         """
-        from src.pdf_parser import load_gemini_api_key
+        from src.pdf_parser import configure_api_keys, has_any_api_key
 
-        if not load_gemini_api_key():
+        configure_api_keys()
+        if not has_any_api_key():
             raise unittest.SkipTest(
-                "Neither GEMINI_API_KEY nor secrets/gemini.json is set. Skipping live LLM E2E test."
+                "No LLM API keys configured (GEMINI_API_KEY or ANTHROPIC_API_KEY). Skipping live LLM E2E test."
             )
 
         # 1. Setup initial state by copying fixtures

@@ -60,7 +60,7 @@ repos:
           - google-api-python-client
           - oauth2client
           - pypdf
-          - google-generativeai
+          - litellm
           - reportlab
       - id: diff-coverage
         name: diff-coverage

@@ -68,33 +68,35 @@ class TransactionProcessor:
             return None, None
 
         try:
-            # Remove extensions
+            import re as _re
+
             base_name = filename_lower.split(".")[0]
+            base_name = _re.sub(r"_copy\d+$", "", base_name)
             parts = base_name.split("-")
 
+            year_part = parts[-2].strip()
+            month_part = parts[-1].strip()
+            if (
+                len(year_part) == 4
+                and year_part.isdigit()
+                and len(month_part) == 2
+                and month_part.isdigit()
+            ):
+                year = int(year_part)
+                month = int(month_part)
+                next_month_start = datetime.datetime(year, month, 1) + pd.DateOffset(
+                    months=1
+                )
+                return (
+                    matched_account,
+                    next_month_start - datetime.timedelta(days=1),
+                )
             if account_type == "bank":
+                # Legacy year-only format: bank-account-YYYY.pdf
                 date_part = parts[-1].strip()
                 if len(date_part) == 4 and date_part.isdigit():
                     year = int(date_part)
                     return matched_account, datetime.datetime(year, 12, 31)
-            else:  # cc
-                year_part = parts[-2].strip()
-                month_part = parts[-1].strip()
-                if (
-                    len(year_part) == 4
-                    and year_part.isdigit()
-                    and len(month_part) == 2
-                    and month_part.isdigit()
-                ):
-                    year = int(year_part)
-                    month = int(month_part)
-                    next_month_start = datetime.datetime(
-                        year, month, 1
-                    ) + pd.DateOffset(months=1)
-                    return (
-                        matched_account,
-                        next_month_start - datetime.timedelta(days=1),
-                    )
 
             logger.warning(
                 f"Could not parse standard date pattern from date part in filename '{filename}'"
@@ -383,6 +385,7 @@ class TransactionProcessor:
             f"Scanning {len(statement_files)} statement files for {account_type} transactions."
         )
 
+        seen_account_dates: set[tuple[str, Any]] = set()
         for file_info in statement_files:
             file_name, file_id = file_info.name, file_info.id
             if not file_id or account_type not in file_name.lower():
@@ -393,6 +396,15 @@ class TransactionProcessor:
             )
             if not matched_account:
                 continue
+
+            dedup_key = (matched_account, stmt_end_date)
+            if stmt_end_date and dedup_key in seen_account_dates:
+                logger.info(
+                    f"Skipping duplicate statement '{file_name}' (already processing this period)."
+                )
+                continue
+            if stmt_end_date:
+                seen_account_dates.add(dedup_key)
 
             last_txn_date = latest_txn_by_account.get(matched_account)
             if (
@@ -426,12 +438,18 @@ class TransactionProcessor:
                         if os.path.exists(pw_path):
                             with open(pw_path, "r") as f:
                                 pw_data = json.load(f)
-                                bank_name = (
-                                    matched_account.split("-")[1].lower()
-                                    if "-" in matched_account
+                                # Try account-specific key first (e.g. "axis-secondary"),
+                                # fall back to bank-level key (e.g. "axis")
+                                parts = matched_account.split("-")
+                                specific_key = "-".join(parts[1:]).lower()
+                                bank_key = (
+                                    parts[1].lower()
+                                    if len(parts) > 1
                                     else matched_account.lower()
                                 )
-                                password = pw_data.get(bank_name, "")
+                                password = pw_data.get(
+                                    specific_key, pw_data.get(bank_key, "")
+                                )
                     except Exception as e:
                         logger.warning(
                             f"Failed to load password for {matched_account}: {e}"
