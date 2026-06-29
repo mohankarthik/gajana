@@ -53,7 +53,7 @@ def sample_transactions() -> List[Dict[str, Any]]:
         {
             "description": "Unknown random stuff",
             "amount": -100.00,
-            "account": "cc-axis-magnus",
+            "account": "cc-axis-neo",
         },
         {
             "description": "Regex Target 123",

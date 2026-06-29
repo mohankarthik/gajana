@@ -60,7 +60,10 @@ class TransactionProcessor:
         """Attempts to extract account name and statement end date from filename."""
         matched_account = None
         filename_lower = filename.lower()
-        for acc in account_list:
+        # Match the most specific (longest) account name first so that a name
+        # which is a prefix of another (e.g. cc-axis-neo vs cc-axis-neorupay)
+        # does not shadow the longer one.
+        for acc in sorted(account_list, key=len, reverse=True):
             if acc.lower() in filename_lower:
                 matched_account = acc
                 break

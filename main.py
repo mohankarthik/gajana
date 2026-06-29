@@ -18,7 +18,6 @@ from src.transaction_matcher import TransactionMatcher
 from src.transaction_processor import TransactionProcessor
 from src.utils import log_and_exit
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -270,6 +269,13 @@ def main():
         action="store_true",
         help="Run the optional Gmail Fetcher plugin to download statements before processing.",
     )
+    parser.add_argument(
+        "--fetch-days",
+        type=int,
+        default=7,
+        help="How many days back the Gmail Fetcher searches for statements. "
+        "Increase to backfill missed months (e.g. --fetch-days 180).",
+    )
     args = parser.parse_args()
 
     logger.info("Gajana script started.")
@@ -286,7 +292,7 @@ def main():
             if isinstance(data_source, GoogleDataSource):
                 from plugins.gmail_fetcher.fetcher import run_plugin
 
-                run_plugin(data_source.drive_service)
+                run_plugin(data_source.drive_service, days_back=args.fetch_days)
             else:
                 logger.warning(
                     "--fetch-emails requires GoogleDataSource. Skipping email fetch."

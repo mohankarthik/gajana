@@ -125,8 +125,8 @@ class TestGajanaE2E(unittest.TestCase):
             os.path.join(self.statements_work_dir, "bank-axis-primary-2026-05.pdf"),
         )
         shutil.copy(
-            os.path.join(statements_fixture_dir, "cc-axis-magnus-2026-05.csv"),
-            os.path.join(self.statements_work_dir, "cc-axis-magnus-2026-05.csv"),
+            os.path.join(statements_fixture_dir, "cc-axis-neo-2026-05.csv"),
+            os.path.join(self.statements_work_dir, "cc-axis-neo-2026-05.csv"),
         )
 
         # 2. Run the entire main.py in --update mode
