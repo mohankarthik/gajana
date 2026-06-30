@@ -679,3 +679,22 @@ def test_get_all_transactions_for_recategorize(transaction_processor, mock_data_
     # Check that they are sorted by date
     assert all_txns[0]["description"] == "Bank Txn"
     assert all_txns[1]["description"] == "CC Txn"
+
+
+def test_format_txns_for_storage_sanitizes_nan(transaction_processor):
+    """NaN/None cells must become '' (or defaults) so the Sheets JSON is valid."""
+    import datetime as _dt
+
+    rows = transaction_processor._format_txns_for_storage(
+        [
+            {
+                "date": _dt.datetime(2024, 1, 1),
+                "description": float("nan"),
+                "amount": -100.0,
+                "category": None,
+                "remarks": float("nan"),
+                "account": float("nan"),
+            }
+        ]
+    )
+    assert rows == [["2024-01-01", "", "100.00", "", "Uncategorized", "", "Unknown"]]
