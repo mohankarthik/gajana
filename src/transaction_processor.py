@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 from operator import itemgetter
 from typing import Any, Hashable, List, Optional, Tuple
 
@@ -548,6 +549,18 @@ class TransactionProcessor:
             logger.info(f"No new {account_type} txns from statements.")
         return all_parsed_txns
 
+    @staticmethod
+    def _clean_cell(value: Any, default: Any = "") -> Any:
+        """Coerce None / NaN to a JSON-safe default.
+
+        Empty sheet cells come back from pandas as float('nan'); left as-is they
+        serialize to a literal ``NaN`` token and the Sheets API rejects the
+        whole payload ("Invalid JSON payload ... Unexpected token").
+        """
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return default
+        return value
+
     def _format_txns_for_storage(self, txns: list[dict]) -> List[List[Any]]:
         values = []
         for txn in txns:
@@ -566,12 +579,12 @@ class TransactionProcessor:
             values.append(
                 [
                     date_str,
-                    txn.get("description", ""),
+                    self._clean_cell(txn.get("description", "")),
                     debit,
                     credit,
-                    txn.get("category", DEFAULT_CATEGORY),
-                    txn.get("remarks", ""),
-                    txn.get("account", "Unknown"),
+                    self._clean_cell(txn.get("category"), DEFAULT_CATEGORY),
+                    self._clean_cell(txn.get("remarks", "")),
+                    self._clean_cell(txn.get("account"), "Unknown"),
                 ]
             )
         return values

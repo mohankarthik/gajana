@@ -12,6 +12,9 @@ secrets/
 # Backups
 backups/
 
+# LLM categorization cache (regenerated at runtime)
+data/llm_category_cache.json
+
 # Gemini
 GEMINI.md
 

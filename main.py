@@ -13,6 +13,7 @@ from typing import Any, Hashable
 from src.backup_manager import SQLiteBackupManager
 from src.categorizer import Categorizer
 from src.constants import BANK_ACCOUNTS, CC_ACCOUNTS, DEFAULT_CATEGORY
+from src.llm_categorizer import LLMCategorizer
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
 from src.transaction_processor import TransactionProcessor
@@ -52,10 +53,16 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
     logger.info("Running in NORMAL mode.")
     all_new_txns_added_count = 0
 
+    # Fetch existing history for both account types up front and build the
+    # category lookup index from it (exact + fuzzy layers).
+    old_by_type = {t: processor.get_old_transactions(t) for t in ["bank", "cc"]}
+    history = [txn for txns in old_by_type.values() for txn in txns]
+    categorizer.build_index(history, enable_llm=categorizer.llm is not None)
+
     for acc_type in ["bank", "cc"]:
         logger.info(f"--- Processing {acc_type.upper()} Transactions ---")
         try:
-            old_txns = processor.get_old_transactions(acc_type)
+            old_txns = old_by_type[acc_type]
             latest_by_account = find_latest_transaction_by_account(old_txns)
             potential_new_txns = processor.get_new_transactions_from_statements(
                 acc_type, latest_by_account
@@ -106,6 +113,9 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
     logger.info(
         f"Recategorizing {len(txns_to_categorize)} '{DEFAULT_CATEGORY}' transactions..."
     )
+    # Build the lookup index from the already-labeled history (build() skips
+    # Uncategorized rows) before recategorizing the leftovers.
+    categorizer.build_index(all_existing_txns, enable_llm=categorizer.llm is not None)
     categorizer.categorize(txns_to_categorize)  # Modifies in-place
 
     bank_txns = [t for t in all_existing_txns if t.get("account") in BANK_ACCOUNTS]
@@ -276,6 +286,12 @@ def main():
         help="How many days back the Gmail Fetcher searches for statements. "
         "Increase to backfill missed months (e.g. --fetch-days 180).",
     )
+    parser.add_argument(
+        "--llm-categorize",
+        action="store_true",
+        help="Enable the LLM fallback layer for novel merchants the lookup "
+        "index and rules miss (costs API calls; results are cached).",
+    )
     args = parser.parse_args()
 
     logger.info("Gajana script started.")
@@ -309,7 +325,8 @@ def main():
         elif args.learn_categories:
             run_learn_mode(processor)
         else:
-            categorizer = Categorizer()
+            llm = LLMCategorizer() if args.llm_categorize else None
+            categorizer = Categorizer(llm=llm)
             if args.recategorize_only:
                 run_recategorize_mode(processor, categorizer)
             else:
