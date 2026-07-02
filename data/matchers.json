@@ -2,8 +2,9 @@
   {
     "category": "Expense:Automobile",
     "debit": true,
+    "use_regex": true,
     "description": [
-      "car",
+      "\\bcar\\b",
       "fuel",
       "petrol"
     ]
