@@ -56,17 +56,17 @@ def backup_baseline_counts() -> dict[str, int] | None:
     overwrite to detect a truncated read."""
     import os
     import sqlite3
+    from contextlib import closing
 
     from src.constants import DB_FILE_PATH
 
     if not os.path.exists(DB_FILE_PATH):
         return None
     try:
-        rows = (
-            sqlite3.connect(DB_FILE_PATH)
-            .execute("SELECT account, COUNT(*) FROM transactions GROUP BY account")
-            .fetchall()
-        )
+        with closing(sqlite3.connect(DB_FILE_PATH)) as conn:
+            rows = conn.execute(
+                "SELECT account, COUNT(*) FROM transactions GROUP BY account"
+            ).fetchall()
     except Exception as e:
         logger.warning(f"Could not read backup baseline from {DB_FILE_PATH}: {e}")
         return None
