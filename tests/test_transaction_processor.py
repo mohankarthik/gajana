@@ -629,7 +629,8 @@ def test_add_new_transactions_to_log_no_txns(transaction_processor, mock_data_so
 
 
 def test_overwrite_transaction_log(transaction_processor, mock_data_source):
-    """Tests that clear and write methods are called in order."""
+    """Overwrite must delegate to the data source's safe write-then-trim, and
+    must NOT pre-clear (a failed write must not leave the log empty)."""
     txns = [
         {
             "date": datetime.datetime(2024, 1, 25),
@@ -641,7 +642,7 @@ def test_overwrite_transaction_log(transaction_processor, mock_data_source):
 
     transaction_processor.overwrite_transaction_log(txns, "cc")
 
-    mock_data_source.clear_transaction_log_range.assert_called_once_with("cc")
+    mock_data_source.clear_transaction_log_range.assert_not_called()
     mock_data_source.write_transactions_to_log.assert_called_once()
     call_args = mock_data_source.write_transactions_to_log.call_args[0]
     assert call_args[0] == "cc"

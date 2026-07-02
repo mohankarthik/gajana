@@ -74,12 +74,13 @@ class DataSourceInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def clear_transaction_log_range(self, log_type: str) -> None:
+    def clear_transaction_log_range(self, log_type: str, start_row: int = 3) -> None:
         """
         Clears the data range in the specified transaction log.
 
         Args:
             log_type: Identifier for the log (e.g., "bank", "cc").
+            start_row: First (1-indexed) row to clear from; rows above are kept.
         """
         pass
 

@@ -365,3 +365,33 @@ def test_write_transactions_no_data(
     _, mock_sheets_service = mock_google_services
     gds.write_transactions_to_log("bank", [])
     mock_sheets_service.spreadsheets.return_value.values.return_value.update.assert_not_called()
+
+
+def test_write_transactions_then_clears_trailing(
+    mock_service_account_credentials, mock_google_services, mocker
+):
+    """Write must happen first, then a trailing clear starting just below the
+    written block (never a pre-clear that could empty the sheet)."""
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+    values.update.return_value.execute = MagicMock(
+        return_value={"updatedCells": 14, "updatedRange": "Bank transactions!B3:H4"}
+    )
+    values.clear.return_value.execute = MagicMock(
+        return_value={"clearedRange": "Bank transactions!B5:H"}
+    )
+    mocker.patch("src.google_data_source.TRANSACTIONS_SHEET_ID", "dummy")
+    mocker.patch(
+        "src.google_data_source.BANK_TRANSACTIONS_FULL_RANGE", "Bank transactions!B2:H"
+    )
+
+    gds.write_transactions_to_log("bank", [["a"] * 7, ["b"] * 7])
+
+    # 2 rows written from B3 -> trailing clear starts at row 5.
+    values.clear.assert_called_once_with(
+        spreadsheetId="dummy", range="Bank transactions!B5:H", body={}
+    )
+    # update called before clear
+    method_order = [c[0] for c in values.method_calls if c[0] in ("update", "clear")]
+    assert method_order[0] == "update" and "clear" in method_order

@@ -603,7 +603,8 @@ class TransactionProcessor:
             return
         logger.info(f"Preparing to overwrite {len(txns)} {account_type} txns in log.")
         data_values = self._format_txns_for_storage(txns)
-        self.data_source.clear_transaction_log_range(account_type)
+        # write_transactions_to_log is a safe overwrite (write-then-trim); do NOT
+        # pre-clear here or a failed write would leave the log empty.
         self.data_source.write_transactions_to_log(account_type, data_values)
 
     def get_all_transactions_for_recategorize(self) -> list[dict]:
