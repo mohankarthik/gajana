@@ -130,9 +130,7 @@ class Categorizer:
             f"LLM={'on' if self.llm else 'off'}."
         )
 
-    def _match_rules(
-        self, txn: dict[Hashable, Any], is_debit: bool, i: int
-    ) -> Optional[str]:
+    def _match_rules(self, txn: dict[Hashable, Any], is_debit: bool) -> Optional[str]:
         """Return the category from the first matching rule, or None."""
         txn_description = str(txn.get("description", "")).lower()
         txn_account = str(txn.get("account", "")).lower()
@@ -239,7 +237,7 @@ class Categorizer:
                 continue
 
             # Layer 2: hand-written rule matchers.
-            rule_cat = self._match_rules(txn, is_debit, i)
+            rule_cat = self._match_rules(txn, is_debit)
             if rule_cat is not None:
                 txn["category"] = rule_cat
                 sources["rule"] = sources.get("rule", 0) + 1
