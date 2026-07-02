@@ -640,6 +640,12 @@ def test_overwrite_transaction_log(transaction_processor, mock_data_source):
         }
     ]
 
+    # read-back returns header + the 1 written row -> verification passes
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+        ["2024-01-25", "Overwrite", "50.00", "", "Uncategorized", "", "acc-1"],
+    ]
+
     transaction_processor.overwrite_transaction_log(txns, "cc")
 
     mock_data_source.clear_transaction_log_range.assert_not_called()
@@ -656,6 +662,49 @@ def test_overwrite_transaction_log_no_txns(transaction_processor, mock_data_sour
     transaction_processor.overwrite_transaction_log([], "cc")
     mock_data_source.clear_transaction_log_range.assert_not_called()
     mock_data_source.write_transactions_to_log.assert_not_called()
+
+
+def test_overwrite_verification_fails_on_short_readback(
+    transaction_processor, mock_data_source, mock_log_and_exit_fixture
+):
+    """If the read-back has fewer rows than were written, abort loudly."""
+    txns = [
+        {
+            "date": datetime.datetime(2024, 1, i + 1),
+            "description": f"T{i}",
+            "amount": -10.0,
+            "account": "cc-x",
+        }
+        for i in range(3)
+    ]
+    # wrote 3 rows, but read-back shows only 1 (truncated) -> must fail
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+        ["2024-01-01", "T0", "10.00", "", "Uncategorized", "", "cc-x"],
+    ]
+    with pytest.raises(SystemExit):
+        transaction_processor.overwrite_transaction_log(txns, "cc")
+    args, _ = mock_log_and_exit_fixture.call_args
+    assert "Post-write verification FAILED" in args[1]
+
+
+def test_overwrite_verification_passes_without_header(
+    transaction_processor, mock_data_source
+):
+    """Read-back with no header row still counts correctly (no false abort)."""
+    txns = [
+        {
+            "date": datetime.datetime(2024, 1, 1),
+            "description": "T0",
+            "amount": -10.0,
+            "account": "cc-x",
+        }
+    ]
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["2024-01-01", "T0", "10.00", "", "Uncategorized", "", "cc-x"],
+    ]
+    transaction_processor.overwrite_transaction_log(txns, "cc")  # no raise
+    mock_data_source.write_transactions_to_log.assert_called_once()
 
 
 def test_get_all_transactions_for_recategorize(transaction_processor, mock_data_source):

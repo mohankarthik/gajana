@@ -606,6 +606,30 @@ class TransactionProcessor:
         # write_transactions_to_log is a safe overwrite (write-then-trim); do NOT
         # pre-clear here or a failed write would leave the log empty.
         self.data_source.write_transactions_to_log(account_type, data_values)
+        self._verify_overwrite(account_type, len(data_values))
+
+    def _verify_overwrite(self, account_type: str, expected: int) -> None:
+        """Read the log back and confirm it holds exactly `expected` data rows.
+
+        A silent partial write or a truncated read-back would otherwise leave the
+        sheet short without anyone noticing; fail loudly so the run stops and the
+        user can restore from backup (--restore-db).
+        """
+        readback = self.data_source.get_transaction_log_data(account_type)
+        rows = [r for r in readback if any(str(c).strip() for c in r)]
+        # Drop a leading header row if present (Sheets range starts at the header).
+        if rows and str(rows[0][0]).strip().lower() == "date":
+            rows = rows[1:]
+        if len(rows) != expected:
+            log_and_exit(
+                logger,
+                f"Post-write verification FAILED for {account_type}: wrote {expected} "
+                f"rows but read back {len(rows)}. The sheet may be truncated/corrupted "
+                f"- restore from backup with `python main.py --restore-db`.",
+            )
+        logger.info(
+            f"Verified {account_type} log: {len(rows)} rows written and read back."
+        )
 
     def get_all_transactions_for_recategorize(self) -> list[dict]:
         logger.info(
