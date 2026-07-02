@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any, Hashable, Optional
 
@@ -31,8 +32,15 @@ LOWCONF_REMARK = "REVIEW: low-confidence auto-category"
 
 
 def _flag_remark(txn: dict[Hashable, Any], remark: str) -> None:
-    """Set a review remark only if the txn has no existing remark."""
-    if not str(txn.get("remarks", "")).strip():
+    """Set a review remark only if the txn has no existing remark.
+
+    Empty sheet cells arrive as float('nan'); treat those (and None) as empty so
+    the tag is not silently suppressed by a NaN remark.
+    """
+    cur = txn.get("remarks", "")
+    if cur is None or (isinstance(cur, float) and math.isnan(cur)):
+        cur = ""
+    if not str(cur).strip():
         txn["remarks"] = remark
 
 
@@ -272,8 +280,7 @@ class Categorizer:
         for txn in txns:
             if txn["category"] == DEFAULT_CATEGORY:
                 uncategorized += 1
-                if not str(txn.get("remarks", "")).strip():
-                    txn["remarks"] = REVIEW_REMARK
+                _flag_remark(txn, REVIEW_REMARK)
 
         logger.info(
             f"Categorization complete. Processed: {len(txns)}. "

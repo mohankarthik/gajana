@@ -116,6 +116,21 @@ def test_review_flag_when_unresolved(matchers_file):
     assert out[0]["remarks"] == REVIEW_REMARK
 
 
+def test_lowconf_flag_set_over_nan_remark(matchers_file):
+    """A NaN/None remark (empty sheet cell) must not suppress the review tag."""
+    c = Categorizer(matchers_file=matchers_file)
+    c.build_index(_history())
+    txn = {
+        "description": "ACME GLOBAL CONSULTING RETAINER PAYOUT",
+        "amount": 75000,
+        "account": "b",
+        "remarks": float("nan"),
+    }
+    out = c.categorize([txn])
+    assert out[0]["category"] == "Income:Consulting"
+    assert out[0]["remarks"] == LOWCONF_REMARK
+
+
 def test_review_flag_preserves_existing_remark(matchers_file):
     c = Categorizer(matchers_file=matchers_file)
     c.build_index(_history())
