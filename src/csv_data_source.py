@@ -151,8 +151,15 @@ class CSVDataSource(DataSourceInterface):
         except Exception as e:
             self.logger.error(f"Error appending to {path}: {e}")
 
-    def clear_transaction_log_range(self, log_type: str) -> None:
-        """Clears data from the local master CSV log (keeps header)."""
+    def clear_transaction_log_range(self, log_type: str, start_row: int = 3) -> None:
+        """Clears data from the local master CSV log (keeps header).
+
+        ``start_row`` exists for interface parity with the Sheets backend. For a
+        local file the master log is fully rewritten on every overwrite, so a
+        trailing-only clear (start_row > 3) has nothing to remove and is a no-op.
+        """
+        if start_row > 3:
+            return
         path = self._get_log_path(log_type)
         self.logger.info(f"Clearing log: {path}")
 
@@ -166,9 +173,19 @@ class CSVDataSource(DataSourceInterface):
     def write_transactions_to_log(
         self, log_type: str, data_values: List[List[Any]]
     ) -> None:
-        """Overwrites data in the local master CSV log (after header)."""
-        self.clear_transaction_log_range(log_type)
-        self.append_transactions_to_log(log_type, data_values)
+        """Overwrites the local master CSV log atomically (header + all rows)."""
+        path = self._get_log_path(log_type)
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(EXPECTED_SHEET_COLUMNS)
+                writer.writerows(data_values)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            self.logger.error(f"Error writing {path}: {e}")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
         """For CSV, we just return the filename or a dummy value."""
