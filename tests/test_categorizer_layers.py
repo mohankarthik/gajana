@@ -184,3 +184,23 @@ def test_llm_off_vocab_prediction_dropped(tmp_path, mocker):
     llm._client_ready = True
     txns = [{"description": "x", "amount": -1, "account": "a"}]
     assert llm.classify(txns, ["Expense:Dining"]) == {}
+
+
+def test_creditcard_payment_not_automobile():
+    """Regression: 'car' matcher must be word-bounded so it never matches
+    'creditcard'. Uses the real data/matchers.json."""
+    c = Categorizer()  # real matchers, no index
+    debit = [
+        {
+            "description": "CREDITCARD PAYMENT XX 5742 REF#NSUU3",
+            "amount": -5742,
+            "account": "bank-axis-primary",
+        }
+    ]
+    c.categorize(debit)
+    assert debit[0]["category"] == "Transfer:Credit Card"
+    # genuine automobile keywords still match
+    for desc in ("CAR WASH DOWNTOWN", "HP PETROL PUMP", "INDIAN OIL FUEL"):
+        t = [{"description": desc, "amount": -900, "account": "bank-axis-primary"}]
+        c.categorize(t)
+        assert t[0]["category"] == "Expense:Automobile", desc
