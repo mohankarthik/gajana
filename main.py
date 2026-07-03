@@ -12,7 +12,8 @@ from typing import Any, Hashable
 
 from src.backup_manager import SQLiteBackupManager
 from src.categorizer import Categorizer
-from src.constants import BANK_ACCOUNTS, CC_ACCOUNTS, DEFAULT_CATEGORY
+from src.constants import DEFAULT_CATEGORY
+from src.llm_categorizer import LLMCategorizer
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
 from src.transaction_processor import TransactionProcessor
@@ -24,6 +25,99 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+
+# A full-overwrite must never shrink a sheet far below the last local backup:
+# that signals a truncated/partial read and would delete real rows.
+RECAT_MIN_READ_RATIO = 0.9
+
+
+def partition_by_sheet(
+    txns: list[dict[Any, Any]],
+) -> tuple[dict[str, list[dict[Any, Any]]], list[dict[Any, Any]]]:
+    """Split transactions into bank/cc buckets by account PREFIX (not a fixed
+    allow-list), so legacy/renamed accounts are never silently dropped on an
+    overwrite. Anything without a bank-/cc- prefix is returned as ``unknown``."""
+    buckets: dict[str, list[dict[Any, Any]]] = {"bank": [], "cc": []}
+    unknown: list[dict[Any, Any]] = []
+    for t in txns:
+        acc = str(t.get("account", "")).strip().lower()
+        if acc.startswith("bank"):
+            buckets["bank"].append(t)
+        elif acc.startswith("cc"):
+            buckets["cc"].append(t)
+        else:
+            unknown.append(t)
+    return buckets, unknown
+
+
+def backup_baseline_counts() -> dict[str, int] | None:
+    """Per-sheet row counts from the latest local SQLite backup, or None if no
+    backup exists / it can't be read. Used as a safety baseline before an
+    overwrite to detect a truncated read."""
+    import os
+    import sqlite3
+    from contextlib import closing
+
+    from src.constants import DB_FILE_PATH
+
+    if not os.path.exists(DB_FILE_PATH):
+        return None
+    try:
+        with closing(sqlite3.connect(DB_FILE_PATH)) as conn:
+            rows = conn.execute(
+                "SELECT account, COUNT(*) FROM transactions GROUP BY account"
+            ).fetchall()
+    except Exception as e:
+        logger.warning(f"Could not read backup baseline from {DB_FILE_PATH}: {e}")
+        return None
+    counts = {"bank": 0, "cc": 0}
+    for acc, n in rows:
+        a = str(acc or "").lower()
+        if a.startswith("bank"):
+            counts["bank"] += n
+        elif a.startswith("cc"):
+            counts["cc"] += n
+    return counts
+
+
+def assert_safe_to_overwrite(
+    buckets: dict[str, list[dict[Any, Any]]],
+    unknown: list[dict[Any, Any]],
+    require_baseline: bool,
+) -> None:
+    """Abort (log_and_exit) if an overwrite would lose data.
+
+    - unknown-prefix accounts present -> refuse (would be dropped).
+    - live row count far below the backup baseline -> refuse (truncated read).
+    - require_baseline and no backup exists -> refuse (no safety net).
+    """
+    if unknown:
+        sample = {str(t.get("account")) for t in unknown[:5]}
+        log_and_exit(
+            logger,
+            f"Refusing overwrite: {len(unknown)} txns have an unrecognized account "
+            f"prefix (not bank-/cc-): {sample}. They would be dropped. Fix the data "
+            f"or account naming first.",
+        )
+    baseline = backup_baseline_counts()
+    if baseline is None:
+        if require_baseline:
+            log_and_exit(
+                logger,
+                "Refusing overwrite: no local backup found as a safety baseline. "
+                "Run `python main.py --backup-db` first.",
+            )
+        return
+    for sheet in ("bank", "cc"):
+        have, base = len(buckets[sheet]), baseline.get(sheet, 0)
+        if base and have < base * RECAT_MIN_READ_RATIO:
+            log_and_exit(
+                logger,
+                f"Refusing overwrite: {sheet} read has {have} rows but the backup "
+                f"baseline has {base} (< {RECAT_MIN_READ_RATIO:.0%}). This looks like "
+                f"a truncated read; aborting to avoid deleting rows. Re-run, and if the "
+                f"drop is legitimate, refresh the backup with --backup-db.",
+            )
 
 
 def find_latest_transaction_by_account(
@@ -52,10 +146,16 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
     logger.info("Running in NORMAL mode.")
     all_new_txns_added_count = 0
 
+    # Fetch existing history for both account types up front and build the
+    # category lookup index from it (exact + fuzzy layers).
+    old_by_type = {t: processor.get_old_transactions(t) for t in ["bank", "cc"]}
+    history = [txn for txns in old_by_type.values() for txn in txns]
+    categorizer.build_index(history, enable_llm=categorizer.llm is not None)
+
     for acc_type in ["bank", "cc"]:
         logger.info(f"--- Processing {acc_type.upper()} Transactions ---")
         try:
-            old_txns = processor.get_old_transactions(acc_type)
+            old_txns = old_by_type[acc_type]
             latest_by_account = find_latest_transaction_by_account(old_txns)
             potential_new_txns = processor.get_new_transactions_from_statements(
                 acc_type, latest_by_account
@@ -93,6 +193,12 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
         logger.warning("No existing transactions for recategorization.")
         return
 
+    # Safety gate FIRST, before anything else: a full overwrite will rewrite the
+    # whole sheet, so validate the read up front (truncated read or unknown-prefix
+    # accounts -> refuse) regardless of whether there is anything to recategorize.
+    buckets, unknown = partition_by_sheet(all_existing_txns)
+    assert_safe_to_overwrite(buckets, unknown, require_baseline=True)
+
     txns_to_categorize = [
         txn
         for txn in all_existing_txns
@@ -106,17 +212,15 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
     logger.info(
         f"Recategorizing {len(txns_to_categorize)} '{DEFAULT_CATEGORY}' transactions..."
     )
+    # Build the lookup index from the already-labeled history (build() skips
+    # Uncategorized rows) before recategorizing the leftovers.
+    categorizer.build_index(all_existing_txns, enable_llm=categorizer.llm is not None)
     categorizer.categorize(txns_to_categorize)  # Modifies in-place
 
-    bank_txns = [t for t in all_existing_txns if t.get("account") in BANK_ACCOUNTS]
-    cc_txns = [t for t in all_existing_txns if t.get("account") in CC_ACCOUNTS]
-    bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
-    cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))
-
-    logger.info("--- Overwriting Bank Transactions Sheet ---")
-    processor.overwrite_transaction_log(bank_txns, "bank")
-    logger.info("--- Overwriting CC Transactions Sheet ---")
-    processor.overwrite_transaction_log(cc_txns, "cc")
+    for sheet in ("bank", "cc"):
+        buckets[sheet].sort(key=itemgetter("date", "account", "amount", "description"))
+        logger.info(f"--- Overwriting {sheet.upper()} Transactions Sheet ---")
+        processor.overwrite_transaction_log(buckets[sheet], sheet)
     logger.info("Recategorize mode finished.")
 
 
@@ -217,15 +321,17 @@ def run_restore_mode(
         logger.warning("No transactions found in the local database to restore.")
         return
 
-    bank_txns = [t for t in restored_transactions if t.get("account") in BANK_ACCOUNTS]
-    cc_txns = [t for t in restored_transactions if t.get("account") in CC_ACCOUNTS]
-    bank_txns.sort(key=itemgetter("date", "account", "amount", "description"))
-    cc_txns.sort(key=itemgetter("date", "account", "amount", "description"))
+    # Route by account prefix so legacy accounts are restored too (not dropped
+    # by a fixed allow-list). Refuse if any account has an unknown prefix.
+    buckets, unknown = partition_by_sheet(restored_transactions)
+    assert_safe_to_overwrite(buckets, unknown, require_baseline=False)
 
-    logger.info("--- Overwriting Bank Transactions Sheet from Restore ---")
-    processor.overwrite_transaction_log(bank_txns, "bank")
-    logger.info("--- Overwriting CC Transactions Sheet from Restore ---")
-    processor.overwrite_transaction_log(cc_txns, "cc")
+    for sheet in ("bank", "cc"):
+        buckets[sheet].sort(key=itemgetter("date", "account", "amount", "description"))
+        logger.info(
+            f"--- Overwriting {sheet.upper()} Transactions Sheet from Restore ---"
+        )
+        processor.overwrite_transaction_log(buckets[sheet], sheet)
     logger.info("Restore mode finished.")
 
 
@@ -276,6 +382,12 @@ def main():
         help="How many days back the Gmail Fetcher searches for statements. "
         "Increase to backfill missed months (e.g. --fetch-days 180).",
     )
+    parser.add_argument(
+        "--llm-categorize",
+        action="store_true",
+        help="Enable the LLM fallback layer for novel merchants the lookup "
+        "index and rules miss (costs API calls; results are cached).",
+    )
     args = parser.parse_args()
 
     logger.info("Gajana script started.")
@@ -309,7 +421,8 @@ def main():
         elif args.learn_categories:
             run_learn_mode(processor)
         else:
-            categorizer = Categorizer()
+            llm = LLMCategorizer() if args.llm_categorize else None
+            categorizer = Categorizer(llm=llm)
             if args.recategorize_only:
                 run_recategorize_mode(processor, categorizer)
             else:

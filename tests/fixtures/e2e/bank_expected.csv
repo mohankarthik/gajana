@@ -1,4 +1,4 @@
 Date,Description,Debit,Credit,Category,Remarks,Account
 2026-05-01,old swiggy payment,150.00,,Expense:Dining,,bank-axis-primary
 2026-05-02,uber ride,200.00,,Expense:Local Travel,,bank-axis-primary
-2026-05-03,salary,,50000.00,Uncategorized,,bank-axis-primary
+2026-05-03,salary,,50000.00,Uncategorized,REVIEW: auto-categorization uncertain,bank-axis-primary

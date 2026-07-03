@@ -269,13 +269,13 @@ class GoogleDataSource(DataSourceInterface):
         return
 
     @retry_on_gcp_error()
-    def clear_transaction_log_range(self, log_type: str) -> None:
+    def clear_transaction_log_range(self, log_type: str, start_row: int = 3) -> None:
         range_to_clear = (
             BANK_TRANSACTIONS_FULL_RANGE
             if log_type == "bank"
             else CC_TRANSACTIONS_FULL_RANGE
         )
-        data_clear_range = f"{range_to_clear.split('!')[0]}!B3:H"
+        data_clear_range = f"{range_to_clear.split('!')[0]}!B{start_row}:H"
 
         logger.info(
             f"Clearing {log_type} transaction log data in Sheet ID: {TRANSACTIONS_SHEET_ID}, Range: {data_clear_range}"
@@ -315,6 +315,9 @@ class GoogleDataSource(DataSourceInterface):
             f"Range: {write_range}"
         )
 
+        # Write the new data FIRST (overwriting rows in place), THEN clear only
+        # the stale rows below it. Never pre-clear: a failed write must not leave
+        # the sheet empty (that is how a full-overwrite previously wiped a sheet).
         body = {"values": data_values}
         result = (
             self.sheets_service.spreadsheets()
@@ -332,4 +335,6 @@ class GoogleDataSource(DataSourceInterface):
             f"Successfully wrote {updated_cells} cells to {log_type} log at "
             f"{result.get('updatedRange', write_range)}."
         )
+        # Trailing cleanup: remove any old rows beyond the freshly written block.
+        self.clear_transaction_log_range(log_type, start_row=3 + len(data_values))
         return

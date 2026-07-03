@@ -1,0 +1,10 @@
+Date,Description,Debit,Credit,Category,Remarks,Account
+2026-04-01,NETFLIX SUBSCRIPTION 4499,649.00,,Bills:Subscriptions,,bank-axis-primary
+2026-04-02,NETFLIX SUBSCRIPTION 1102,649.00,,Bills:Subscriptions,,bank-axis-primary
+2026-04-03,ACME GLOBAL CONSULTING RETAINER,,75000.00,Income:Consulting,,bank-axis-primary
+2026-04-04,ACME GLOBAL CONSULTING RETAINER,,75000.00,Income:Consulting,,bank-axis-primary
+2026-04-05,ACME GLOBAL CONSULTING RETAINER,,75000.00,Income:Consulting,,bank-axis-primary
+2026-05-05,NETFLIX SUBSCRIPTION 8888,649.00,,Bills:Subscriptions,,bank-axis-primary
+2026-05-06,uber ride home,200.00,,Expense:Local Travel,,bank-axis-primary
+2026-05-07,ACME GLOBAL CONSULTING RETAINER PAYOUT,,75000.00,Income:Consulting,REVIEW: low-confidence auto-category,bank-axis-primary
+2026-05-08,mystery vendor 4042,999.00,,Uncategorized,REVIEW: auto-categorization uncertain,bank-axis-primary

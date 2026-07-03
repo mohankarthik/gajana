@@ -629,7 +629,8 @@ def test_add_new_transactions_to_log_no_txns(transaction_processor, mock_data_so
 
 
 def test_overwrite_transaction_log(transaction_processor, mock_data_source):
-    """Tests that clear and write methods are called in order."""
+    """Overwrite must delegate to the data source's safe write-then-trim, and
+    must NOT pre-clear (a failed write must not leave the log empty)."""
     txns = [
         {
             "date": datetime.datetime(2024, 1, 25),
@@ -639,9 +640,15 @@ def test_overwrite_transaction_log(transaction_processor, mock_data_source):
         }
     ]
 
+    # read-back returns header + the 1 written row -> verification passes
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+        ["2024-01-25", "Overwrite", "50.00", "", "Uncategorized", "", "acc-1"],
+    ]
+
     transaction_processor.overwrite_transaction_log(txns, "cc")
 
-    mock_data_source.clear_transaction_log_range.assert_called_once_with("cc")
+    mock_data_source.clear_transaction_log_range.assert_not_called()
     mock_data_source.write_transactions_to_log.assert_called_once()
     call_args = mock_data_source.write_transactions_to_log.call_args[0]
     assert call_args[0] == "cc"
@@ -655,6 +662,49 @@ def test_overwrite_transaction_log_no_txns(transaction_processor, mock_data_sour
     transaction_processor.overwrite_transaction_log([], "cc")
     mock_data_source.clear_transaction_log_range.assert_not_called()
     mock_data_source.write_transactions_to_log.assert_not_called()
+
+
+def test_overwrite_verification_fails_on_short_readback(
+    transaction_processor, mock_data_source, mock_log_and_exit_fixture
+):
+    """If the read-back has fewer rows than were written, abort loudly."""
+    txns = [
+        {
+            "date": datetime.datetime(2024, 1, i + 1),
+            "description": f"T{i}",
+            "amount": -10.0,
+            "account": "cc-x",
+        }
+        for i in range(3)
+    ]
+    # wrote 3 rows, but read-back shows only 1 (truncated) -> must fail
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+        ["2024-01-01", "T0", "10.00", "", "Uncategorized", "", "cc-x"],
+    ]
+    with pytest.raises(SystemExit):
+        transaction_processor.overwrite_transaction_log(txns, "cc")
+    args, _ = mock_log_and_exit_fixture.call_args
+    assert "Post-write verification FAILED" in args[1]
+
+
+def test_overwrite_verification_passes_without_header(
+    transaction_processor, mock_data_source
+):
+    """Read-back with no header row still counts correctly (no false abort)."""
+    txns = [
+        {
+            "date": datetime.datetime(2024, 1, 1),
+            "description": "T0",
+            "amount": -10.0,
+            "account": "cc-x",
+        }
+    ]
+    mock_data_source.get_transaction_log_data.return_value = [
+        ["2024-01-01", "T0", "10.00", "", "Uncategorized", "", "cc-x"],
+    ]
+    transaction_processor.overwrite_transaction_log(txns, "cc")  # no raise
+    mock_data_source.write_transactions_to_log.assert_called_once()
 
 
 def test_get_all_transactions_for_recategorize(transaction_processor, mock_data_source):
@@ -679,3 +729,22 @@ def test_get_all_transactions_for_recategorize(transaction_processor, mock_data_
     # Check that they are sorted by date
     assert all_txns[0]["description"] == "Bank Txn"
     assert all_txns[1]["description"] == "CC Txn"
+
+
+def test_format_txns_for_storage_sanitizes_nan(transaction_processor):
+    """NaN/None cells must become '' (or defaults) so the Sheets JSON is valid."""
+    import datetime as _dt
+
+    rows = transaction_processor._format_txns_for_storage(
+        [
+            {
+                "date": _dt.datetime(2024, 1, 1),
+                "description": float("nan"),
+                "amount": -100.0,
+                "category": None,
+                "remarks": float("nan"),
+                "account": float("nan"),
+            }
+        ]
+    )
+    assert rows == [["2024-01-01", "", "100.00", "", "Uncategorized", "", "Unknown"]]
