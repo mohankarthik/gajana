@@ -102,12 +102,17 @@ Gajana uses a Google Cloud Service Account to securely access your Google Drive 
     * Share the Google Drive folder containing your statements with the service account's email address (e.g., `your-service-account@your-project.iam.gserviceaccount.com`).
     * Share your master Google Sheet with the same service account email address, giving it "Editor" permissions.
 
-### 2. Application Constants (`src/constants.py`)
+### 2. Personal Settings (`settings.json`)
 
-You need to update a few key constants to point to your specific Google Drive folder and Google Sheet.
+Copy the template and fill in your own values (this file is gitignored):
 
--   `CSV_FOLDER`: The ID of the Google Drive folder where you will upload your statement files. To get the ID, open the folder in your browser; the ID is the last part of the URL (e.g., `.../folders/THIS_IS_THE_ID`).
--   `TRANSACTIONS_SHEET_ID`: The ID of your master Google Sheet. You can find this in the URL of your sheet (e.g., `.../d/THIS_IS_THE_ID/edit`).
+```bash
+cp settings.example.json settings.json
+```
+
+-   `google_drive_csv_folder_id`: The ID of the Google Drive folder where you will upload your statement files. To get the ID, open the folder in your browser; the ID is the last part of the URL (e.g., `.../folders/THIS_IS_THE_ID`).
+-   `google_sheets_transactions_id`: The ID of your master Google Sheet. You can find this in the URL of your sheet (e.g., `.../d/THIS_IS_THE_ID/edit`).
+-   `bank_accounts` / `cc_accounts`: your account identifiers, format `{type}-{bank}-{name}`.
 
 ### 3. Statement Parsing Configurations (`data/configs/`)
 
@@ -115,7 +120,21 @@ This directory contains JSON files that tell the application how to parse differ
 
 ### 4. Categorization Rules (`data/matchers.json`)
 
-This file contains the rules used to categorize your transactions. You can add or edit rules here to customize how your expenses and income are classified.
+This file contains the rules used to categorize your transactions. It is personal and gitignored — copy the template and customize:
+
+```bash
+cp data/matchers.example.json data/matchers.json
+```
+
+If `data/matchers.json` is absent, the app falls back to `data/matchers.example.json`.
+
+### 5. Gmail Fetcher (optional, `plugins/gmail_fetcher/settings.json`)
+
+Only needed for `--fetch-emails`. Copy the template and fill in your statement senders/subjects and Drive folder ID (gitignored):
+
+```bash
+cp plugins/gmail_fetcher/settings.example.json plugins/gmail_fetcher/settings.json
+```
 
 ---
 

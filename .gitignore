@@ -20,3 +20,9 @@ GEMINI.md
 
 # Personal settings (copy settings.example.json → settings.json and fill in)
 settings.json
+
+# Personal categorization rules (copy data/matchers.example.json → data/matchers.json)
+data/matchers.json
+
+# Personal Gmail fetcher config (copy settings.example.json → settings.json)
+plugins/gmail_fetcher/settings.json

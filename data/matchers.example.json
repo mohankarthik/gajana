@@ -1,0 +1,60 @@
+[
+  {
+    "category": "Expense:Automobile",
+    "debit": true,
+    "use_regex": true,
+    "description": [
+      "\\bcar\\b",
+      "fuel",
+      "petrol"
+    ]
+  },
+  {
+    "category": "Transfer:Credit Card",
+    "description": [
+      "creditcard payment",
+      "amazon pay credit car"
+    ]
+  },
+  {
+    "category": "Expense:Dining",
+    "debit": true,
+    "description": [
+      "restaurant",
+      "swiggy",
+      "zomato"
+    ]
+  },
+  {
+    "category": "Bills:Groceries",
+    "debit": true,
+    "description": [
+      "grocer",
+      "supermarket"
+    ]
+  },
+  {
+    "category": "Expense:Local Travel",
+    "debit": true,
+    "description": [
+      "uber",
+      "ola",
+      "/cab"
+    ]
+  },
+  {
+    "category": "Transfer:Cash",
+    "debit": true,
+    "description": [
+      "atm"
+    ]
+  },
+  {
+    "account": "bank-yourbank-secondary",
+    "category": "Income:Salary",
+    "debit": false,
+    "description": [
+      "salary"
+    ]
+  }
+]

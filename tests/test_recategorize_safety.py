@@ -20,7 +20,9 @@ def _txns(*accounts):
 
 def test_partition_routes_by_prefix():
     buckets, unknown = main.partition_by_sheet(
-        _txns("bank-axis-primary", "cc-axis-platinum", "cc-hdfc-og", "bank-hdfc-secondary")
+        _txns(
+            "bank-axis-primary", "cc-axis-platinum", "cc-hdfc-og", "bank-hdfc-secondary"
+        )
     )
     assert len(buckets["bank"]) == 2
     assert len(buckets["cc"]) == 2

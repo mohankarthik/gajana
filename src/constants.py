@@ -83,7 +83,13 @@ EXPECTED_SHEET_COLUMNS = [
 INTERNAL_TXN_KEYS = ["date", "description", "amount", "category", "remarks", "account"]
 
 # --- Categorization ---
-MATCHERS_FILE_PATH = "data/matchers.json"
+# Personal rules live in data/matchers.json (gitignored). Fall back to the
+# committed example so a fresh clone runs without extra setup.
+MATCHERS_FILE_PATH = (
+    "data/matchers.json"
+    if os.path.exists("data/matchers.json")
+    else "data/matchers.example.json"
+)
 DEFAULT_CATEGORY = "Uncategorized"
 
 # --- Parsing Configuration ---

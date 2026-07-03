@@ -1,0 +1,7 @@
+{
+  "gajana_folder_id": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+  "configs": [
+    { "subject": "Bank Statement Subject Line", "from": "statements@yourbank.example", "to": "you@example.com", "prefix": "bank-yourbank-primary" },
+    { "subject": "Credit Card Statement Subject Line", "from": "cc.statements@yourbank.example", "prefix": "cc-yourbank-yourcard" }
+  ]
+}

@@ -6,7 +6,9 @@ import os
 
 logger = logging.getLogger(__name__)
 
-_SETTINGS_FILE = "settings.json"
+# Overridable so tests (and other environments) can point at a non-personal
+# settings file without touching the user's settings.json.
+_SETTINGS_FILE = os.environ.get("GAJANA_SETTINGS_FILE", "settings.json")
 _BANK_DATA_RANGE = "B2:H"
 _CC_DATA_RANGE = "B2:H"
 
