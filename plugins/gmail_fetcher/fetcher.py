@@ -129,9 +129,14 @@ class GmailFetcher:
             return None
 
     def fetch_and_upload(self, days_back=7):
-        if not self.gmail_service or not self.settings:
-            return
+        """Fetch statement PDFs from Gmail and upload to Drive.
 
+        Returns the number of new PDFs uploaded this run (used by the daily
+        monitor to detect a stale statement pipeline)."""
+        if not self.gmail_service or not self.settings:
+            return 0
+
+        uploaded_count = 0
         folder_id = self.settings.get("gajana_folder_id")
         configs = self.settings.get("configs", [])
         label_id = self._get_or_create_label_id()
@@ -249,6 +254,7 @@ class GmailFetcher:
                             logger.info(
                                 f"Successfully created {file_name} with ID: {uploaded_file.get('id')}"
                             )
+                            uploaded_count += 1
 
                             # Label the email as processed (instead of trashing)
                             # so the source email is preserved for recovery and
@@ -271,9 +277,12 @@ class GmailFetcher:
             except HttpError as error:
                 logger.error(f"An error occurred searching Gmail: {error}")
 
+        return uploaded_count
+
 
 def run_plugin(drive_service, days_back=7):
     logger.info("Starting Gmail Fetcher Plugin...")
     fetcher = GmailFetcher(drive_service)
-    fetcher.fetch_and_upload(days_back=days_back)
-    logger.info("Gmail Fetcher Plugin finished.")
+    uploaded_count = fetcher.fetch_and_upload(days_back=days_back)
+    logger.info(f"Gmail Fetcher Plugin finished. Uploaded {uploaded_count} new PDF(s).")
+    return uploaded_count

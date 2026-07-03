@@ -22,7 +22,6 @@ requests
 requests-oauthlib
 rsa
 six
-sqlite3
 uritemplate
 urllib3
 pandas

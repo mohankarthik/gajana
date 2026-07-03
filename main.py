@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from operator import itemgetter
 from typing import Any, Hashable
 
+from src import monitor
 from src.backup_manager import SQLiteBackupManager
 from src.categorizer import Categorizer
 from src.constants import DEFAULT_CATEGORY
@@ -300,6 +301,75 @@ def run_backup_mode(
     logger.info("Backup mode finished.")
 
 
+def run_backup_mode_monitored(
+    processor: TransactionProcessor, backup_manager: SQLiteBackupManager
+) -> None:
+    """Weekly backup wrapped in an Uptime-Kuma heartbeat push (own monitor)."""
+    try:
+        run_backup_mode(processor, backup_manager)
+        monitor.push_backup(True, "OK | backup complete")
+    except Exception as e:
+        monitor.push_backup(False, f"backup failed: {e}")
+        raise
+
+
+def _latest_txn_date(
+    processor: TransactionProcessor,
+) -> datetime.datetime | None:
+    """Newest transaction date across both logs, or None if the logs are empty."""
+    latest: datetime.datetime | None = None
+    for acc_type in ("bank", "cc"):
+        by_account = find_latest_transaction_by_account(
+            processor.get_old_transactions(acc_type)
+        )
+        for dt in by_account.values():
+            if latest is None or dt > latest:
+                latest = dt
+    return latest
+
+
+def run_daily_mode(
+    data_source: Any,
+    processor: TransactionProcessor,
+    categorizer: Categorizer,
+    fetch_days: int,
+) -> None:
+    """Consolidated daily job: fetch statements, update the log, then push a
+    single Uptime-Kuma heartbeat summarizing overall pipeline health."""
+    logger.info("Running in DAILY mode.")
+    pipeline_error: str | None = None
+    new_pdf_count = 0
+
+    try:
+        if isinstance(data_source, GoogleDataSource):
+            from plugins.gmail_fetcher.fetcher import run_plugin
+
+            new_pdf_count = run_plugin(data_source.drive_service, days_back=fetch_days)
+        else:
+            logger.warning("Daily mode without GoogleDataSource; skipping email fetch.")
+        monitor.record_pdf_fetch(new_pdf_count)
+
+        run_normal_mode(processor, categorizer)
+    except Exception as e:
+        pipeline_error = str(e)
+        logger.error(f"Daily pipeline error: {e}", exc_info=e)
+
+    latest_txn_date: datetime.datetime | None = None
+    try:
+        latest_txn_date = _latest_txn_date(processor)
+    except Exception as e:
+        pipeline_error = pipeline_error or f"could not read latest txn: {e}"
+        logger.error(f"Failed reading latest txn date: {e}", exc_info=e)
+
+    is_up, msg = monitor.evaluate_health(
+        pipeline_error=pipeline_error,
+        new_pdf_count=new_pdf_count,
+        latest_txn_date=latest_txn_date,
+    )
+    monitor.push_daily(is_up, msg)
+    logger.info(f"Daily mode finished. health={'UP' if is_up else 'DOWN'} | {msg}")
+
+
 def run_restore_mode(
     processor: TransactionProcessor, backup_manager: SQLiteBackupManager
 ):
@@ -360,6 +430,12 @@ def main():
         action="store_true",
         help="Restore all data from the local SQLite database to Google Sheets (DESTRUCTIVE).",
     )
+    mode_group.add_argument(
+        "--daily",
+        action="store_true",
+        help="Consolidated scheduled run: fetch statements + update the log, "
+        "then push one Uptime-Kuma health heartbeat. Enables LLM categorization.",
+    )
     parser.add_argument(
         "--update",
         action="store_true",
@@ -400,7 +476,9 @@ def main():
         else:
             data_source = GoogleDataSource()
 
-        if args.fetch_emails:
+        # --daily runs its own fetch so it can capture the new-PDF count for
+        # monitoring; skip the standalone fetch block for it.
+        if args.fetch_emails and not args.daily:
             if isinstance(data_source, GoogleDataSource):
                 from plugins.gmail_fetcher.fetcher import run_plugin
 
@@ -414,12 +492,15 @@ def main():
 
         if args.backup_db:
             backup_manager = SQLiteBackupManager()
-            run_backup_mode(processor, backup_manager)
+            run_backup_mode_monitored(processor, backup_manager)
         elif args.restore_db:
             backup_manager = SQLiteBackupManager()
             run_restore_mode(processor, backup_manager)
         elif args.learn_categories:
             run_learn_mode(processor)
+        elif args.daily:
+            categorizer = Categorizer(llm=LLMCategorizer())
+            run_daily_mode(data_source, processor, categorizer, args.fetch_days)
         else:
             llm = LLMCategorizer() if args.llm_categorize else None
             categorizer = Categorizer(llm=llm)

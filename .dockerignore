@@ -1,0 +1,21 @@
+# Personal data — bind-mounted at runtime, never baked into the image.
+secrets/
+settings.json
+plugins/gmail_fetcher/settings.json
+data/matchers.json
+data/llm_category_cache.json
+data/state/
+backups/
+
+# Dev / VCS / caches
+.git/
+venv/
+tests/
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+.coverage
+coverage.xml
+.vscode/
+GEMINI.md
