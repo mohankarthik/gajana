@@ -1,0 +1,9 @@
+# Gajana schedule (times are container-local, TZ=Asia/Kolkata).
+# Output goes to supercronic's stdout -> Docker logs -> Dozzle.
+
+# Daily 06:00 IST: fetch new statements + update the log, then push a single
+# Uptime-Kuma health heartbeat (see src/monitor.py).
+0 6 * * * cd /app && python main.py --daily
+
+# Weekly Sunday 07:00 IST: back up Google Sheets to the local SQLite DB.
+0 7 * * 0 cd /app && python main.py --backup-db
