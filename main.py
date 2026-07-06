@@ -13,7 +13,11 @@ from typing import Any, Hashable
 from src import monitor
 from src.backup_manager import SQLiteBackupManager
 from src.categorizer import Categorizer
-from src.constants import DEFAULT_CATEGORY
+from src.constants import (
+    DEFAULT_CATEGORY,
+    load_ignore_rules,
+    txn_matches_ignore_rule,
+)
 from src.llm_categorizer import LLMCategorizer
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
@@ -30,6 +34,23 @@ logger = logging.getLogger(__name__)
 # A full-overwrite must never shrink a sheet far below the last local backup:
 # that signals a truncated/partial read and would delete real rows.
 RECAT_MIN_READ_RATIO = 0.9
+
+# Descriptions the pipeline must never book (e.g. the Google salary NEFT, which
+# plugins/salary_splitter re-books as categorized split rows).
+IGNORE_RULES = load_ignore_rules()
+
+
+def apply_ignore_rules(
+    txns: list[dict[Hashable, Any]],
+) -> list[dict[Hashable, Any]]:
+    """Drops transactions matching any configured ignore rule."""
+    if not IGNORE_RULES:
+        return txns
+    kept = [t for t in txns if not txn_matches_ignore_rule(dict(t), IGNORE_RULES)]
+    dropped = len(txns) - len(kept)
+    if dropped:
+        logger.info(f"Ignore-list dropped {dropped} transaction(s) before booking.")
+    return kept
 
 
 def partition_by_sheet(
@@ -166,6 +187,7 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
             new_txns_to_add = TransactionMatcher.find_new_txns(
                 old_txns, potential_new_txns
             )
+            new_txns_to_add = apply_ignore_rules(new_txns_to_add)
 
             if new_txns_to_add:
                 logger.info(

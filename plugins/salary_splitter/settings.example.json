@@ -1,0 +1,28 @@
+{
+  "payslip_folder_id": "YOUR_PAYSLIP_DRIVE_FOLDER_ID",
+  "salary_sheet_id": "YOUR_SALARY_TRACKING_SHEET_ID",
+  "month_col_start": "B",
+  "input_row_map": {
+    "Credited to A/C": "net_pay",
+    "Basic": "basic",
+    "HRA": "hra",
+    "SA": "special_allowance",
+    "Bonus": "baby_bonus",
+    "Medical Insurance": "medical_insurance_topup",
+    "GSU Value": "gsus_income",
+    "Credited GSU Value": "gsus_income - gsus_broker_tax"
+  },
+  "salary_account": "bank-yourbank-primary",
+  "split_map": {
+    "Total Salary": { "category": "Income:Employer", "sign": "credit" },
+    "Total Tax": { "category": "Tax", "sign": "debit" },
+    "Equity": { "category": "Investment Expense:Equity", "sign": "debit" },
+    "Small Savings": { "category": "Investment Expense:Small Savings", "sign": "debit" },
+    "Medical Insurance": { "category": "Insurance:Health", "sign": "debit" }
+  },
+  "gsu_rounding": {
+    "gross": "GSU Value",
+    "credited": "Credited GSU Value",
+    "taxed": "Taxed GSU Value"
+  }
+}

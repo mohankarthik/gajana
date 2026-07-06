@@ -7,3 +7,7 @@
 
 # Weekly Sunday 07:00 IST: back up Google Sheets to the local SQLite DB.
 0 7 * * 0 cd /app && python main.py --backup-db
+
+# Monthly 5th 08:00 IST: split the previous month's Google payslip into the
+# salary sheet + the ledger (auto-selects the newest un-split payslip).
+0 8 5 * * cd /app && python run_salary_splitter.py
