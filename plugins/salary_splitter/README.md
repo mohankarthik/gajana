@@ -17,12 +17,17 @@ ledger, so the tax/equity math lives in one place — the sheet.
 ## Run
 
 ```bash
-# A specific month
+# A specific month (used for manual backfill)
 python run_salary_splitter.py 2026-06
 
-# Newest payslip not yet split
+# Fill the salary sheet + print planned rows without writing the ledger
+python run_salary_splitter.py 2026-06 --dry-run
+
+# No month -> the previous calendar month (what the monthly cron runs)
 python run_salary_splitter.py
 ```
+
+Already-split months are a no-op, so re-runs are safe.
 
 On the homelab container it runs monthly (crontab: 5th, 08:00 IST).
 

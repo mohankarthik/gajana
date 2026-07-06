@@ -9,5 +9,5 @@
 0 7 * * 0 cd /app && python main.py --backup-db
 
 # Monthly 5th 08:00 IST: split the previous month's Google payslip into the
-# salary sheet + the ledger (auto-selects the newest un-split payslip).
+# salary sheet + the ledger (no arg -> previous calendar month; idempotent).
 0 8 5 * * cd /app && python run_salary_splitter.py

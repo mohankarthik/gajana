@@ -22,13 +22,23 @@ def main() -> None:
     """Split a Google payslip into the salary sheet and the gajana ledger.
 
     Usage: python run_salary_splitter.py [YYYY-MM] [--dry-run]
-    With no month, auto-selects the newest payslip not yet split.
-    --dry-run fills the salary sheet and prints the planned ledger rows
-    without writing them to the ledger.
+    With no month, defaults to the previous calendar month (the monthly cron
+    splits the month that just ended). Pass an explicit YYYY-MM for manual
+    backfill. --dry-run fills the salary sheet and prints the planned ledger
+    rows without writing them to the ledger. Already-split months are a no-op.
     """
+    import datetime
+
     argv = [a for a in sys.argv[1:] if a != "--dry-run"]
     dry_run = "--dry-run" in sys.argv
-    ym = argv[0] if argv else None
+    if argv:
+        ym = argv[0]
+    else:
+        # Previous calendar month, e.g. run on 2026-08-05 -> "2026-07".
+        first_of_this_month = datetime.date.today().replace(day=1)
+        prev_month = first_of_this_month - datetime.timedelta(days=1)
+        ym = prev_month.strftime("%Y-%m")
+        logger.info(f"No month given; defaulting to previous month {ym}.")
 
     if not os.path.exists(SETTINGS_PATH):
         logger.error(
