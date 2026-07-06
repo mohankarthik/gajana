@@ -11,3 +11,7 @@
 # Monthly 5th 08:00 IST: split the previous month's Google payslip into the
 # salary sheet + the ledger (no arg -> previous calendar month; idempotent).
 0 8 5 * * cd /app && python run_salary_splitter.py
+
+# Every minute: poll Telegram for cash entries and append them to the Cash
+# Transactions sheet (no-op until the bot is configured).
+* * * * * cd /app && python run_telegram_bot.py

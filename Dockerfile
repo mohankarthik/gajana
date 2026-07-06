@@ -28,7 +28,7 @@ RUN pip install -r requirements.txt
 
 # App code + parsing configs baked in; personal data (secrets/, settings.json,
 # matchers.json, cache, state, backups) is bind-mounted at runtime.
-COPY main.py run_gmail_fetcher.py run_salary_splitter.py ./
+COPY main.py run_gmail_fetcher.py run_salary_splitter.py run_telegram_bot.py ./
 COPY src/ ./src/
 COPY plugins/ ./plugins/
 COPY data/configs/ ./data/configs/

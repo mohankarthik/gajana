@@ -30,5 +30,8 @@ plugins/gmail_fetcher/settings.json
 # Personal salary splitter config (copy settings.example.json → settings.json)
 plugins/salary_splitter/settings.json
 
+# Personal telegram bot config (copy settings.example.json → settings.json)
+plugins/telegram_bot/settings.json
+
 # Personal ignore rules (copy data/ignore.example.json → data/ignore.json)
 data/ignore.json
