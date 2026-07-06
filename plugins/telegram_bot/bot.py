@@ -277,10 +277,11 @@ class TelegramCashBot:
 
     def _handle_entry(
         self, chat_id: int, user_id: int, text: str, categorizer: Categorizer
-    ) -> None:
+    ) -> bool:
+        """Record a cash entry. Returns True if a row was written."""
         entry = parse_entry(text)
         if entry is None:
-            return  # not a cash entry (chatter) -> stay silent
+            return False  # not a cash entry (chatter) -> stay silent
         label = self.allowed_users.get(user_id, "")
         signed = entry.amount if entry.is_credit else -entry.amount
         txn: dict[Hashable, Any] = {
@@ -304,10 +305,12 @@ class TelegramCashBot:
         self.send_message(
             chat_id, f"✓ {summary} → {category} (cash){by}. /undo to remove."
         )
+        return True
 
     def process_message(
         self, message: dict[str, Any], categorizer: Categorizer
-    ) -> None:
+    ) -> bool:
+        """Handle one message. Returns True if a cash entry was recorded."""
         text = str(message.get("text", "")).strip()
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
@@ -322,14 +325,15 @@ class TelegramCashBot:
                 "the last entry.",
             )
         elif text.startswith("/"):
-            return  # unknown command -> ignore
+            return False  # unknown command -> ignore
         else:
-            self._handle_entry(chat_id, user_id, text, categorizer)
+            return self._handle_entry(chat_id, user_id, text, categorizer)
+        return False
 
     # --- Orchestration -------------------------------------------------------
     def run_once(self) -> int:
-        """Poll once, process authorized messages, persist state. Returns count
-        of entries handled."""
+        """Poll once, process authorized messages, persist state. Returns the
+        number of cash entries actually written (not messages seen)."""
         updates = self.get_updates()
         if not updates:
             return 0
@@ -342,17 +346,17 @@ class TelegramCashBot:
             for u in updates
             if "message" in u and self._authorized(u["message"])
         ]
-        handled = 0
+        recorded = 0
         if authorized:
             categorizer = self._build_categorizer()
             for message in authorized:
                 try:
-                    self.process_message(message, categorizer)
-                    handled += 1
+                    if self.process_message(message, categorizer):
+                        recorded += 1
                 except Exception as e:  # never let one bad message wedge the loop
                     logger.error(f"Error processing message: {e}", exc_info=True)
         self._save_state()
-        return handled
+        return recorded
 
 
 def _to_float(v: Any) -> float:
