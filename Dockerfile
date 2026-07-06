@@ -13,12 +13,19 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # --- supercronic (a container-friendly cron) ---
+# Detect the build host's arch so the binary is native. An amd64 binary
+# emulated on arm64 (e.g. the Asahi/aarch64 homelab host) segfaults in Go's
+# netpoll, crash-looping supercronic whenever a job fires.
 ARG SUPERCRONIC_VERSION=v0.2.33
-ARG TARGETARCH=amd64
 RUN set -eux; \
-    curl -fsSLO "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${TARGETARCH}"; \
-    chmod +x "supercronic-linux-${TARGETARCH}"; \
-    mv "supercronic-linux-${TARGETARCH}" /usr/local/bin/supercronic
+    case "$(uname -m)" in \
+      aarch64|arm64) arch=arm64 ;; \
+      x86_64|amd64) arch=amd64 ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLO "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${arch}"; \
+    chmod +x "supercronic-linux-${arch}"; \
+    mv "supercronic-linux-${arch}" /usr/local/bin/supercronic
 
 WORKDIR /app
 
