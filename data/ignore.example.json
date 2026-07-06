@@ -1,0 +1,7 @@
+[
+  {
+    "account": "bank-yourbank-primary",
+    "description_contains": "SOME EMPLOYER PAYROLL NARRATION",
+    "note": "Descriptions matching a rule are never booked by the normal pipeline. Copy this file to data/ignore.json and fill in real values. Used e.g. by plugins/salary_splitter so the raw single-line salary credit is not double-booked."
+  }
+]
