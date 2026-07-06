@@ -1,6 +1,11 @@
 # Gajana schedule (times are container-local, TZ=Asia/Kolkata).
 # Output goes to supercronic's stdout -> Docker logs -> Dozzle.
 
+# Run each job through a shell so `cd X && ...` works. Without this supercronic
+# execs the first token directly (`cd`), which fails with "fork exec: no such
+# file or directory".
+SHELL=/bin/sh
+
 # Daily 06:00 IST: fetch new statements + update the log, then push a single
 # Uptime-Kuma health heartbeat (see src/monitor.py).
 0 6 * * * cd /app && python main.py --daily
