@@ -264,8 +264,8 @@ def test_find_new_txns_exception_creating_potential_id(mock_logger, old_transact
     assert result[0]["description"] == "Good New"
 
 
-def test_find_new_txns_description_whitespace_and_case_sensitivity(old_transactions):
-    """Test if description matching is sensitive to case and whitespace (it should be by default)."""
+def test_find_new_txns_description_case_and_whitespace_are_deduped(old_transactions):
+    """Case and whitespace variants of the same transaction are duplicates, not new."""
     # old_transactions[0] has description "Test Transaction 1"
     potential = [
         {
@@ -282,5 +282,95 @@ def test_find_new_txns_description_whitespace_and_case_sensitivity(old_transacti
         },  # Trailing space
     ]
     result = TransactionMatcher.find_new_txns(old_transactions, potential)
-    # Both should be considered new because the ID creation uses description directly
+    # Both normalize to the same signature as the existing old transaction.
+    assert result == []
+
+
+def test_find_new_txns_dedupes_value_dt_metadata_variant(old_transactions):
+    """A second feed appending ' Value Dt .../Ref ...' must not read as a new txn."""
+    old = old_transactions + [
+        {
+            "date": datetime.datetime(2026, 2, 1),
+            "account": "bank-hdfc-karti",
+            "amount": -16285.0,
+            "description": "CC 000437546XXXXXX4812 AUTOPAY SI-TAD",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 2, 1),
+            "account": "bank-hdfc-karti",
+            "amount": -16285.0,
+            "description": (
+                "CC 000437546XXXXXX4812 Autopay SI-TAD "
+                "Value Dt 01/02/2026 Ref 719206235"
+            ),
+        }
+    ]
+    assert TransactionMatcher.find_new_txns(old, potential) == []
+
+
+def test_find_new_txns_dedupes_by_payment_reference(old_transactions):
+    """Same 12-digit UPI reference => duplicate, despite case/space/OCR drift."""
+    old = old_transactions + [
+        {
+            "date": datetime.datetime(2026, 2, 12),
+            "account": "bank-hdfc-karti",
+            "amount": -35000.0,
+            "description": (
+                "UPI-LAWYERSONIA1OKAXIS-LAWYERSONIA-1@OKAXIS-"
+                "FDRL0001471-604379248662-SUHASINI NOTICE"
+            ),
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 2, 12),
+            "account": "bank-hdfc-karti",
+            "amount": -35000.0,
+            "description": (
+                "UPI-lawyersonia1okaxis-lawyersonia-1@okaxis-"
+                "FDRL0001471-604379248662-Suhasininotice "
+                "Value Dt 12/02/2026 Ref 604379248662"
+            ),
+        }
+    ]
+    assert TransactionMatcher.find_new_txns(old, potential) == []
+
+
+def test_find_new_txns_keeps_gst_split_distinct():
+    """CGST and SGST postings share one reference but are separate transactions."""
+    potential = [
+        {
+            "date": datetime.datetime(2026, 3, 5),
+            "account": "bank-hdfc-karti",
+            "amount": -605.51,
+            "description": "0503261049900118 DPD026043436402 CGST",
+        },
+        {
+            "date": datetime.datetime(2026, 3, 5),
+            "account": "bank-hdfc-karti",
+            "amount": -605.51,
+            "description": "0503261049900118 DPD026043436402 SGST",
+        },
+    ]
+    result = TransactionMatcher.find_new_txns([], potential)
     assert len(result) == 2
+
+
+def test_find_new_txns_keeps_distinct_references_distinct():
+    """Same-day, same-amount ATM withdrawals with distinct RRNs are not duplicates."""
+    potential = [
+        {
+            "date": datetime.datetime(2026, 5, 5),
+            "account": "bank-hdfc-karti",
+            "amount": -10000.0,
+            "description": (
+                "NWD-406584XXXXXX8559-05376621-BANGALORE "
+                f"Value Dt 05/05/2026 Ref {rrn}"
+            ),
+        }
+        for rrn in ("612509004108", "612509007940", "612509026289")
+    ]
+    result = TransactionMatcher.find_new_txns([], potential)
+    assert len(result) == 3
