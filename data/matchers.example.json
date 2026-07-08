@@ -50,6 +50,17 @@
     ]
   },
   {
+    "category": "Transfer:Cash Deposit",
+    "debit": false,
+    "use_regex": true,
+    "description": [
+      "\\bcash dep",
+      "\\bcdm\\b",
+      "cash deposit",
+      "\\bby cash\\b"
+    ]
+  },
+  {
     "account": "bank-yourbank-secondary",
     "category": "Income:Salary",
     "debit": false,

@@ -21,6 +21,7 @@ from src.constants import (
     SERVICE_ACCOUNT_KEY_FILE,
     TRANSACTIONS_SHEET_ID,
 )
+from src.settings import CASH_TRANSACTIONS_SHEET_NAME
 from src.interfaces import DataSourceFile, DataSourceInterface
 from src.utils import log_and_exit
 
@@ -267,6 +268,35 @@ class GoogleDataSource(DataSourceInterface):
         updated_cells = result.get("updates", {}).get("updatedCells", 0)
         logger.info(f"Successfully appended {updated_cells} cells to {log_type} log.")
         return
+
+    # --- Cash ledger (shared with plugins/telegram_bot) ----------------------
+    @retry_on_gcp_error()
+    def get_cash_log_data(self) -> List[List[Any]]:
+        """Raw data rows (B3:G) from the Cash Transactions tab:
+        Date | Description | Debit | Credit | Category | Remarks."""
+        return self.get_sheet_data(
+            TRANSACTIONS_SHEET_ID, CASH_TRANSACTIONS_SHEET_NAME, "B3:G"
+        )
+
+    @retry_on_gcp_error()
+    def append_cash_rows(self, data_values: List[List[Any]]) -> None:
+        """Appends rows to the Cash Transactions tab (columns B:G)."""
+        if not data_values:
+            return
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                range=f"'{CASH_TRANSACTIONS_SHEET_NAME}'!B:G",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": data_values},
+            )
+            .execute()
+        )
+        updated = result.get("updates", {}).get("updatedCells", 0)
+        logger.info(f"Appended {updated} cells ({len(data_values)} rows) to cash log.")
 
     @retry_on_gcp_error()
     def clear_transaction_log_range(self, log_type: str, start_row: int = 3) -> None:

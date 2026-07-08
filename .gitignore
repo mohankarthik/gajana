@@ -35,3 +35,6 @@ plugins/telegram_bot/settings.json
 
 # Personal ignore rules (copy data/ignore.example.json → data/ignore.json)
 data/ignore.json
+
+# Personal cash-mirror map (copy data/cash_mirror.example.json → data/cash_mirror.json)
+data/cash_mirror.json
