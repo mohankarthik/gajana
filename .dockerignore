@@ -3,6 +3,7 @@ secrets/
 settings.json
 plugins/gmail_fetcher/settings.json
 data/matchers.json
+data/cash_mirror.json
 data/llm_category_cache.json
 data/state/
 backups/
