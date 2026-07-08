@@ -3,6 +3,11 @@
   "google_sheets_transactions_id": "test-sheet-id",
   "bank_transactions_sheet_name": "Bank transactions",
   "cc_transactions_sheet_name": "CC Transactions",
-  "cc_accounts": ["cc-axis-neo"],
-  "bank_accounts": ["bank-axis-primary"]
+  "cash_transactions_sheet_name": "Cash Transactions",
+  "cc_accounts": [
+    "cc-axis-neo"
+  ],
+  "bank_accounts": [
+    "bank-axis-primary"
+  ]
 }

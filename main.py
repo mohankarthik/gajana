@@ -12,6 +12,7 @@ from typing import Any, Hashable
 
 from src import monitor
 from src.backup_manager import SQLiteBackupManager
+from src.cash_mirror import mirror_bank_cash_txns
 from src.categorizer import Categorizer
 from src.constants import (
     DEFAULT_CATEGORY,
@@ -196,6 +197,10 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 categorized_txns = categorizer.categorize(new_txns_to_add)
                 processor.add_new_transactions_to_log(categorized_txns, acc_type)
                 all_new_txns_added_count += len(categorized_txns)
+                # Bank cash movements (ATM withdrawals, cash deposits) mirror
+                # into the shared Cash Transactions ledger. No-op for cc.
+                if acc_type == "bank":
+                    mirror_bank_cash_txns(processor.data_source, categorized_txns)
             else:
                 logger.info(f"No new {acc_type} transactions found to add.")
         except Exception as e:  # Catch exceptions per account type processing

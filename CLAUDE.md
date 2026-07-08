@@ -64,6 +64,8 @@ statements (Google Drive / local CSV / PDF)
 
 **`SQLiteBackupManager`** (`src/backup_manager.py`) — backs up/restores transaction log to `backups/gajana.db`.
 
+**Cash mirror** (`src/cash_mirror.py`) — after new **bank** txns are booked in normal/daily mode, cash movements are mirrored into the shared "Cash Transactions" tab: an ATM withdrawal (bank debit) becomes a Cash **credit** (wallet gains cash); a cash deposit into the bank (bank credit) becomes a Cash **debit**. Which categories mirror, and their direction, comes from `data/cash_mirror.json` (`{category: "in"|"out"}`; `in` = wallet gains → Cash credit). Detection is category-based (categorizer must first label the txn, e.g. `Transfer:Cash` / `Transfer:Cash Deposit`). Idempotent across daily runs via a stable Remarks marker `auto:{account}:{date}:{amount}:{deschash}` — existing Cash rows are scanned and already-mirrored txns skipped. Only runs on data sources exposing a cash ledger (`GoogleDataSource`); no-op for CSV. Same tab is also written by the Telegram bot.
+
 **Gmail plugin** (`plugins/gmail_fetcher/`) — optional; downloads statements from Gmail before processing. Activated with `--fetch-emails` (requires `GoogleDataSource`).
 
 ### Statement parsing configuration
