@@ -14,6 +14,7 @@ from src.settings import (  # re-exported for backward compat
     CC_TRANSACTIONS_FULL_RANGE,
     CC_TRANSACTIONS_SHEET_NAME,
     CSV_FOLDER,
+    REVIEW_TRANSACTIONS_SHEET_NAME,
     TRANSACTIONS_SHEET_ID,
 )
 from src.utils import log_and_exit
@@ -26,6 +27,7 @@ __all__ = [
     "CC_TRANSACTIONS_FULL_RANGE",
     "CC_TRANSACTIONS_SHEET_NAME",
     "CSV_FOLDER",
+    "REVIEW_TRANSACTIONS_SHEET_NAME",
     "TRANSACTIONS_SHEET_ID",
 ]
 

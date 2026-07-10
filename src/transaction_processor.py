@@ -113,6 +113,95 @@ class TransactionProcessor:
             logger.warning(f"Error parsing date from filename '{filename}': {e}")
             return matched_account, None
 
+    def _parse_validate_pdf(
+        self,
+        pdf_bytes: bytes,
+        password: str,
+        account_config: dict[str, Any],
+        matched_account: str,
+        stmt_end_date: Optional[datetime.datetime],
+        file_name: str,
+    ) -> list[dict]:
+        """Vision-parse a statement PDF, validate the extracted tokens against
+        the PDF text layer, retry once with the fallback model if anything looks
+        wrong, and route rows that still fail to the review surface. Returns the
+        raw (verbatim-token) transactions that passed validation."""
+        from src.pdf_parser import PDFParser
+        from src.statement_validator import validate_statement
+
+        parser = PDFParser()
+        txns, text, summary = parser.parse_pdf_with_text(pdf_bytes, password)
+        if not txns:
+            return []
+
+        result = validate_statement(
+            txns, text, account_config, stmt_end_date, summary=summary
+        )
+
+        # Retry with the fallback model first — non-determinism / a stronger
+        # model often fixes the flagged rows. Keep whichever parse validates
+        # cleaner.
+        if result.flagged:
+            logger.warning(
+                f"{len(result.flagged)} txn(s) flagged in '{file_name}'; "
+                "retrying with fallback model."
+            )
+            retry_txns, retry_text, retry_summary = parser.parse_pdf_with_text(
+                pdf_bytes,
+                password,
+                models=[parser.fallback_model, parser.primary_model],
+            )
+            if retry_txns:
+                retry_result = validate_statement(
+                    retry_txns,
+                    retry_text or text,
+                    account_config,
+                    stmt_end_date,
+                    summary=retry_summary,
+                )
+                if len(retry_result.flagged) < len(result.flagged):
+                    logger.info(
+                        f"Retry improved '{file_name}': "
+                        f"{len(retry_result.flagged)} flagged "
+                        f"(was {len(result.flagged)})."
+                    )
+                    result = retry_result
+
+        if result.flagged or result.statement_flags:
+            self._write_review_rows(result, matched_account, file_name)
+
+        logger.info(
+            f"'{file_name}': {len(result.passed)} txn(s) passed validation, "
+            f"{len(result.flagged)} flagged for review."
+        )
+        return result.passed
+
+    def _write_review_rows(self, result: Any, account: str, file_name: str) -> None:
+        """Append flagged rows and statement-level warnings to the review surface
+        for manual triage. Never raises — a review-write failure must not abort
+        the run."""
+        rows: list[list[Any]] = []
+        for txn, reasons in result.flagged:
+            rows.append(
+                [
+                    account,
+                    str(txn.get("date", "")),
+                    str(txn.get("description", "")),
+                    str(txn.get("debit", "")),
+                    str(txn.get("credit", "")),
+                    "; ".join(reasons),
+                    file_name,
+                ]
+            )
+        for flag in result.statement_flags:
+            rows.append([account, "", "STATEMENT", "", "", flag, file_name])
+        if not rows:
+            return
+        try:
+            self.data_source.write_review_rows(rows)
+        except Exception as e:
+            logger.error(f"Failed to write review rows for '{file_name}': {e}")
+
     def _parse_statement_data_with_pandas(
         self, statement_data: list[list[str]], config: dict[str, Any]
     ) -> Optional[pd.DataFrame]:
@@ -459,13 +548,26 @@ class TransactionProcessor:
                             f"Failed to load password for {matched_account}: {e}"
                         )
 
-                    from src.pdf_parser import PDFParser
-
-                    parser = PDFParser()
-                    parsed_txns = parser.parse_pdf(pdf_bytes, password)
-                    if parsed_txns:
-                        df = pd.DataFrame(parsed_txns)
+                    passed_txns = self._parse_validate_pdf(
+                        pdf_bytes,
+                        password,
+                        config,
+                        matched_account,
+                        stmt_end_date,
+                        file_name,
+                    )
+                    if passed_txns:
+                        df = pd.DataFrame(passed_txns)
                         df.replace("", pd.NA, inplace=True)
+                        # Parse the verbatim date tokens deterministically with
+                        # the account's own formats (LLM no longer reformats).
+                        # Always allow ISO as a fallback: it is unambiguous, so
+                        # strptime matches it exactly and we never fall through to
+                        # parse_mixed_datetime's dayfirst pandas guess, which
+                        # silently garbles ISO dates (2026-05-02 -> 2026-02-05).
+                        pdf_date_formats = list(config.get("date_formats", []))
+                        if "%Y-%m-%d" not in pdf_date_formats:
+                            pdf_date_formats.append("%Y-%m-%d")
                         config = {
                             "column_map": {
                                 "date": "date",
@@ -473,7 +575,7 @@ class TransactionProcessor:
                                 "debit": "debit",
                                 "credit": "credit",
                             },
-                            "date_formats": ["%Y-%m-%d"],
+                            "date_formats": pdf_date_formats,
                         }
                     else:
                         df = None
@@ -516,6 +618,20 @@ class TransactionProcessor:
                         for txn in file_txns
                         if isinstance(txn["date"], datetime.datetime)
                     ]
+
+                    # Universal future-date guard: a real transaction cannot be
+                    # dated after today. Catches parser hallucinations on every
+                    # path (PDF or Sheet) regardless of the incremental filter
+                    # below, which — being forward-only — would otherwise let a
+                    # future-dated row sail straight through.
+                    now = datetime.datetime.now()
+                    future = [t for t in file_txns if t["date"] > now]
+                    if future:
+                        logger.warning(
+                            f"Dropped {len(future)} future-dated txn(s) from "
+                            f"'{file_name}' (latest {max(t['date'] for t in future):%Y-%m-%d})."
+                        )
+                        file_txns = [t for t in file_txns if t["date"] <= now]
 
                     if last_txn_date:
                         original_count = len(file_txns)

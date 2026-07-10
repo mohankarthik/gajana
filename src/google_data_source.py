@@ -21,7 +21,7 @@ from src.constants import (
     SERVICE_ACCOUNT_KEY_FILE,
     TRANSACTIONS_SHEET_ID,
 )
-from src.settings import CASH_TRANSACTIONS_SHEET_NAME
+from src.settings import CASH_TRANSACTIONS_SHEET_NAME, REVIEW_TRANSACTIONS_SHEET_NAME
 from src.interfaces import DataSourceFile, DataSourceInterface
 from src.utils import log_and_exit
 
@@ -297,6 +297,28 @@ class GoogleDataSource(DataSourceInterface):
         )
         updated = result.get("updates", {}).get("updatedCells", 0)
         logger.info(f"Appended {updated} cells ({len(data_values)} rows) to cash log.")
+
+    @retry_on_gcp_error()
+    def write_review_rows(self, data_values: List[List[Any]]) -> None:
+        """Appends validation-flagged rows to the Review tab for manual triage."""
+        if not data_values:
+            return
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:Z",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": data_values},
+            )
+            .execute()
+        )
+        updated = result.get("updates", {}).get("updatedCells", 0)
+        logger.info(
+            f"Appended {updated} cells ({len(data_values)} rows) to Review tab."
+        )
 
     @retry_on_gcp_error()
     def clear_transaction_log_range(self, log_type: str, start_row: int = 3) -> None:

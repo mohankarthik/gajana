@@ -8,5 +8,5 @@
         "Withdrawal Amt.": "debit",
         "Deposit Amt.": "credit"
     },
-    "date_formats": ["%d/%m/%y"]
+    "date_formats": ["%d/%m/%y", "%d/%m/%Y"]
 }

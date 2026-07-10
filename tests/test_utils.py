@@ -79,6 +79,18 @@ def test_parse_mixed_datetime_pandas_failure(mock_logger, caplog):
     assert result is None
 
 
+def test_parse_mixed_datetime_strips_trailing_time(mock_logger):
+    """Date columns that carry a time (HDFC Infinia) parse to the date, ignoring
+    the time — including when the LLM uses a '|' separator."""
+    fmts = ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y"]
+    assert parse_mixed_datetime(
+        mock_logger, "11/04/2026 19:51", fmts
+    ) == datetime.datetime(2026, 4, 11)
+    assert parse_mixed_datetime(
+        mock_logger, "20/04/2026 | 08:34", fmts
+    ) == datetime.datetime(2026, 4, 20)
+
+
 def test_parse_mixed_datetime_unexpected_exception(
     mock_logger, mock_log_and_exit_fixture, mocker
 ):

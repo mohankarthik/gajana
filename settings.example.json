@@ -4,6 +4,7 @@
   "bank_transactions_sheet_name": "Bank transactions",
   "cc_transactions_sheet_name": "CC Transactions",
   "cash_transactions_sheet_name": "Cash Transactions",
+  "review_transactions_sheet_name": "Review",
   "cc_accounts": [],
   "bank_accounts": []
 }

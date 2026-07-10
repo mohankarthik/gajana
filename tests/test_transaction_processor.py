@@ -470,17 +470,22 @@ def test_get_new_transactions_from_statements_pdf(
         {"bank-sbi": {}},
     )
 
-    # Mock PDFParser and parse_pdf
+    # Mock PDFParser: parse_pdf_with_text returns (txns, oracle_text, summary).
+    # The oracle must corroborate every token or validation quarantines the row.
     mock_parser_instance = MagicMock()
     mock_pdf_parser_class.return_value = mock_parser_instance
-    mock_parser_instance.parse_pdf.return_value = [
-        {
-            "date": "2024-01-25",
-            "description": "New PDF Purchase",
-            "debit": "150.00",
-            "credit": "",
-        },
-    ]
+    mock_parser_instance.parse_pdf_with_text.return_value = (
+        [
+            {
+                "date": "2024-01-25",
+                "description": "New PDF Purchase",
+                "debit": "150.00",
+                "credit": "",
+            },
+        ],
+        "2024-01-25 New PDF Purchase 150.00",
+        {},
+    )
 
     # Mock data source calls
     mock_data_source.list_statement_file_details.return_value = [
@@ -497,7 +502,9 @@ def test_get_new_transactions_from_statements_pdf(
     mock_data_source.list_statement_file_details.assert_called_once()
     mock_data_source.download_file.assert_called_once_with("filepdf123")
     mock_pdf_parser_class.assert_called_once()
-    mock_parser_instance.parse_pdf.assert_called_once_with(b"pdf binary content", "")
+    mock_parser_instance.parse_pdf_with_text.assert_called_once_with(
+        b"pdf binary content", ""
+    )
 
     assert len(new_txns) == 1
     txn = new_txns[0]
@@ -505,6 +512,47 @@ def test_get_new_transactions_from_statements_pdf(
     assert txn["description"] == "New PDF Purchase"
     assert txn["amount"] == -150.00  # Debit amount is converted to negative amount
     assert txn["account"] == "mini-sbi"
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_pdf_validation_quarantines_hallucinated_rows(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """A row whose date is absent from the PDF text layer is routed to the review
+    surface and never returned as a booked transaction."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["mini-sbi"])
+    mocker.patch("src.transaction_processor.PARSING_CONFIG", {"bank-sbi": {}})
+
+    mock_parser_instance = MagicMock()
+    mock_pdf_parser_class.return_value = mock_parser_instance
+    # date "2099-01-01" appears nowhere in the oracle text -> hallucination.
+    oracle = "25/01/2024 Real Purchase 150.00"
+    mock_parser_instance.parse_pdf_with_text.return_value = (
+        [
+            {
+                "date": "2099-01-01",
+                "description": "Ghost Purchase",
+                "debit": "999.00",
+                "credit": "",
+            }
+        ],
+        oracle,
+        {},
+    )
+
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="filepdf123", name="bank-mini-sbi-2024.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"pdf binary content"
+
+    new_txns = transaction_processor.get_new_transactions_from_statements("bank", {})
+
+    assert new_txns == []
+    # Retried once with fallback-first, then the still-flagged row went to review.
+    assert mock_parser_instance.parse_pdf_with_text.call_count == 2
+    mock_data_source.write_review_rows.assert_called_once()
+    review_rows = mock_data_source.write_review_rows.call_args[0][0]
+    assert any("Ghost Purchase" in str(cell) for row in review_rows for cell in row)
 
 
 def test_get_new_transactions_skips_old_statement(
