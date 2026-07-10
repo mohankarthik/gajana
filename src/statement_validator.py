@@ -259,14 +259,20 @@ def reconcile_summary(
     totals (read semantically by the LLM into ``summary``), independent of any
     per-bank text layout.
 
-    Preferred check — ``total_debit`` / ``total_credit``: each side is checked
-    separately, so a debit/credit column swap fails even when the net is
-    unchanged. When a side's total isn't printed, fall back to a net-magnitude
-    check against ``opening_balance`` / ``closing_balance``:
-    ``|closing − opening|`` must equal ``|sum_debit − sum_credit|`` (sign-agnostic,
-    so it holds for both bank accounts and credit cards). The net check is weaker
-    (it can't see a swap that preserves the net) but still catches dropped rows
-    and misread amounts on statements that print only balances (e.g. axis-mini).
+    Two signals, in order of trust:
+
+    - **Balance net** (``opening_balance`` / ``closing_balance``): ``|closing −
+      opening|`` == ``|sum_debit − sum_credit|`` (sign-agnostic, holds for banks
+      and CCs). Balances are exact, so this is the ground truth. It's weaker
+      (can't see a debit/credit swap that preserves the net) but never false-fails.
+    - **Per-side** (``total_debit`` / ``total_credit``): catches a column swap,
+      but a statement may print these as *subtotals* (e.g. Axis CC prints
+      "Purchase" separately from "Other charges"), so the LLM can return a partial
+      figure. We therefore trust per-side only when both totals are present and
+      they reproduce the balance change (``|total_debit − total_credit|`` ==
+      ``|closing − opening|``); otherwise the totals are a subtotal and we use the
+      balance net instead. With no balances to cross-check, per-side is used
+      best-effort.
 
     Returns a list of ``(side, message)`` mismatches; empty when everything agrees
     or the statement printed nothing to check against.
@@ -274,33 +280,47 @@ def reconcile_summary(
     if not summary:
         return []
 
-    mismatches: list[tuple[str, str]] = []
-    checked_side = False
-    for label, txn_field, summary_field in [
-        ("debit", "debit", "total_debit"),
-        ("credit", "credit", "total_credit"),
-    ]:
-        stated = _amount_num(summary.get(summary_field))
-        if stated is None:
-            continue  # statement didn't print this total → nothing to check
-        checked_side = True
-        summed = sum(_amount_num(t.get(txn_field)) or 0.0 for t in txns)
-        if not _within_tolerance(summed, stated):
-            mismatches.append(
-                (label, f"txns sum {summed:.2f} vs statement {stated:.2f}")
-            )
+    td = _amount_num(summary.get("total_debit"))
+    tc = _amount_num(summary.get("total_credit"))
+    opening = _amount_num(summary.get("opening_balance"))
+    closing = _amount_num(summary.get("closing_balance"))
+    sum_debit = sum(_amount_num(t.get("debit")) or 0.0 for t in txns)
+    sum_credit = sum(_amount_num(t.get("credit")) or 0.0 for t in txns)
+    bal_net = (
+        abs(closing - opening) if opening is not None and closing is not None else None
+    )
 
-    if not checked_side:
-        opening = _amount_num(summary.get("opening_balance"))
-        closing = _amount_num(summary.get("closing_balance"))
-        if opening is not None and closing is not None:
-            stated_net = abs(closing - opening)
-            txn_net = abs(
-                sum(_amount_num(t.get("debit")) or 0.0 for t in txns)
-                - sum(_amount_num(t.get("credit")) or 0.0 for t in txns)
+    # Per-side totals are trustworthy grand-totals only if they can't be a silent
+    # subtotal — i.e. no balances to check against, or they match the balance net.
+    side_trustworthy = (
+        td is not None
+        and tc is not None
+        and (bal_net is None or _within_tolerance(abs(td - tc), bal_net))
+    )
+
+    mismatches: list[tuple[str, str]] = []
+    if side_trustworthy and td is not None and tc is not None:
+        if not _within_tolerance(sum_debit, td):
+            mismatches.append(
+                ("debit", f"txns sum {sum_debit:.2f} vs statement {td:.2f}")
             )
-            if not _within_tolerance(txn_net, stated_net):
-                mismatches.append(
-                    ("net", f"txns net {txn_net:.2f} vs balances {stated_net:.2f}")
-                )
+        if not _within_tolerance(sum_credit, tc):
+            mismatches.append(
+                ("credit", f"txns sum {sum_credit:.2f} vs statement {tc:.2f}")
+            )
+    elif bal_net is not None:
+        txn_net = abs(sum_debit - sum_credit)
+        if not _within_tolerance(txn_net, bal_net):
+            mismatches.append(
+                ("net", f"txns net {txn_net:.2f} vs balances {bal_net:.2f}")
+            )
+    else:  # only a single-side total, no balances to cross-check → best effort
+        if td is not None and not _within_tolerance(sum_debit, td):
+            mismatches.append(
+                ("debit", f"txns sum {sum_debit:.2f} vs statement {td:.2f}")
+            )
+        if tc is not None and not _within_tolerance(sum_credit, tc):
+            mismatches.append(
+                ("credit", f"txns sum {sum_credit:.2f} vs statement {tc:.2f}")
+            )
     return mismatches
