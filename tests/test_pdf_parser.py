@@ -235,3 +235,57 @@ def test_pdf_parser_response_as_bare_array(mock_completion, monkeypatch):
     txns = PDFParser().parse_pdf(get_minimal_pdf_bytes())
     assert len(txns) == 1
     assert txns[0]["description"] == "bare array txn"
+
+
+@patch("litellm.completion")
+def test_parse_pdf_with_text_returns_oracle_text(mock_completion, monkeypatch):
+    """parse_pdf_with_text returns (txns, extracted_text, summary); text is the
+    validation oracle and must come back even on a successful vision parse."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    mock_completion.return_value = make_llm_response(
+        [{"date": "06/06/2026", "description": "shop", "debit": "80", "credit": ""}]
+    )
+
+    txns, text, summary = PDFParser().parse_pdf_with_text(get_minimal_pdf_bytes())
+
+    assert len(txns) == 1
+    assert txns[0]["date"] == "06/06/2026"
+    assert isinstance(text, str)
+    assert isinstance(summary, dict)
+
+
+@patch("litellm.completion")
+def test_parse_pdf_with_text_extracts_summary(mock_completion, monkeypatch):
+    """The statement's printed totals are surfaced as the summary cross-check."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    resp = MagicMock()
+    resp.choices[0].message.content = json.dumps(
+        {
+            "transactions": [
+                {"date": "06/06/2026", "description": "shop", "debit": "80"}
+            ],
+            "summary": {"total_debit": "80", "total_credit": "0"},
+        }
+    )
+    mock_completion.return_value = resp
+
+    txns, _text, summary = PDFParser().parse_pdf_with_text(get_minimal_pdf_bytes())
+
+    assert len(txns) == 1
+    assert summary == {"total_debit": "80", "total_credit": "0"}
+
+
+@patch("litellm.completion")
+def test_parse_pdf_with_text_model_override(mock_completion, monkeypatch):
+    """Passing models=[...] drives the retry path (fallback model first)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake_key")
+    mock_completion.return_value = make_llm_response(
+        [{"date": "06/06/2026", "description": "shop", "debit": "80", "credit": ""}]
+    )
+
+    parser = PDFParser()
+    parser.parse_pdf_with_text(get_minimal_pdf_bytes(), models=[parser.fallback_model])
+
+    called_model = mock_completion.call_args.kwargs["model"]
+    assert called_model == parser.fallback_model

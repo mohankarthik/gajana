@@ -33,6 +33,9 @@ CC_TRANSACTIONS_SHEET_NAME: str = _s["cc_transactions_sheet_name"]
 CASH_TRANSACTIONS_SHEET_NAME: str = _s.get(
     "cash_transactions_sheet_name", "Cash Transactions"
 )
+# Tab that holds transactions which failed extraction validation, for manual
+# review. Optional so pre-existing settings.json without the key still load.
+REVIEW_TRANSACTIONS_SHEET_NAME: str = _s.get("review_transactions_sheet_name", "Review")
 CC_ACCOUNTS: list[str] = _s["cc_accounts"]
 BANK_ACCOUNTS: list[str] = _s["bank_accounts"]
 

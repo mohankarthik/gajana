@@ -107,6 +107,12 @@ class DataSourceInterface(abc.ABC):
         """Downloads/reads a file's raw content and returns its bytes."""
         pass
 
+    def write_review_rows(self, data_values: List[List[Any]]) -> None:
+        """Appends rows that failed extraction validation to a review location
+        for manual inspection. Default is a no-op so backends without a review
+        surface (e.g. CSV) simply skip it."""
+        return None
+
 
 class BackupInterface(abc.ABC):
     """

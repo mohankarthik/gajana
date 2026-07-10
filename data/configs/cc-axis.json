@@ -8,7 +8,10 @@
         "Amount (INR)": "amount",
         "Debit/Credit": "type"
     },
-    "date_formats": ["%d %b %y"],
+    "date_formats": ["%d/%m/%Y", "%d %b %y"],
     "amount_sign_col": "type",
-    "debit_value": "Debit"
+    "debit_value": "Debit",
+    "statement_period_patterns": [
+        "(?P<start>\\d{2}/\\d{2}/\\d{4}) - (?P<end>\\d{2}/\\d{2}/\\d{4})"
+    ]
 }

@@ -3,10 +3,19 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 import sys
 from typing import Optional, Any, List
 
 import pandas as pd
+
+# A leading date token, used to salvage dates the LLM decorated with a trailing
+# time / separator (e.g. "20/04/2026 | 08:34", "11/04/2026 19:51:23").
+_DATE_TOKEN_RE = re.compile(
+    r"\d{4}-\d{1,2}-\d{1,2}"
+    r"|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+    r"|\d{1,2}\s+[A-Za-z]{3,}\s+\d{2,4}"
+)
 
 
 def log_and_exit(
@@ -45,38 +54,41 @@ def parse_mixed_datetime(
         return None
     try:
         cleaned_str = str(date_str).strip("' ")
-        parsed_date = None
 
-        # Try explicit formats first
-        if formats:
-            for fmt in formats:
-                try:
-                    # Use Python's datetime.strptime for explicit format matching
-                    parsed_date = datetime.datetime.strptime(cleaned_str, fmt)
-                    logger_instance.debug(
-                        f"Parsed '{cleaned_str}' using format '{fmt}'"
-                    )
-                    break
-                except ValueError:
-                    continue
-        else:
+        # Candidates: the full string, plus (if different) just the leading date
+        # token. LLM PDF parsing sometimes appends a transaction time or a "|"
+        # separator to the date column ("20/04/2026 | 08:34"); we only care about
+        # the date, so fall back to the bare token rather than failing the parse.
+        candidates = [cleaned_str]
+        m = _DATE_TOKEN_RE.search(cleaned_str)
+        if m and m.group() != cleaned_str:
+            candidates.append(m.group())
+
+        if not formats:
             logger_instance.warning(
                 "No specific date formats provided, attempting inference only."
             )
-            pass
 
-        # If specific formats fail or weren't provided, try pandas inference
-        if not parsed_date:
-            dt_obj = pd.to_datetime(cleaned_str, dayfirst=True, errors="coerce")
-            if pd.isna(dt_obj):
-                logger_instance.warning(
-                    f"Could not parse date string with any provided format or inference: '{cleaned_str}'"
-                )
-                return None
-            logger_instance.debug(f"Parsed '{cleaned_str}' using pandas inference.")
-            return dt_obj.to_pydatetime()
-        else:
-            return parsed_date
+        # Try explicit formats first, across candidates.
+        for cand in candidates:
+            for fmt in formats:
+                try:
+                    return datetime.datetime.strptime(cand, fmt)
+                except ValueError:
+                    continue
+
+        # Fall back to pandas inference, across candidates.
+        for cand in candidates:
+            dt_obj = pd.to_datetime(cand, dayfirst=True, errors="coerce")
+            if not pd.isna(dt_obj):
+                logger_instance.debug(f"Parsed '{cand}' using pandas inference.")
+                return dt_obj.to_pydatetime()
+
+        logger_instance.warning(
+            f"Could not parse date string with any provided format or inference: "
+            f"'{cleaned_str}'"
+        )
+        return None
     except Exception as e:
         log_and_exit(
             logger_instance,
