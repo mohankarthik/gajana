@@ -130,16 +130,35 @@ def test_reconcile_summary_net_fallback_from_balances():
     assert labels == ["net"]
 
 
-def test_reconcile_summary_prefers_side_totals_over_net():
-    # When per-side totals exist, use them (stronger) and skip the net fallback.
+def test_reconcile_summary_uses_side_when_totals_agree_with_balances():
+    # Totals reproduce the balance change (|100-500| == |0-400|) -> trust per-side.
     summary = {
         "total_debit": "100.00",
         "total_credit": "500.00",
         "opening_balance": "0.00",
-        "closing_balance": "999.99",
+        "closing_balance": "400.00",
     }
     txns = [_txn("x", "a", debit="100.00"), _txn("x", "b", credit="500.00")]
-    assert reconcile_summary(txns, summary) == []  # net ignored
+    assert reconcile_summary(txns, summary) == []
+
+
+def test_reconcile_summary_subtotal_falls_back_to_balance_net():
+    # Axis CC: total_debit is the Purchase subtotal (9489), not all debits
+    # (16251.51 incl a refund). Totals don't match the balance net, so the exact
+    # balance-net is used instead -> a correct parse must NOT false-fail.
+    summary = {
+        "total_debit": "9489.00",  # Purchase only
+        "total_credit": "25358.02",
+        "opening_balance": "9350.51",  # both Dr; magnitude only
+        "closing_balance": "244.00",
+    }
+    # All debits sum to 16251.51; net |16251.51 - 25358.02| == |244 - 9350.51|.
+    txns = [
+        _txn("x", "purchase", debit="9489.00"),
+        _txn("x", "refund", debit="6762.51"),
+        _txn("x", "payment", credit="25358.02"),
+    ]
+    assert reconcile_summary(txns, summary) == []
 
 
 def test_reconcile_summary_mismatch_surfaces_statement_flag():
