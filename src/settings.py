@@ -26,6 +26,9 @@ _s = _load()
 
 CSV_FOLDER: str = _s["google_drive_csv_folder_id"]
 TRANSACTIONS_SHEET_ID: str = _s["google_sheets_transactions_id"]
+# Separate investment-portfolio spreadsheet, read by src/finance_summary.py.
+# Optional so pre-existing settings.json without the key still load.
+INVESTMENTS_SHEET_ID: str = _s.get("google_sheets_investments_id", "")
 BANK_TRANSACTIONS_SHEET_NAME: str = _s["bank_transactions_sheet_name"]
 CC_TRANSACTIONS_SHEET_NAME: str = _s["cc_transactions_sheet_name"]
 # Single shared cash ledger tab (also written by plugins/telegram_bot). Optional
