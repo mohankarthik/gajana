@@ -113,6 +113,18 @@ class DataSourceInterface(abc.ABC):
         surface (e.g. CSV) simply skip it."""
         return None
 
+    def get_processed_statements(self) -> Dict[str, str]:
+        """Returns a cache of statement file IDs already fully parsed, mapping
+        file ID -> the latest transaction date (ISO) that parse booked. Used to
+        skip re-parsing (and re-paying the LLM for) immutable statements the
+        account watermark already covers. Default empty so backends without
+        persistent state (e.g. CSV, tests) always re-parse."""
+        return {}
+
+    def save_processed_statements(self, cache: Dict[str, str]) -> None:
+        """Persists the processed-statements cache. Default no-op."""
+        return None
+
 
 class BackupInterface(abc.ABC):
     """

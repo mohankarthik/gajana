@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from functools import wraps
+import json
 import logging
+import os
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
@@ -319,6 +321,33 @@ class GoogleDataSource(DataSourceInterface):
         logger.info(
             f"Appended {updated} cells ({len(data_values)} rows) to Review tab."
         )
+
+    # --- Processed-statements cache (local state; avoids re-parsing/paying the
+    # LLM for immutable statements the account watermark already covers) --------
+    _PROCESSED_STATEMENTS_PATH = os.path.join(
+        "data", "state", "processed_statements.json"
+    )
+
+    def get_processed_statements(self) -> Dict[str, str]:
+        path = self._PROCESSED_STATEMENTS_PATH
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Could not read processed-statements cache: {e}")
+            return {}
+
+    def save_processed_statements(self, cache: Dict[str, str]) -> None:
+        path = self._PROCESSED_STATEMENTS_PATH
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2, sort_keys=True)
+        except IOError as e:
+            logger.warning(f"Could not write processed-statements cache: {e}")
 
     @retry_on_gcp_error()
     def clear_transaction_log_range(self, log_type: str, start_row: int = 3) -> None:
