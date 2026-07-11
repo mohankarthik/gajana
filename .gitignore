@@ -15,6 +15,9 @@ backups/
 # LLM categorization cache (regenerated at runtime)
 data/llm_category_cache.json
 
+# Runtime state (processed-statements cache, plugin state)
+data/state/
+
 # Gemini
 GEMINI.md
 

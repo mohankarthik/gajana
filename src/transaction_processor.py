@@ -121,18 +121,20 @@ class TransactionProcessor:
         matched_account: str,
         stmt_end_date: Optional[datetime.datetime],
         file_name: str,
-    ) -> list[dict]:
+    ) -> Tuple[list[dict], bool]:
         """Vision-parse a statement PDF, validate the extracted tokens against
         the PDF text layer, retry once with the fallback model if anything looks
-        wrong, and route rows that still fail to the review surface. Returns the
-        raw (verbatim-token) transactions that passed validation."""
+        wrong, and route rows that still fail to the review surface. Returns
+        ``(passed_transactions, clean)`` where ``clean`` is True only if nothing
+        was flagged for review — the caller caches only fully-clean statements so
+        flagged ones keep re-parsing until a retry rescues them."""
         from src.pdf_parser import PDFParser
         from src.statement_validator import validate_statement
 
         parser = PDFParser()
         txns, text, summary = parser.parse_pdf_with_text(pdf_bytes, password)
         if not txns:
-            return []
+            return [], False
 
         result = validate_statement(
             txns, text, account_config, stmt_end_date, summary=summary
@@ -174,7 +176,7 @@ class TransactionProcessor:
             f"'{file_name}': {len(result.passed)} txn(s) passed validation, "
             f"{len(result.flagged)} flagged for review."
         )
-        return result.passed
+        return result.passed, not result.flagged
 
     def _write_review_rows(self, result: Any, account: str, file_name: str) -> None:
         """Append flagged rows and statement-level warnings to the review surface
@@ -478,6 +480,14 @@ class TransactionProcessor:
             f"Scanning {len(statement_files)} statement files for {account_type} transactions."
         )
 
+        # Cache of statement file IDs already fully parsed (file ID -> latest
+        # booked txn date). A statement is immutable, so once the account
+        # watermark covers its latest txn there is nothing new to gain from
+        # re-parsing (and re-paying the LLM). Self-healing: if rows are later
+        # deleted the watermark drops below the cached date and it re-parses.
+        processed_cache = self.data_source.get_processed_statements()
+        newly_processed: dict[str, str] = {}
+
         seen_account_dates: set[tuple[str, Any]] = set()
         for file_info in statement_files:
             file_name, file_id = file_info.name, file_info.id
@@ -507,6 +517,20 @@ class TransactionProcessor:
             ):
                 continue
 
+            # Skip statements we've already fully parsed whose latest txn the
+            # account watermark still covers — no re-download, no LLM call.
+            cached_max = processed_cache.get(file_id)
+            if (
+                cached_max
+                and last_txn_date
+                and last_txn_date.date() >= datetime.date.fromisoformat(cached_max)
+            ):
+                logger.info(
+                    f"Skipping already-processed statement '{file_name}' "
+                    "(cached; watermark covers it)."
+                )
+                continue
+
             logger.info(
                 f"Processing statement Sheet: '{file_name}' (ID: {file_id}) for '{matched_account}'"
             )
@@ -517,6 +541,10 @@ class TransactionProcessor:
                 )
                 continue
             config = PARSING_CONFIG[config_key]
+
+            # Only immutable PDF statements are cached; Google Sheet statements
+            # are mutable, so never cache them (and re-reading a sheet is cheap).
+            pdf_clean = False
 
             try:
                 if file_name.lower().endswith(".pdf"):
@@ -548,7 +576,7 @@ class TransactionProcessor:
                             f"Failed to load password for {matched_account}: {e}"
                         )
 
-                    passed_txns = self._parse_validate_pdf(
+                    passed_txns, pdf_clean = self._parse_validate_pdf(
                         pdf_bytes,
                         password,
                         config,
@@ -633,6 +661,16 @@ class TransactionProcessor:
                         )
                         file_txns = [t for t in file_txns if t["date"] <= now]
 
+                    # Cache a clean PDF by its latest booked txn date (computed
+                    # before the incremental filter, so it reflects the whole
+                    # statement). Only when nothing was flagged — a statement with
+                    # rows in review must keep re-parsing so a retry can rescue
+                    # them.
+                    if pdf_clean and file_txns:
+                        newly_processed[file_id] = (
+                            max(t["date"] for t in file_txns).date().isoformat()
+                        )
+
                     if last_txn_date:
                         original_count = len(file_txns)
                         file_txns = [
@@ -663,6 +701,15 @@ class TransactionProcessor:
             )
         else:
             logger.info(f"No new {account_type} txns from statements.")
+
+        if newly_processed:
+            self.data_source.save_processed_statements(
+                {**processed_cache, **newly_processed}
+            )
+            logger.info(
+                f"Cached {len(newly_processed)} fully-parsed {account_type} "
+                "statement(s) to skip next run."
+            )
         return all_parsed_txns
 
     @staticmethod

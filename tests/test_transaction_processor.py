@@ -19,7 +19,9 @@ from src.constants import DEFAULT_CATEGORY, INTERNAL_TXN_KEYS
 @pytest.fixture
 def mock_data_source():
     """Provides a mock of the DataSourceInterface."""
-    return MagicMock(spec=DataSourceInterface)
+    ds = MagicMock(spec=DataSourceInterface)
+    ds.get_processed_statements.return_value = {}  # real dict for cache merge
+    return ds
 
 
 @pytest.fixture
@@ -553,6 +555,70 @@ def test_pdf_validation_quarantines_hallucinated_rows(
     mock_data_source.write_review_rows.assert_called_once()
     review_rows = mock_data_source.write_review_rows.call_args[0][0]
     assert any("Ghost Purchase" in str(cell) for row in review_rows for cell in row)
+
+
+def _mock_clean_pdf(mock_pdf_parser_class, mock_data_source, mocker):
+    """Wires a mock that cleanly parses one 2024-01-25 txn from a PDF."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["mini-sbi"])
+    mocker.patch("src.transaction_processor.PARSING_CONFIG", {"bank-sbi": {}})
+    inst = MagicMock()
+    mock_pdf_parser_class.return_value = inst
+    inst.parse_pdf_with_text.return_value = (
+        [{"date": "2024-01-25", "description": "P", "debit": "150.00", "credit": ""}],
+        "2024-01-25 P 150.00",
+        {},
+    )
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="filepdf123", name="bank-mini-sbi-2024.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"pdf"
+    return inst
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_pdf_cache_records_clean_statement(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """A cleanly-parsed statement is cached by its latest booked txn date."""
+    _mock_clean_pdf(mock_pdf_parser_class, mock_data_source, mocker)
+    transaction_processor.get_new_transactions_from_statements("bank", {})
+    mock_data_source.save_processed_statements.assert_called_once()
+    saved = mock_data_source.save_processed_statements.call_args[0][0]
+    assert saved == {"filepdf123": "2024-01-25"}
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_pdf_cache_skips_when_watermark_covers(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """A cached statement whose latest txn the watermark already covers is
+    skipped without downloading or calling the LLM."""
+    inst = _mock_clean_pdf(mock_pdf_parser_class, mock_data_source, mocker)
+    mock_data_source.get_processed_statements.return_value = {
+        "filepdf123": "2024-01-25"
+    }
+    watermark = {"mini-sbi": datetime.datetime(2024, 1, 25)}
+    new_txns = transaction_processor.get_new_transactions_from_statements(
+        "bank", watermark
+    )
+    assert new_txns == []
+    inst.parse_pdf_with_text.assert_not_called()
+    mock_data_source.download_file.assert_not_called()
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_pdf_cache_reparses_when_watermark_drops(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """Self-heal: if the watermark falls below the cached date (rows deleted),
+    the statement is re-parsed."""
+    inst = _mock_clean_pdf(mock_pdf_parser_class, mock_data_source, mocker)
+    mock_data_source.get_processed_statements.return_value = {
+        "filepdf123": "2024-01-25"
+    }
+    watermark = {"mini-sbi": datetime.datetime(2024, 1, 1)}  # below cached
+    transaction_processor.get_new_transactions_from_statements("bank", watermark)
+    inst.parse_pdf_with_text.assert_called()
 
 
 def test_get_new_transactions_skips_old_statement(
