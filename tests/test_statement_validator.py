@@ -311,3 +311,20 @@ def test_hdfc_config_reads_the_printed_billing_period():
     )
     assert len(res.passed) == 1
     assert not res.flagged
+
+
+def test_count_heuristic_is_one_sided():
+    """More txns than matching lines is normal; far fewer is the real signal."""
+    text = "\n".join(f"0{i}/07/2026 shop {i} 10.00 500.00" for i in range(1, 10))
+    many = [_txn(f"0{i}/07/2026", f"shop {i}", debit="10.00") for i in range(1, 10)]
+    res = validate_statement(many * 3, text, {"date_formats": ["%d/%m/%Y"]}, END, TODAY)
+    assert not any("count_mismatch" in f for f in res.statement_flags)
+
+    # 5 rows extracted from a 24-line statement: two thirds of it went missing.
+    text_long = "\n".join(
+        f"{i:02d}/07/2026 shop {i} 10.00 500.00" for i in range(1, 25)
+    )
+    res = validate_statement(
+        many[:5], text_long, {"date_formats": ["%d/%m/%Y"]}, END, TODAY
+    )
+    assert any("count_mismatch" in f for f in res.statement_flags)

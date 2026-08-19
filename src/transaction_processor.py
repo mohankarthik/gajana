@@ -542,10 +542,15 @@ class TransactionProcessor:
                 seen_account_dates.add(dedup_key)
 
             last_txn_date = latest_txn_by_account.get(matched_account)
+            # Strictly *after* the statement end: a watermark sitting exactly on
+            # the end date usually means we hold only that last day's rows (the
+            # rest were filtered out by an inflated watermark), so the statement
+            # deserves another look. Re-parsing is cheap to bound -- once it
+            # parses cleanly the processed-statements cache skips it by file id.
             if (
                 last_txn_date
                 and stmt_end_date
-                and last_txn_date.date() >= stmt_end_date.date()
+                and last_txn_date.date() > stmt_end_date.date()
             ):
                 continue
 

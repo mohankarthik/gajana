@@ -925,3 +925,60 @@ def test_apply_cycle_end_moves_month_end_to_the_real_cycle_end():
         TransactionProcessor._apply_cycle_end(None, {"statement_cycle_end_day": 12})
         is None
     )
+
+
+def test_statement_watermark_ignores_plugin_written_rows():
+    """A payslip row must not make that month's statement look already booked.
+
+    The salary splitter dates its rows at month end. Counting them in the
+    watermark skipped the statement and dropped every row before the payslip
+    date -- bank-hdfc-karti Jul-2026 kept only two 31-Jul rows, losing the rent.
+    """
+    from main import find_latest_transaction_by_account
+
+    txns = [
+        {
+            "account": "bank-hdfc-karti",
+            "date": datetime.datetime(2026, 7, 1),
+            "description": "NEFT DR-RENT",
+        },
+        {
+            "account": "bank-hdfc-karti",
+            "date": datetime.datetime(2026, 7, 30),
+            "description": "Google Salary Jul-26 (auto-split from payslip)",
+        },
+    ]
+    assert find_latest_transaction_by_account(txns)[
+        "bank-hdfc-karti"
+    ] == datetime.datetime(2026, 7, 30)
+    assert find_latest_transaction_by_account(txns, statement_only=True)[
+        "bank-hdfc-karti"
+    ] == datetime.datetime(2026, 7, 1)
+
+
+def test_statement_ending_on_the_watermark_is_still_read(
+    transaction_processor, mock_data_source, mocker
+):
+    """Watermark == statement end means we probably hold only its last day."""
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-infiniametal"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="cc-hdfc-infiniametal-2026-07.pdf")
+    ]
+    mock_data_source.get_processed_statements.return_value = {}
+    mock_data_source.download_file.return_value = b"%PDF-"
+    parsed = mocker.patch.object(
+        transaction_processor, "_parse_validate_pdf", return_value=([], False)
+    )
+
+    # cc-hdfc cycle ends 12 Aug for a July file; a watermark on that date must
+    # not skip it, but one past it still does.
+    transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-infiniametal": datetime.datetime(2026, 8, 12)}
+    )
+    assert parsed.called
+
+    parsed.reset_mock()
+    transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-infiniametal": datetime.datetime(2026, 8, 13)}
+    )
+    assert not parsed.called

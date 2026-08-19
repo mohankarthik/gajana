@@ -143,12 +143,35 @@ def assert_safe_to_overwrite(
             )
 
 
+# Rows a plugin wrote into the ledger rather than a statement parse. The salary
+# splitter dates its rows by the payslip (month end), so counting them in the
+# per-account statement watermark makes that month's statement look "already
+# covered": the statement is skipped, and any of its rows dated before the
+# payslip are dropped by the incremental filter. bank-hdfc-karti Jul-2026 lost
+# everything except two 31-Jul rows this way, rent included.
+SYNTHETIC_TXN_MARKERS = ("auto-split from payslip",)
+
+
+def is_statement_derived(txn: dict[Hashable, Any]) -> bool:
+    """False for ledger rows written by a plugin rather than parsed from a statement."""
+    desc = str(txn.get("description", "")).lower()
+    return not any(marker in desc for marker in SYNTHETIC_TXN_MARKERS)
+
+
 def find_latest_transaction_by_account(
     txns: list[dict[Hashable, Any]],
+    statement_only: bool = False,
 ) -> dict[str, datetime.datetime]:
+    """Newest transaction date per account.
+
+    ``statement_only`` drops plugin-written rows, which is what the statement
+    watermark must use -- see ``SYNTHETIC_TXN_MARKERS``.
+    """
     latest: dict[str, datetime.datetime] = {}
     if not txns:
         return latest
+    if statement_only:
+        txns = [t for t in txns if is_statement_derived(t)]
     for txn in txns:
         try:
             account, current_date = txn["account"], txn["date"]
@@ -179,7 +202,9 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
         logger.info(f"--- Processing {acc_type.upper()} Transactions ---")
         try:
             old_txns = old_by_type[acc_type]
-            latest_by_account = find_latest_transaction_by_account(old_txns)
+            latest_by_account = find_latest_transaction_by_account(
+                old_txns, statement_only=True
+            )
             potential_new_txns = processor.get_new_transactions_from_statements(
                 acc_type, latest_by_account
             )

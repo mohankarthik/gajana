@@ -299,11 +299,11 @@ def _add_statement_flags(
     date_occurrences = _txn_like_line_count(text)
     # Skip tiny statements: a handful of txns vs the dates in due-date/period
     # lines trips the ratio for no real signal (e.g. a 1-txn paid-in-full card).
-    if (
-        len(txns) >= 5
-        and date_occurrences
-        and not (date_occurrences / 3 <= len(txns) <= date_occurrences * 3)
-    ):
+    # One-sided: only a *shortfall* matters. Extracting many more rows than the
+    # heuristic counts just means the text layer splits a transaction across
+    # lines (HDFC bank prints the amount on its own line: 47 real txns, 6
+    # matching lines), which says nothing about the parse.
+    if len(txns) >= 5 and date_occurrences and len(txns) < date_occurrences / 3:
         result.statement_flags.append(
             f"count_mismatch: {len(txns)} txns vs ~{date_occurrences} dated lines"
         )
