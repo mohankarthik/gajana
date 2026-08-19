@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -92,11 +93,12 @@ def test_already_mirrored_is_skipped():
     assert ds.appended == []
 
 
-def test_duplicate_within_batch_written_once():
+def test_repeated_withdrawal_in_batch_mirrors_each_copy():
     txn = _txn("ATM CASH WDL", -2000, "Transfer:Cash")
     ds = FakeCashDataSource()
-    # Same txn twice in one batch -> identical marker -> only one row.
-    assert mirror_bank_cash_txns(ds, [dict(txn), dict(txn)]) == 1
+    # Two booked rows = two real withdrawals sharing one marker; the wallet
+    # gained ₹4,000, so the Cash tab needs both rows.
+    assert mirror_bank_cash_txns(ds, [dict(txn), dict(txn)]) == 2
 
 
 def test_same_day_amount_different_desc_not_confused():
@@ -115,3 +117,32 @@ def test_data_source_without_cash_ledger_is_noop():
 
 def test_empty_input():
     assert mirror_bank_cash_txns(FakeCashDataSource(), []) == 0
+
+
+def test_mirror_writes_one_cash_row_per_identical_withdrawal(monkeypatch):
+    """Three identical ATM withdrawals mirror three times, not once.
+
+    They share a marker (same account/date/amount/description), so set-based
+    dedup mirrored only the first and left ₹20,000 of cash unrecorded.
+    """
+    import src.cash_mirror as cm
+
+    monkeypatch.setattr(
+        cm, "load_cash_mirror_map", lambda *a, **k: {"Transfer:Cash": "in"}
+    )
+    txn = {
+        "date": datetime.datetime(2026, 7, 31),
+        "description": "ATM WITHDRAWAL : YBL MANIPAL HSPTL-ANGALORE",
+        "amount": -10000.0,
+        "account": "bank-axis-karti",
+        "category": "Transfer:Cash",
+    }
+    ds = MagicMock()
+    ds.get_cash_log_data.return_value = []
+    assert cm.mirror_bank_cash_txns(ds, [dict(txn) for _ in range(3)]) == 3
+
+    # A rerun with one already mirrored tops up only the missing two.
+    written = ds.append_cash_rows.call_args[0][0]
+    ds2 = MagicMock()
+    ds2.get_cash_log_data.return_value = [written[0]]
+    assert cm.mirror_bank_cash_txns(ds2, [dict(txn) for _ in range(3)]) == 2

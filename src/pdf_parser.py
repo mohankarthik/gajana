@@ -4,6 +4,7 @@ import logging
 import io
 import time
 import base64
+from typing import Any
 from pypdf import PdfReader, PdfWriter
 import litellm
 
@@ -12,13 +13,50 @@ logger = logging.getLogger(__name__)
 PRIMARY_MODEL = "gemini/gemini-2.5-flash"
 FALLBACK_MODEL = "anthropic/claude-sonnet-4-6"
 
-_quota_exhausted_models: set[str] = set()
-
 # The free-tier Gemini quota is per-minute (~15-20 requests). Space out primary
 # (Gemini) calls so batch runs stay under it and don't fall back to the paid
 # Claude model. Override via GAJANA_GEMINI_MIN_INTERVAL (seconds; 0 disables).
 _DEFAULT_PRIMARY_INTERVAL = 4.0
 _last_primary_call = 0.0
+
+# A rate limit is TRANSIENT -- the quota window is per-minute, so a 429 means
+# "wait", not "give up". This used to mark the model exhausted for the whole
+# process, so a single 429 sent every remaining statement in the run to the paid
+# fallback. Back off and retry instead; only fall through once the free model has
+# genuinely stopped answering.
+_RATE_LIMIT_RETRIES = 3
+_RATE_LIMIT_BACKOFF = 65.0
+
+
+def password_candidates(password: "str | list[str] | None") -> list[str]:
+    """Normalize a configured password value into an ordered candidate list.
+
+    A ``passwords.json`` entry may be a single password or a list of them
+    (current one first, older ones after) -- banks rotate statement passwords
+    without warning, and previously downloaded statements keep the password they
+    were issued under, so both have to stay openable.
+    """
+    if password is None:
+        return []
+    if isinstance(password, str):
+        return [password] if password else []
+    return [p for p in password if isinstance(p, str) and p]
+
+
+def _try_decrypt(reader: PdfReader, candidates: list[str]) -> bool:
+    """Try each candidate password in order; True on the first that unlocks.
+
+    Passwords are never logged -- only their position in the list.
+    """
+    for idx, pw in enumerate(candidates, 1):
+        try:
+            if reader.decrypt(pw) != 0:
+                if idx > 1:
+                    logger.info(f"PDF decrypted with backup password #{idx}.")
+                return True
+        except Exception as e:
+            logger.warning(f"Decrypt attempt #{idx} errored: {e}")
+    return False
 
 
 def _is_primary_model(model: str) -> bool:
@@ -166,13 +204,39 @@ class PDFParser:
             return data["summary"]
         return {}
 
+    def _completion(self, model: str, messages: list[dict]) -> Any:
+        """litellm.completion, riding out the primary model's rate-limit window.
+
+        Retries the free model through a 429 rather than abandoning it. Only the
+        primary is retried: a rate limit on the paid fallback has nowhere to
+        fall through to, so it propagates immediately.
+        """
+        attempts = _RATE_LIMIT_RETRIES if _is_primary_model(model) else 1
+        for attempt in range(1, attempts + 1):
+            if _is_primary_model(model):
+                _throttle_primary()
+            try:
+                return litellm.completion(
+                    model=model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                )
+            except litellm.RateLimitError:
+                if attempt == attempts:
+                    logger.warning(
+                        f"{model}: still rate limited after {attempts} attempts; "
+                        "falling through to the next model."
+                    )
+                    raise
+                logger.warning(
+                    f"{model}: rate limited; waiting {_RATE_LIMIT_BACKOFF:.0f}s "
+                    f"(attempt {attempt}/{attempts}) rather than falling back to "
+                    "the paid model."
+                )
+                time.sleep(_RATE_LIMIT_BACKOFF)
+        raise AssertionError("unreachable: the loop either returns or raises")
+
     def _call_llm_with_pdf(self, model: str, pdf_b64: str) -> tuple[list[dict], dict]:
-        if model in _quota_exhausted_models:
-            raise litellm.RateLimitError(
-                f"Skipping {model}: quota known exhausted this session.",
-                llm_provider="",
-                model=model,
-            )
         # Anthropic requires "document" content block; others use image_url
         if "anthropic" in model or "claude" in model:
             pdf_content: dict = {
@@ -188,55 +252,37 @@ class PDFParser:
                 "type": "image_url",
                 "image_url": {"url": f"data:application/pdf;base64,{pdf_b64}"},
             }
-        if _is_primary_model(model):
-            _throttle_primary()
-        try:
-            response = litellm.completion(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": _EXTRACTION_PROMPT},
-                            pdf_content,
-                        ],
-                    }
-                ],
-                response_format={"type": "json_object"},
-            )
-        except litellm.RateLimitError:
-            _quota_exhausted_models.add(model)
-            raise
+        response = self._completion(
+            model,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _EXTRACTION_PROMPT},
+                        pdf_content,
+                    ],
+                }
+            ],
+        )
         msg = response.choices[0].message
         return self._parse_response(msg.content or "", msg.tool_calls)
 
     def _call_llm_with_text(self, model: str, text: str) -> tuple[list[dict], dict]:
-        if model in _quota_exhausted_models:
-            raise litellm.RateLimitError(
-                f"Skipping {model}: quota known exhausted this session.",
-                llm_provider="",
-                model=model,
-            )
-        if _is_primary_model(model):
-            _throttle_primary()
-        try:
-            response = litellm.completion(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{_EXTRACTION_PROMPT}\n\nStatement Text:\n{text}",
-                    }
-                ],
-                response_format={"type": "json_object"},
-            )
-        except litellm.RateLimitError:
-            _quota_exhausted_models.add(model)
-            raise
+        response = self._completion(
+            model,
+            [
+                {
+                    "role": "user",
+                    "content": f"{_EXTRACTION_PROMPT}\n\nStatement Text:\n{text}",
+                }
+            ],
+        )
         msg = response.choices[0].message
         return self._parse_response(msg.content or "", msg.tool_calls)
 
-    def parse_pdf(self, pdf_bytes: bytes, password: str = "") -> list[dict]:
+    def parse_pdf(
+        self, pdf_bytes: bytes, password: "str | list[str]" = ""
+    ) -> list[dict]:
         """Backward-compatible wrapper: returns only the transaction list."""
         txns, _text, _summary = self.parse_pdf_with_text(pdf_bytes, password)
         return txns
@@ -244,15 +290,16 @@ class PDFParser:
     def parse_pdf_with_text(
         self,
         pdf_bytes: bytes,
-        password: str = "",
+        password: "str | list[str]" = "",
         models: "list[str] | None" = None,
     ) -> "tuple[list[dict], str, dict]":
         """Parse a statement PDF; also return its text layer and summary totals.
 
         The text layer (never mangled, unlike vision OCR) is the token oracle;
         the ``summary`` holds the statement's own printed totals, an independent
-        cross-check of the transactions. ``models`` overrides the model order
-        (e.g. fallback-first on a retry). Returns
+        cross-check of the transactions. ``password`` may be one password or an
+        ordered list of them, tried until one decrypts. ``models`` overrides the
+        model order (e.g. fallback-first on a retry). Returns
         ``(transactions, extracted_text, summary)``; text is "" and summary {}
         when unavailable.
         """
@@ -265,11 +312,15 @@ class PDFParser:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             if reader.is_encrypted:
-                if not password:
+                candidates = password_candidates(password)
+                if not candidates:
                     logger.error("PDF is encrypted but no password provided.")
                     return [], "", {}
-                if reader.decrypt(password) == 0:
-                    logger.error("Failed to decrypt PDF. Incorrect password.")
+                if not _try_decrypt(reader, candidates):
+                    logger.error(
+                        "Failed to decrypt PDF. All "
+                        f"{len(candidates)} configured password(s) rejected."
+                    )
                     return [], "", {}
                 writer = PdfWriter()
                 for page in reader.pages:

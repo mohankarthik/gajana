@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter, defaultdict
 from operator import itemgetter
 from typing import Any, Hashable
 
@@ -16,6 +17,10 @@ _META_SUFFIX_RE = re.compile(r"\s+(?:value dt|ref)\b.*$", re.IGNORECASE)
 _REF_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")  # 12-digit UPI/IMPS/NEFT RRN
 _GST_RE = re.compile(r"\b([csi]gst)\b", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+
+# Transient key set by TransactionProcessor naming the statement a txn came from.
+# Used only to count a statement's internal repeats; stripped before storage.
+SOURCE_KEY = "_source"
 
 
 class TransactionMatcher:
@@ -37,9 +42,9 @@ class TransactionMatcher:
         - If the description carries 12-digit payment reference numbers
           (UPI/IMPS/NEFT RRNs), key on those: they uniquely identify the
           transaction. A GST tag is appended so a CGST/SGST split that shares a
-          single reference stays distinct, and genuinely separate transactions
-          that share a value but not a reference (e.g. several same-amount ATM
-          withdrawals on one day) also stay distinct.
+          single reference stays distinct. Reference-less repeats (several
+          same-amount ATM withdrawals on one day) collapse to one signature by
+          design; ``find_new_txns`` counts them instead of de-duplicating them.
         - Otherwise fall back to normalized text: drop the trailing
           " Value Dt .../Ref ..." metadata, lowercase, and strip
           non-alphanumerics to absorb case and whitespace/OCR artifacts.
@@ -89,29 +94,54 @@ class TransactionMatcher:
             all_potential_txns.sort(
                 key=itemgetter("date", "account", "amount", "description")
             )
+            for txn in all_potential_txns:
+                txn.pop(SOURCE_KEY, None)
             return all_potential_txns
 
+        # Counted, not set-based: a statement can legitimately repeat the same
+        # date/amount/description (three ₹10,000 ATM withdrawals at one machine
+        # on one day — bank-axis-karti Jul-2026, where set semantics booked one
+        # and silently dropped ₹20,000).
+        #
+        # The count that matters is the *per-statement* one, taken as the max
+        # across sources rather than the sum: the same transaction reaching us
+        # from two feeds (Gmail PDF + Drive sheet) is still one transaction, so
+        # summing would resurrect the double-import bug while the max keeps a
+        # statement's genuine repeats. Re-imports stay idempotent either way —
+        # once the ledger holds as many copies as the statement shows, the quota
+        # is met and nothing new is emitted.
         try:
-            old_txn_ids = set(TransactionMatcher._txn_id(txn) for txn in old_txns)
+            old_txn_ids = Counter(TransactionMatcher._txn_id(txn) for txn in old_txns)
         except KeyError as e:
             logger.fatal(
                 f"Missing key {e} in old transactions during ID creation. Matching may be inaccurate."
             )
-            old_txn_ids = set()
+            old_txn_ids = Counter()
+
+        per_source: dict[Any, Counter] = defaultdict(Counter)
+        for txn in all_potential_txns:
+            try:
+                per_source[txn.get(SOURCE_KEY, "")][
+                    TransactionMatcher._txn_id(txn)
+                ] += 1
+            except Exception:
+                continue  # malformed rows are reported in the emit loop below
+        quota: Counter = Counter()
+        for counts in per_source.values():
+            for txn_id, n in counts.items():
+                quota[txn_id] = max(quota[txn_id], n)
 
         new_txns = []
-        processed_potential_ids = set()
+        emitted: Counter = Counter()
 
         for txn in all_potential_txns:
             try:
                 potential_id = TransactionMatcher._txn_id(txn)
+                allowance = max(quota[potential_id] - old_txn_ids[potential_id], 0)
 
-                if (
-                    potential_id not in old_txn_ids
-                    and potential_id not in processed_potential_ids
-                ):
+                if emitted[potential_id] < allowance:
                     new_txns.append(txn)
-                    processed_potential_ids.add(potential_id)
+                    emitted[potential_id] += 1
                 else:
                     logger.debug(f"Skipping duplicate/old transaction: {potential_id}")
 
@@ -126,6 +156,8 @@ class TransactionMatcher:
                 )
 
         new_txns.sort(key=itemgetter("date", "account", "amount", "description"))
+        for txn in new_txns:
+            txn.pop(SOURCE_KEY, None)  # transient: never reaches storage
         logger.info(
             f"Transaction matching complete. Identified {len(new_txns)} new transactions."
         )

@@ -299,3 +299,33 @@ def test_categorize_case_insensitivity_account(mock_matchers_file):
     ]  # Lowercase account in txn
     result = categorizer.categorize(test_txn)
     assert result[0]["category"] == "Test Account"
+
+
+def test_atm_withdrawal_beats_merchant_name_in_the_atm_location():
+    """A withdrawal at a hospital ATM is cash, not a medical expense.
+
+    The category drives the cash mirror, so losing Transfer:Cash here means the
+    withdrawal never reaches the Cash tab (bank-axis-karti, Jul-2026).
+    """
+    from src.categorizer import Categorizer
+
+    categorizer = Categorizer()
+    txn = {
+        "description": "ATM WITHDRAWAL : YBL MANIPAL HSPTL-ANGALORE",
+        "account": "bank-axis-karti",
+    }
+    assert categorizer._match_rules(txn, is_debit=True) == "Transfer:Cash"
+    assert (
+        categorizer._match_rules(
+            {"description": "ATM-CASH/+YBL MANIPAL HSPTL/BANGALORE", "account": "x"},
+            is_debit=True,
+        )
+        == "Transfer:Cash"
+    )
+    # A withdrawal *fee* is a charge; mirroring it would invent cash.
+    assert (
+        categorizer._match_rules(
+            {"description": "ATM W/D Chrgs Incl GST", "account": "x"}, is_debit=True
+        )
+        != "Transfer:Cash"
+    )

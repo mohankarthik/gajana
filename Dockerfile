@@ -1,31 +1,11 @@
 # Gajana - personal finance pipeline, run as a scheduled container.
 # supercronic fires `python main.py --daily` / `--backup-db` on a baked crontab
 # so the container behaves like every other long-running homelab service.
-FROM python:3.12-slim
-
-# TZ so cron fires at local (India) time; tzdata for zoneinfo.
-ENV TZ=Asia/Kolkata \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# --- supercronic (a container-friendly cron) ---
-# Detect the build host's arch so the binary is native. An amd64 binary
-# emulated on arm64 (e.g. the Asahi/aarch64 homelab host) segfaults in Go's
-# netpoll, crash-looping supercronic whenever a job fires.
-ARG SUPERCRONIC_VERSION=v0.2.33
-RUN set -eux; \
-    case "$(uname -m)" in \
-      aarch64|arm64) arch=arm64 ;; \
-      x86_64|amd64) arch=amd64 ;; \
-      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSLO "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${arch}"; \
-    chmod +x "supercronic-linux-${arch}"; \
-    mv "supercronic-linux-${arch}" /usr/local/bin/supercronic
+#
+# Python base + tzdata + supercronic live in cron-base:local (shared with
+# nalam) -- see homelab/base-images/cron-base. deploy_gajana.yml builds it
+# before this image.
+FROM cron-base:local
 
 WORKDIR /app
 

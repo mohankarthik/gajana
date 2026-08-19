@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -505,7 +506,7 @@ def test_get_new_transactions_from_statements_pdf(
     mock_data_source.download_file.assert_called_once_with("filepdf123")
     mock_pdf_parser_class.assert_called_once()
     mock_parser_instance.parse_pdf_with_text.assert_called_once_with(
-        b"pdf binary content", ""
+        b"pdf binary content", []
     )
 
     assert len(new_txns) == 1
@@ -514,6 +515,44 @@ def test_get_new_transactions_from_statements_pdf(
     assert txn["description"] == "New PDF Purchase"
     assert txn["amount"] == -150.00  # Debit amount is converted to negative amount
     assert txn["account"] == "mini-sbi"
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_pdf_password_candidates_specific_then_bank(
+    mock_pdf_parser_class,
+    transaction_processor,
+    mock_data_source,
+    mocker,
+    tmp_path,
+    monkeypatch,
+):
+    """Account-specific passwords are tried before bank-level ones, list entries
+    keep their order, and duplicates collapse — so a rotated password can sit
+    ahead of the old one that still opens older statements."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-sbi-mini"])
+    mocker.patch("src.transaction_processor.PARSING_CONFIG", {"bank-sbi": {}})
+
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "passwords.json").write_text(
+        json.dumps({"sbi-mini": ["NEWPW", "OLDPW"], "sbi": ["BANKPW", "NEWPW"]})
+    )
+    monkeypatch.chdir(tmp_path)
+
+    mock_parser_instance = MagicMock()
+    mock_pdf_parser_class.return_value = mock_parser_instance
+    mock_parser_instance.parse_pdf_with_text.return_value = ([], "", {})
+
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="filepdf123", name="bank-sbi-mini-2024.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"pdf binary content"
+
+    transaction_processor.get_new_transactions_from_statements("bank", {})
+
+    mock_parser_instance.parse_pdf_with_text.assert_called_once_with(
+        b"pdf binary content", ["NEWPW", "OLDPW", "BANKPW"]
+    )
 
 
 @patch("src.pdf_parser.PDFParser")
@@ -862,3 +901,27 @@ def test_format_txns_for_storage_sanitizes_nan(transaction_processor):
         ]
     )
     assert rows == [["2024-01-01", "", "100.00", "", "Uncategorized", "", "Unknown"]]
+
+
+def test_apply_cycle_end_moves_month_end_to_the_real_cycle_end():
+    """HDFC bills the 13th to the 12th, so a "2026-07" file ends 12 Aug.
+
+    The watermark skip compares against this date; leaving it at 31 Jul made the
+    statement look already-covered and its last week unreachable.
+    """
+    from src.transaction_processor import TransactionProcessor
+
+    july = datetime.datetime(2026, 7, 31)
+    assert TransactionProcessor._apply_cycle_end(
+        july, {"statement_cycle_end_day": 12}
+    ) == datetime.datetime(2026, 8, 12)
+    # December rolls the year over.
+    assert TransactionProcessor._apply_cycle_end(
+        datetime.datetime(2026, 12, 31), {"statement_cycle_end_day": 12}
+    ) == datetime.datetime(2027, 1, 12)
+    # No cycle configured (and no date) -> unchanged.
+    assert TransactionProcessor._apply_cycle_end(july, {}) == july
+    assert (
+        TransactionProcessor._apply_cycle_end(None, {"statement_cycle_end_day": 12})
+        is None
+    )

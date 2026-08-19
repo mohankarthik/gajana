@@ -1,10 +1,12 @@
 import datetime
 
 from src.statement_validator import (
+    reconcile_mismatches,
     reconcile_summary,
     validate_statement,
     _amount_in_text,
     _norm,
+    _txn_like_line_count,
 )
 
 # A compact stand-in for the extracted PDF text layer (the validation oracle).
@@ -208,3 +210,104 @@ def test_date_in_text_tolerates_time_suffix():
     # date corroborated (ignoring the appended time); amount present -> passes
     res = validate_statement(txns, text, {"date_formats": ["%d/%m/%Y"]}, END, TODAY)
     assert len(res.passed) == 1
+
+
+def test_gross_reconcile_break_quarantines_the_whole_statement():
+    """A column flip must not reach the ledger just because each token checks out.
+
+    Every row here is individually corroborated by the text; only the totals show
+    that the sides were swapped (bank-axis-mini Jul-2026, cc-hdfc-infinia
+    Jun-2026). Those rows have to go to review, not to the ledger.
+    """
+    text = "22/05/2026 shop a 40000.00\n04/06/2026 payment 40000.00\n"
+    txns = [
+        _txn("22/05/2026", "shop a", credit="40000.00"),  # really a debit
+        _txn("04/06/2026", "payment", credit="40000.00"),
+    ]
+    summary = {"total_debit": "40000.00", "total_credit": "40000.00"}
+    res = validate_statement(txns, text, CONFIG, END, TODAY, summary=summary)
+    assert res.passed == []
+    assert len(res.flagged) == 2
+    assert all("reconcile_gross" in r for _, reasons in res.flagged for r in reasons)
+
+
+def test_minor_reconcile_break_still_books():
+    """A near-tolerance break stays advisory: flag it, but don't block the rows."""
+    text = "22/05/2026 shop a 100.00\n"
+    txns = [_txn("22/05/2026", "shop a", debit="100.00")]
+    summary = {"total_debit": "140.00", "total_credit": "0.00"}
+    res = validate_statement(txns, text, CONFIG, END, TODAY, summary=summary)
+    assert len(res.passed) == 1
+    assert any("minor" in f for f in res.statement_flags)
+
+
+def test_reconcile_mismatch_severity_scales_with_the_statement():
+    (minor,) = reconcile_mismatches(
+        [_txn("x", "a", debit="10000.00")], {"total_debit": "10050.00"}
+    )
+    assert not minor.gross  # 50 on 10,050 -- rounding-scale
+    (gross,) = reconcile_mismatches(
+        [_txn("x", "a", debit="10000.00")], {"total_debit": "20139.00"}
+    )
+    assert gross.gross
+
+
+def test_count_heuristic_ignores_boilerplate_dates():
+    """Due-date/fee-schedule lines are not transactions.
+
+    bank-axis-karti Jul-2026 parsed correctly (9 txns) yet was flagged "9 txns vs
+    ~28 dated lines" because every dated line in the footer counted.
+    """
+    text = (
+        "Statement for the period from 01-07-2026 to 31-07-2026\n"
+        "01-07-2026 INT.PD 974.00 342954.70\n"
+        "20-07-2026 NO SAL CREDIT CHRGS 118.00 360836.70\n"
+        "31-07-2026 ATM WITHDRAWAL 10000.00 489658.80\n"
+        "31-07-2026 ATM WITHDRAWAL 10000.00 479658.80\n"
+        "Fees revised w.e.f. 01-04-2024. Card rules changed 25-12-25.\n"
+        "Eligibility calculated as on 25th of every month from 25-11-20.\n"
+    )
+    assert _txn_like_line_count(text) == 4
+    txns = [
+        _txn("01-07-2026", "INT.PD", credit="974.00"),
+        _txn("20-07-2026", "NO SAL CREDIT CHRGS", debit="118.00"),
+        _txn("31-07-2026", "ATM WITHDRAWAL", debit="10000.00"),
+        _txn("31-07-2026", "ATM WITHDRAWAL", debit="10000.00"),
+        _txn("31-07-2026", "ATM WITHDRAWAL", debit="10000.00"),
+    ]
+    res = validate_statement(
+        txns,
+        text,
+        {"date_formats": ["%d-%m-%Y"]},
+        datetime.datetime(2026, 7, 31),
+        datetime.datetime(2026, 8, 5),
+    )
+    assert not any("count_mismatch" in f for f in res.statement_flags)
+
+
+def test_hdfc_config_reads_the_printed_billing_period():
+    """HDFC's cycle is the 13th to the 12th, not a calendar month.
+
+    Without a period pattern the bound came from the filename's month-end, so
+    every cycle's last week was quarantined as "date_after_end" (24 real txns
+    across the Jun/Jul 2026 Infinia statements).
+    """
+    import json
+
+    config = json.load(open("data/configs/cc-hdfc.json"))
+    text = (
+        "Credit Card No. Alternate Account Number Statement Date Billing Period "
+        "437546XXXXXX4812 0001015720000994818 12 Jul, 2026 "
+        "13 Jun, 2026 - 12 Jul, 2026\n"
+        "12/07/2026 | 00:00 CONSOLIDATED FCY MARKUP FEE 1,298.33\n"
+    )
+    txns = [_txn("12/07/2026 | 00:00", "CONSOLIDATED FCY MARKUP FEE", debit="1298.33")]
+    res = validate_statement(
+        txns,
+        text,
+        config,
+        datetime.datetime(2026, 6, 30),  # filename-derived month end
+        datetime.datetime(2026, 8, 19),
+    )
+    assert len(res.passed) == 1
+    assert not res.flagged

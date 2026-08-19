@@ -302,24 +302,41 @@ class GoogleDataSource(DataSourceInterface):
 
     @retry_on_gcp_error()
     def write_review_rows(self, data_values: List[List[Any]]) -> None:
-        """Appends validation-flagged rows to the Review tab for manual triage."""
+        """Appends validation-flagged rows to the Review tab for manual triage.
+
+        Writes at an explicitly computed row rather than via ``append``: with a
+        column-range target, append re-anchors on the table it finds and each
+        batch landed five columns right of the last one (A, then F, then K...),
+        so the tab read as a staircase instead of a list.
+        """
         if not data_values:
             return
+        existing = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:A",
+            )
+            .execute()
+            .get("values", [])
+        )
+        start = len(existing) + 1
         result = (
             self.sheets_service.spreadsheets()
             .values()
-            .append(
+            .update(
                 spreadsheetId=TRANSACTIONS_SHEET_ID,
-                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:Z",
+                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
                 valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
                 body={"values": data_values},
             )
             .execute()
         )
-        updated = result.get("updates", {}).get("updatedCells", 0)
+        updated = result.get("updatedCells", 0)
         logger.info(
-            f"Appended {updated} cells ({len(data_values)} rows) to Review tab."
+            f"Wrote {updated} cells ({len(data_values)} rows) to Review tab "
+            f"from row {start}."
         )
 
     # --- Processed-statements cache (local state; avoids re-parsing/paying the

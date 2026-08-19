@@ -17,6 +17,7 @@ from src.constants import (
     PARSING_CONFIG,
 )
 from src.interfaces import DataSourceInterface
+from src.transaction_matcher import SOURCE_KEY
 from src.utils import log_and_exit, parse_mixed_datetime
 
 logger = logging.getLogger(__name__)
@@ -113,10 +114,30 @@ class TransactionProcessor:
             logger.warning(f"Error parsing date from filename '{filename}': {e}")
             return matched_account, None
 
+    @staticmethod
+    def _apply_cycle_end(
+        stmt_end_date: Optional[datetime.datetime], config: dict[str, Any]
+    ) -> Optional[datetime.datetime]:
+        """Move a filename-derived month end onto the bank's real cycle end.
+
+        A file named ``...-2026-07.pdf`` implies 31 Jul, but HDFC's Infinia cycle
+        runs the 13th to the 12th, so that statement actually ends 12 Aug. The
+        gap is not cosmetic: the "watermark already covers this statement" skip
+        compares against this date, so a too-early end made the last week of
+        every cycle unreachable — the statement was skipped before it could be
+        re-read. Configured per account type via ``statement_cycle_end_day``
+        (day-of-month in the *following* month); absent, the month end stands.
+        """
+        day = config.get("statement_cycle_end_day")
+        if stmt_end_date is None or not day:
+            return stmt_end_date
+        first_of_next = (stmt_end_date + datetime.timedelta(days=1)).replace(day=1)
+        return first_of_next + datetime.timedelta(days=int(day) - 1)
+
     def _parse_validate_pdf(
         self,
         pdf_bytes: bytes,
-        password: str,
+        password: "str | list[str]",
         account_config: dict[str, Any],
         matched_account: str,
         stmt_end_date: Optional[datetime.datetime],
@@ -500,6 +521,17 @@ class TransactionProcessor:
             if not matched_account:
                 continue
 
+            parts = matched_account.split("-")
+            # Accounts are "{type}-{bank}-{name}"; tolerate shorter ids so a
+            # malformed one falls through to the "no parsing config" warning
+            # below rather than raising here.
+            config_key = (
+                f"{account_type}-{parts[1]}" if len(parts) > 1 else matched_account
+            )
+            stmt_end_date = self._apply_cycle_end(
+                stmt_end_date, PARSING_CONFIG.get(config_key, {})
+            )
+
             dedup_key = (matched_account, stmt_end_date)
             if stmt_end_date and dedup_key in seen_account_dates:
                 logger.info(
@@ -534,7 +566,6 @@ class TransactionProcessor:
             logger.info(
                 f"Processing statement Sheet: '{file_name}' (ID: {file_id}) for '{matched_account}'"
             )
-            config_key = f"{account_type}-{matched_account.split('-')[1]}"
             if config_key not in PARSING_CONFIG:
                 logger.warning(
                     f"No parsing config for '{config_key}'. Skipping '{file_name}'."
@@ -550,17 +581,24 @@ class TransactionProcessor:
                 if file_name.lower().endswith(".pdf"):
                     logger.info(f"Processing statement PDF: '{file_name}'")
                     pdf_bytes = self.data_source.download_file(file_id)
-                    password = ""
+                    passwords: list[str] = []
                     try:
                         import json
                         import os
+
+                        from src.pdf_parser import password_candidates
 
                         pw_path = os.path.join("secrets", "passwords.json")
                         if os.path.exists(pw_path):
                             with open(pw_path, "r") as f:
                                 pw_data = json.load(f)
-                                # Try account-specific key first (e.g. "axis-secondary"),
-                                # fall back to bank-level key (e.g. "axis")
+                                # Account-specific key first (e.g.
+                                # "axis-secondary"), then the bank-level key
+                                # (e.g. "axis"). Each value may be a single
+                                # password or a list of them; every candidate is
+                                # tried in order, so a rotated password can be
+                                # added ahead of the old one without breaking
+                                # statements still locked with the old one.
                                 parts = matched_account.split("-")
                                 specific_key = "-".join(parts[1:]).lower()
                                 bank_key = (
@@ -568,9 +606,10 @@ class TransactionProcessor:
                                     if len(parts) > 1
                                     else matched_account.lower()
                                 )
-                                password = pw_data.get(
-                                    specific_key, pw_data.get(bank_key, "")
-                                )
+                                for key in (specific_key, bank_key):
+                                    for pw in password_candidates(pw_data.get(key)):
+                                        if pw not in passwords:
+                                            passwords.append(pw)
                     except Exception as e:
                         logger.warning(
                             f"Failed to load password for {matched_account}: {e}"
@@ -578,7 +617,7 @@ class TransactionProcessor:
 
                     passed_txns, pdf_clean = self._parse_validate_pdf(
                         pdf_bytes,
-                        password,
+                        passwords,
                         config,
                         matched_account,
                         stmt_end_date,
@@ -683,6 +722,11 @@ class TransactionProcessor:
                         logger.info(
                             f"Parsed {len(file_txns)} new txns from '{file_name}'."
                         )
+                        # Tag the origin so the matcher can tell a statement's own
+                        # repeated rows (real) from the same row arriving via a
+                        # second feed (a duplicate). Stripped before storage.
+                        for txn in file_txns:
+                            txn[SOURCE_KEY] = file_name
                         all_parsed_txns.extend(file_txns)
                     else:
                         logger.info(f"No new txns in '{file_name}' after filter.")
