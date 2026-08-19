@@ -100,6 +100,52 @@ def test_pdf_parser_encrypted_wrong_password(mock_completion, monkeypatch):
 
 
 @patch("litellm.completion")
+def test_pdf_parser_encrypted_backup_password(mock_completion, monkeypatch):
+    """A rotated password: the current one is listed first, the statement is
+    still locked with the old one, and the backup opens it."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    mock_completion.return_value = make_llm_response(
+        [
+            {
+                "date": "2026-05-02",
+                "description": "uber ride",
+                "debit": "200.00",
+                "credit": "",
+            }
+        ]
+    )
+
+    txns = PDFParser().parse_pdf(
+        get_minimal_pdf_bytes(encrypted=True, password="oldpassword"),
+        password=["newpassword", "oldpassword"],
+    )
+
+    assert len(txns) == 1
+    assert txns[0]["description"] == "uber ride"
+
+
+@patch("litellm.completion")
+def test_pdf_parser_encrypted_all_passwords_wrong(mock_completion, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    txns = PDFParser().parse_pdf(
+        get_minimal_pdf_bytes(encrypted=True, password="correctpassword"),
+        password=["wrong1", "wrong2"],
+    )
+    assert txns == []
+    mock_completion.assert_not_called()
+
+
+def test_password_candidates_normalizes():
+    from src.pdf_parser import password_candidates
+
+    assert password_candidates(None) == []
+    assert password_candidates("") == []
+    assert password_candidates("pw") == ["pw"]
+    assert password_candidates(["a", "", "b"]) == ["a", "b"]
+    assert password_candidates([]) == []
+
+
+@patch("litellm.completion")
 def test_pdf_parser_encrypted_no_password(mock_completion, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     txns = PDFParser().parse_pdf(
@@ -289,3 +335,65 @@ def test_parse_pdf_with_text_model_override(mock_completion, monkeypatch):
 
     called_model = mock_completion.call_args.kwargs["model"]
     assert called_model == parser.fallback_model
+
+
+@patch("src.pdf_parser.time.sleep")  # don't actually wait out the backoff
+@patch("src.pdf_parser.litellm.completion")
+def test_rate_limited_primary_is_retried_not_abandoned(
+    mock_completion, mock_sleep, monkeypatch
+):
+    """A 429 on the free model must not send the whole run to the paid one.
+
+    The quota window is per-minute, so a rate limit means "wait", not "give up".
+    This used to mark the model exhausted for the rest of the process: one 429 on
+    the first statement and every remaining statement went to paid Claude.
+    """
+    import litellm
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    rate_limited = litellm.RateLimitError(
+        "quota exceeded", llm_provider="gemini", model="gemini/gemini-2.5-flash"
+    )
+    # Rate limited once, then the window passes and the free model answers.
+    mock_completion.side_effect = [
+        rate_limited,
+        make_llm_response([{"date": "01/01/2026", "description": "X", "debit": "10"}]),
+    ]
+
+    parser = PDFParser()
+    txns, _text, _summary = parser.parse_pdf_with_text(get_minimal_pdf_bytes())
+
+    assert len(txns) == 1, "the retry should have succeeded on the free model"
+    assert mock_sleep.called, "it must back off rather than fail through instantly"
+    models_called = [c.kwargs["model"] for c in mock_completion.call_args_list]
+    assert all(
+        "claude" not in m for m in models_called
+    ), f"a transient 429 fell through to the paid model: {models_called}"
+
+
+@patch("src.pdf_parser.time.sleep")
+@patch("src.pdf_parser.litellm.completion")
+def test_persistently_rate_limited_primary_falls_back(
+    mock_completion, mock_sleep, monkeypatch
+):
+    """Once the free model has genuinely stopped answering, the paid one runs."""
+    import litellm
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake_key")
+    rate_limited = litellm.RateLimitError(
+        "quota exceeded", llm_provider="gemini", model="gemini/gemini-2.5-flash"
+    )
+    mock_completion.side_effect = [
+        rate_limited,
+        rate_limited,
+        rate_limited,  # primary exhausts its retries
+        make_llm_response([{"date": "01/01/2026", "description": "X", "debit": "10"}]),
+    ]
+
+    parser = PDFParser()
+    txns, _text, _summary = parser.parse_pdf_with_text(get_minimal_pdf_bytes())
+
+    assert len(txns) == 1
+    models_called = [c.kwargs["model"] for c in mock_completion.call_args_list]
+    assert any("claude" in m for m in models_called), "should reach the fallback"

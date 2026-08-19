@@ -9,8 +9,7 @@
     "SA": "special_allowance",
     "Bonus": "baby_bonus",
     "Medical Insurance": "medical_insurance_topup",
-    "GSU Value": "gsus_income",
-    "Credited GSU Value": "gsus_income - gsus_broker_tax"
+    "GSU Value": "gsus_income"
   },
   "salary_account": "bank-yourbank-primary",
   "split_map": {

@@ -5,7 +5,7 @@ payslip PDF into:
 
 1. **The "Google Salary" tracking sheet** — fills the payslip-derived input
    cells for that month (Basic, HRA, SA, Bonus, Medical Insurance, GSU Value,
-   Credited GSU Value, Credited to A/C).
+   Credited to A/C).
 2. **The gajana bank ledger** — appends the month's salary as categorized split
    rows (Income, Tax, Equity, Small Savings, Insurance) instead of one lump
    credit.
@@ -57,8 +57,13 @@ payslip folder and **Editor** on the salary sheet.
 ## Known limits
 
 - GSU **share-count** rows (Num GSUs, Stock Price USD, Credited GSUs) come from
-  equity-vesting data, not the payslip, and stay manual. The money rows
-  (GSU Value, Credited GSU Value) are payslip-derived, so the ledger split is
-  correct; only the sheet's Stock-Price-INR display cell may look stale.
-- `Credited GSU Value` is written as a literal (overwriting its formula), since
-  the plugin cannot fill the share counts that formula depends on.
+  equity-vesting data, not the payslip, and stay manual. Only `GSU Value` (the
+  gross) is payslip-derived; `Credited GSU Value` and `Taxed GSU Value` are the
+  sheet's own formulas over those share counts.
+- **A vesting month must have its share counts filled before the split runs.**
+  With them blank both GSU formulas evaluate to 0, so the whole GSU tax lands in
+  the `gsu_rounding` residual and the net-pay guard cancels it out instead of
+  failing — the ledger then books no GSU tax and overstates the bank by that
+  amount. The guard cannot catch this on its own: `Equity` *is* the credited GSU
+  value and the residual subtracts it, so it drops out of the reconciliation
+  entirely. Fill the share counts, then run.
