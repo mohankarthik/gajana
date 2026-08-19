@@ -32,9 +32,43 @@ STATEMENT_END_GRACE_DAYS = 5
 # inconsistency: flag when the net is off by more than max(abs, rel * expected).
 RECONCILE_ABS_TOLERANCE = 2.0
 RECONCILE_REL_TOLERANCE = 0.0025
+# A *gross* reconcile break is not a soft warning: it means the extracted rows
+# cannot be the statement's rows (a debit/credit column flip, a dropped block).
+# Booking those corrupts the ledger silently — both live cases (bank-axis-mini
+# Jul-2026, cc-hdfc-infinia Jun-2026) were column flips that reconcile saw and
+# soft-flagged while the wrong rows were written anyway. Past this threshold the
+# whole statement is quarantined; below it the flag stays advisory, so a
+# near-tolerance wobble (a paise-level summary misread) doesn't block booking.
+RECONCILE_HARD_ABS_TOLERANCE = 100.0
+RECONCILE_HARD_REL_TOLERANCE = 0.01
 # Fraction of "significant" (>=4 char) description tokens that must appear in the
 # source text before we trust the description. Below this it is likely garbled.
 DESC_MIN_TOKEN_OVERLAP = 0.5
+
+
+@dataclass
+class Mismatch:
+    """One reconcile break: which side, how it read, and by how much."""
+
+    label: str
+    message: str
+    got: float
+    stated: float
+
+    @property
+    def delta(self) -> float:
+        return abs(self.got - self.stated)
+
+    @property
+    def gross(self) -> bool:
+        """True when the break is too large to be a rounding/summary artefact.
+
+        Gross breaks quarantine the statement; smaller ones stay advisory.
+        """
+        return self.delta > max(
+            RECONCILE_HARD_ABS_TOLERANCE,
+            RECONCILE_HARD_REL_TOLERANCE * abs(self.stated),
+        )
 
 
 @dataclass
@@ -208,13 +242,47 @@ def validate_statement(
         else:
             result.passed.append(txn)
 
-    _add_statement_flags(result, txns, norm_text, summary or {}, low_conf_desc)
+    _add_statement_flags(result, txns, text, norm_text, summary or {}, low_conf_desc)
+
+    # A gross reconcile break means these rows are not the statement's rows.
+    # Quarantine everything rather than book a known-corrupt parse; the caller
+    # retries with the fallback model first, so a clean re-read still gets through.
+    gross = [m for m in reconcile_mismatches(txns, summary or {}) if m.gross]
+    if gross and result.passed:
+        reason = "reconcile_gross:" + "; ".join(
+            f"{m.label} off {m.delta:.2f}" for m in gross
+        )
+        result.flagged.extend((t, [reason]) for t in result.passed)
+        result.passed = []
     return result
+
+
+def _txn_like_line_count(text: str) -> int:
+    """Count source lines that look like a transaction row: a date *and* an
+    amount on the same line.
+
+    Counting bare date tokens across the whole document (the previous approach)
+    swept in due-date, statement-period, fee-schedule and deposit-summary lines,
+    which fired count_mismatch on correctly-parsed statements (bank-axis-karti
+    Jul-2026: 9 real txns vs "~28 dated lines"). Line structure only survives in
+    the raw text, so this runs before normalisation.
+    """
+    count = 0
+    for line in text.splitlines():
+        low = line.lower()
+        has_date = bool(
+            re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", low)
+            or re.search(r"\b\d{1,2} [a-z]{3},? \d{2,4}\b", low)
+        )
+        if has_date and re.search(r"\d[\d,]*\.\d{2}\b", low):
+            count += 1
+    return count
 
 
 def _add_statement_flags(
     result: ValidationResult,
     txns: list[dict],
+    text: str,
     norm_text: str,
     summary: dict[str, Any],
     low_conf_desc: int,
@@ -228,9 +296,7 @@ def _add_statement_flags(
     # dates — an active account has many txns sharing one date). Only a gross
     # order-of-magnitude gap signals a mis-parse; keep the band wide because
     # summary/balance lines also carry dates.
-    date_occurrences = len(
-        re.findall(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", norm_text)
-    ) + len(re.findall(r"\b\d{1,2} [a-z]{3} \d{2,4}\b", norm_text))
+    date_occurrences = _txn_like_line_count(text)
     # Skip tiny statements: a handful of txns vs the dates in due-date/period
     # lines trips the ratio for no real signal (e.g. a 1-txn paid-in-full card).
     if (
@@ -242,8 +308,11 @@ def _add_statement_flags(
             f"count_mismatch: {len(txns)} txns vs ~{date_occurrences} dated lines"
         )
 
-    for label, msg in reconcile_summary(txns, summary):
-        result.statement_flags.append(f"reconcile_mismatch ({label}): {msg}")
+    for m in reconcile_mismatches(txns, summary):
+        severity = "gross" if m.gross else "minor"
+        result.statement_flags.append(
+            f"reconcile_mismatch ({m.label}, {severity}): {m.message}"
+        )
 
 
 def _within_tolerance(a: float, b: float) -> bool:
@@ -252,9 +321,7 @@ def _within_tolerance(a: float, b: float) -> bool:
     return abs(a - b) <= max(RECONCILE_ABS_TOLERANCE, RECONCILE_REL_TOLERANCE * abs(b))
 
 
-def reconcile_summary(
-    txns: list[dict], summary: Optional[dict]
-) -> list[tuple[str, str]]:
+def reconcile_mismatches(txns: list[dict], summary: Optional[dict]) -> list["Mismatch"]:
     """Cross-check the transaction sums against the statement's OWN printed
     totals (read semantically by the LLM into ``summary``), independent of any
     per-bank text layout.
@@ -274,8 +341,8 @@ def reconcile_summary(
       balance net instead. With no balances to cross-check, per-side is used
       best-effort.
 
-    Returns a list of ``(side, message)`` mismatches; empty when everything agrees
-    or the statement printed nothing to check against.
+    Returns the mismatches found; empty when everything agrees or the statement
+    printed nothing to check against.
     """
     if not summary:
         return []
@@ -298,29 +365,34 @@ def reconcile_summary(
         and (bal_net is None or _within_tolerance(abs(td - tc), bal_net))
     )
 
-    mismatches: list[tuple[str, str]] = []
+    mismatches: list[Mismatch] = []
+
+    def check(label: str, got: float, stated: float, what: str, src: str) -> None:
+        if not _within_tolerance(got, stated):
+            mismatches.append(
+                Mismatch(
+                    label,
+                    f"txns {what} {got:.2f} vs {src} {stated:.2f}",
+                    got,
+                    stated,
+                )
+            )
+
     if side_trustworthy and td is not None and tc is not None:
-        if not _within_tolerance(sum_debit, td):
-            mismatches.append(
-                ("debit", f"txns sum {sum_debit:.2f} vs statement {td:.2f}")
-            )
-        if not _within_tolerance(sum_credit, tc):
-            mismatches.append(
-                ("credit", f"txns sum {sum_credit:.2f} vs statement {tc:.2f}")
-            )
+        check("debit", sum_debit, td, "sum", "statement")
+        check("credit", sum_credit, tc, "sum", "statement")
     elif bal_net is not None:
-        txn_net = abs(sum_debit - sum_credit)
-        if not _within_tolerance(txn_net, bal_net):
-            mismatches.append(
-                ("net", f"txns net {txn_net:.2f} vs balances {bal_net:.2f}")
-            )
+        check("net", abs(sum_debit - sum_credit), bal_net, "net", "balances")
     else:  # only a single-side total, no balances to cross-check → best effort
-        if td is not None and not _within_tolerance(sum_debit, td):
-            mismatches.append(
-                ("debit", f"txns sum {sum_debit:.2f} vs statement {td:.2f}")
-            )
-        if tc is not None and not _within_tolerance(sum_credit, tc):
-            mismatches.append(
-                ("credit", f"txns sum {sum_credit:.2f} vs statement {tc:.2f}")
-            )
+        if td is not None:
+            check("debit", sum_debit, td, "sum", "statement")
+        if tc is not None:
+            check("credit", sum_credit, tc, "sum", "statement")
     return mismatches
+
+
+def reconcile_summary(
+    txns: list[dict], summary: Optional[dict]
+) -> list[tuple[str, str]]:
+    """``reconcile_mismatches`` as ``(side, message)`` pairs."""
+    return [(m.label, m.message) for m in reconcile_mismatches(txns, summary)]

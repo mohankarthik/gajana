@@ -18,6 +18,15 @@
     },
     "amount_sign_col": "type",
     "debit_value": "",
-    "date_formats": ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y"],
-    "special_handling": "hdfc_cc_tilde"
+    "date_formats": [
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+        "%d %b, %Y"
+    ],
+    "special_handling": "hdfc_cc_tilde",
+    "statement_period_patterns": [
+        "(?P<start>\\d{1,2} [a-z]{3}, \\d{4}) *- *(?P<end>\\d{1,2} [a-z]{3}, \\d{4})",
+        "statement date *(?P<end>\\d{1,2} [a-z]{3}, \\d{4})"
+    ],
+    "statement_cycle_end_day": 12
 }

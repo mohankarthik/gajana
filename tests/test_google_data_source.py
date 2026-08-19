@@ -395,3 +395,35 @@ def test_write_transactions_then_clears_trailing(
     # update called before clear
     method_order = [c[0] for c in values.method_calls if c[0] in ("update", "clear")]
     assert method_order[0] == "update" and "clear" in method_order
+
+
+# --- Tests for write_review_rows ---
+def test_write_review_rows_appends_below_existing_rows(
+    mock_service_account_credentials, mock_google_services
+):
+    """Flagged rows land in column A, under the last used row.
+
+    The old append(range="A:Z") let Sheets re-anchor the table on each call, so
+    successive batches stepped five columns to the right instead of stacking.
+    """
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+    values.get.return_value.execute.return_value = {"values": [["a"], ["b"], ["c"]]}
+    values.update.return_value.execute.return_value = {"updatedCells": 14}
+
+    gds.write_review_rows([["acc", "2026-07-06", "desc", "", "2", "why", "f.pdf"]])
+
+    values.append.assert_not_called()
+    kwargs = values.update.call_args.kwargs
+    assert kwargs["range"].endswith("!A4")
+    assert kwargs["body"]["values"][0][0] == "acc"
+
+
+def test_write_review_rows_noop_on_empty(
+    mock_service_account_credentials, mock_google_services
+):
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    gds.write_review_rows([])
+    mock_sheets_service.spreadsheets.return_value.values.return_value.update.assert_not_called()

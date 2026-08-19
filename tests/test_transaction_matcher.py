@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.transaction_matcher import TransactionMatcher
+from src.transaction_matcher import SOURCE_KEY, TransactionMatcher
 
 
 # Fixture to provide common transaction data
@@ -49,8 +49,10 @@ def potential_transactions(sample_base_txn: Dict[str, Any]) -> List[Dict[str, An
         "amount": 500.00,
         "description": "Completely New",
     }
-    # Duplicate within potential list, should only be added once
+    # Same transaction reaching us from a second feed: one transaction, not two.
     txn4_potential_duplicate = txn2_new.copy()
+    txn2_new[SOURCE_KEY] = "feed-a.pdf"
+    txn4_potential_duplicate[SOURCE_KEY] = "feed-b.pdf"
     return [txn1_old_duplicate, txn2_new, txn3_also_new, txn4_potential_duplicate]
 
 
@@ -62,35 +64,22 @@ def test_find_new_txns_no_potential_transactions(old_transactions):
 
 def test_find_new_txns_no_old_transactions(potential_transactions):
     """Test when old_txns is empty, all potential should be new."""
-    # Remove internal duplicate from potential_transactions for this test's expectation
-    unique_potential = [
-        potential_transactions[0],
-        potential_transactions[1],
-        potential_transactions[2],
-        potential_transactions[3],
-    ]
-    unique_potential.sort(
-        key=lambda x: (x["date"], x["account"], x["amount"], x["description"])
-    )
-
     result = TransactionMatcher.find_new_txns([], potential_transactions)
-    # Result is sorted, so compare sorted
-    result.sort(key=lambda x: (x["date"], x["account"], x["amount"], x["description"]))
-    assert result == unique_potential
     assert len(result) == 4
+    assert all(SOURCE_KEY not in txn for txn in result)
 
 
 def test_find_new_txns_some_new_some_old(old_transactions, potential_transactions):
     """Test with a mix of old and new transactions."""
     result = TransactionMatcher.find_new_txns(old_transactions, potential_transactions)
-    # Expected new transactions (txn2_new and txn3_also_new from potential_transactions fixture)
+    # txn2_new and txn3_also_new; txn4 is txn2 from a second feed, not a third txn.
     assert len(result) == 2
     descriptions = {txn["description"] for txn in result}
     assert "A New Transaction" in descriptions
     assert "Completely New" in descriptions
     # Check sorting (implicit if we check specific items by index after sorting expected)
     expected_new = [
-        potential_transactions[1],
+        {k: v for k, v in potential_transactions[1].items() if k != SOURCE_KEY},
         potential_transactions[2],
     ]  # Based on fixture
     expected_new.sort(
@@ -133,8 +122,12 @@ def test_find_new_txns_all_potential_are_new(old_transactions):
     assert result == new_set
 
 
-def test_find_new_txns_handles_internal_duplicates_in_potential(old_transactions):
-    """Test that duplicates within all_potential_txns are only added once."""
+def test_find_new_txns_keeps_repeats_from_one_statement(old_transactions):
+    """A statement listing the same row twice means two transactions, not one.
+
+    Three identical ATM withdrawals on one day are a real pattern (bank-axis-karti
+    Jul-2026); collapsing them silently loses money from the ledger.
+    """
     potential_with_duplicates = [
         {
             "date": datetime.datetime(2024, 1, 1),
@@ -158,7 +151,35 @@ def test_find_new_txns_handles_internal_duplicates_in_potential(old_transactions
     result = TransactionMatcher.find_new_txns(
         old_transactions, potential_with_duplicates
     )
-    assert len(result) == 2  # Should only have Unique New 1 and Unique New 2
+    assert len(result) == 3  # both copies of Unique New 1, plus Unique New 2
+
+
+def test_find_new_txns_collapses_same_txn_from_two_feeds(old_transactions):
+    """The same transaction arriving via two statements is still one transaction."""
+    txn = {
+        "date": datetime.datetime(2024, 1, 1),
+        "account": "new-acc",
+        "amount": 10.0,
+        "description": "Unique New 1",
+    }
+    from_a = dict(txn, **{SOURCE_KEY: "bank-axis-karti-2026-07.pdf"})
+    from_b = dict(txn, **{SOURCE_KEY: "gmail-bank-axis-karti-2026-07.pdf"})
+    result = TransactionMatcher.find_new_txns(old_transactions, [from_a, from_b])
+    assert len(result) == 1
+
+
+def test_find_new_txns_books_only_the_missing_copies(old_transactions):
+    """Two of three repeats already booked -> only the third is new."""
+    base = {
+        "date": datetime.datetime(2026, 7, 31),
+        "account": "bank-axis-karti",
+        "amount": -10000.0,
+        "description": "ATM WITHDRAWAL : YBL MANIPAL HSPTL-ANGALORE",
+    }
+    old = old_transactions + [base.copy(), base.copy()]
+    potential = [dict(base, **{SOURCE_KEY: "s.pdf"}) for _ in range(3)]
+    result = TransactionMatcher.find_new_txns(old, potential)
+    assert len(result) == 1
 
 
 @patch(
@@ -273,12 +294,14 @@ def test_find_new_txns_description_case_and_whitespace_are_deduped(old_transacti
             "account": "acc-1",
             "amount": -100.50,
             "description": "test transaction 1",
+            SOURCE_KEY: "feed-a.pdf",
         },  # Lowercase
         {
             "date": datetime.datetime(2023, 1, 15, 10, 30, 0),
             "account": "acc-1",
             "amount": -100.50,
             "description": "Test Transaction 1 ",
+            SOURCE_KEY: "feed-b.pdf",
         },  # Trailing space
     ]
     result = TransactionMatcher.find_new_txns(old_transactions, potential)

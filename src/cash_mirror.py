@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from typing import Any, Hashable
 
 logger = logging.getLogger(__name__)
@@ -90,16 +91,21 @@ def build_marker(txn: dict[Hashable, Any]) -> str:
     return f"{MARKER_PREFIX}:{account}:{date_str}:{amount:.2f}:{desc_hash}"
 
 
-def _existing_markers(cash_rows: list[list[Any]]) -> set[str]:
-    """Extract markers already present in the Cash tab's Remarks column (idx 5,
-    for B3:G rows). Scans the whole cell so extra text around a marker is fine."""
-    markers: set[str] = set()
+def _existing_markers(cash_rows: list[list[Any]]) -> Counter:
+    """Count markers already present in the Cash tab's Remarks column (idx 5,
+    for B3:G rows). Scans the whole cell so extra text around a marker is fine.
+
+    Counted rather than set-valued: identical repeats (three ₹10,000 withdrawals
+    at one ATM on one day) share a marker, and set membership would mirror only
+    the first of them.
+    """
+    markers: Counter = Counter()
     pat = re.compile(rf"{MARKER_PREFIX}:[^\s]+")
     for row in cash_rows:
         if len(row) < 6:
             continue
         for m in pat.findall(str(row[5])):
-            markers.add(m)
+            markers[m] += 1
     return markers
 
 
@@ -157,12 +163,14 @@ def mirror_bank_cash_txns(data_source: Any, txns: list[dict[Hashable, Any]]) -> 
     existing = _existing_markers(data_source.get_cash_log_data())
 
     rows: list[list[Any]] = []
-    seen: set[str] = set()  # guard against dupes within this same batch
+    seen: Counter = Counter()  # occurrences of each marker in this same batch
     for txn in candidates:
         marker = build_marker(txn)
-        if marker in existing or marker in seen:
+        seen[marker] += 1
+        # The Nth identical transaction needs the Nth mirrored row; only skip
+        # once the Cash tab already holds that many copies of the marker.
+        if seen[marker] <= existing[marker]:
             continue
-        seen.add(marker)
         direction = mirror_map[str(txn.get("category"))]
         rows.append(_cash_row(txn, direction, marker))
 
