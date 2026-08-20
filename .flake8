@@ -1,3 +1,8 @@
 [flake8]
 max-line-length = 120
 extend-ignore = E203
+per-file-ignores =
+    # Layout fixtures reproduce real statement column widths; the x-positions
+    # of the header labels are what the extractor reads, so the lines cannot be
+    # wrapped without changing what is under test.
+    tests/test_statement_extractor.py:E501
