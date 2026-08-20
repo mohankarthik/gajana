@@ -521,6 +521,158 @@ def load_ledger(
 
 
 # --------------------------------------------------------------------------
+# Baseline comparison
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeltaItem:
+    """One (account-month, date, amount) whose gap changed since the baseline."""
+
+    month_key: str
+    date: str
+    amount: float
+    was: Tuple[int, int]  # (statement count, ledger count) at baseline
+    now: Tuple[int, int]
+
+    @property
+    def was_gap(self) -> int:
+        return abs(self.was[0] - self.was[1])
+
+    @property
+    def now_gap(self) -> int:
+        return abs(self.now[0] - self.now[1])
+
+    def line(self) -> str:
+        return (
+            f"  {self.month_key:28s} {self.date} {self.amount:14.2f}  "
+            f"stmt/led {self.was[0]}/{self.was[1]} -> {self.now[0]}/{self.now[1]}"
+        )
+
+
+@dataclass(frozen=True)
+class BaselineDelta:
+    """What moved between a stored report and this run.
+
+    ``fixed`` and ``improved`` are the point of a slice; ``worsened``,
+    ``newly_broken`` and ``lost_coverage`` are the reasons to stop and look. A
+    month vanishing from the comparison counts as a regression, not as progress:
+    it means a statement that used to verify no longer does, so the month became
+    unknown rather than clean.
+    """
+
+    fixed: Tuple[DeltaItem, ...] = ()
+    improved: Tuple[DeltaItem, ...] = ()
+    worsened: Tuple[DeltaItem, ...] = ()
+    newly_broken: Tuple[DeltaItem, ...] = ()
+    unchanged: int = 0
+    lost_coverage: Tuple[str, ...] = ()
+    new_coverage: Tuple[str, ...] = ()
+
+    @property
+    def regressions(self) -> Tuple[DeltaItem, ...]:
+        return self.worsened + self.newly_broken
+
+    @property
+    def clean(self) -> bool:
+        return not self.regressions and not self.lost_coverage
+
+    @property
+    def empty(self) -> bool:
+        """True when nothing moved at all -- the shape of a no-op run."""
+        return (
+            self.clean
+            and not self.fixed
+            and not self.improved
+            and not self.new_coverage
+        )
+
+
+def _baseline_items(
+    report: Mapping[str, Any],
+) -> Dict[Tuple[str, str, float], Tuple[int, int]]:
+    """Index a stored report's difference items by (month key, date, amount)."""
+    out: Dict[Tuple[str, str, float], Tuple[int, int]] = {}
+    for month_key, month in (report.get("report") or {}).items():
+        for item in month.get("items") or ():
+            key = (month_key, str(item["date"]), round(float(item["amt"]), 2))
+            out[key] = (int(item["stmt"]), int(item["led"]))
+    return out
+
+
+def compare_to_baseline(
+    current: ReconcileReport, baseline: Mapping[str, Any]
+) -> BaselineDelta:
+    """Diff this run against a stored report.
+
+    The comparison is per difference item, not per month, so a month that goes
+    from six mismatched rows to one reads as five fixed rather than as "still
+    broken".
+    """
+    was = _baseline_items(baseline)
+    now = _baseline_items(current.as_dict())
+
+    fixed: List[DeltaItem] = []
+    improved: List[DeltaItem] = []
+    worsened: List[DeltaItem] = []
+    newly_broken: List[DeltaItem] = []
+    unchanged = 0
+    for key in sorted(set(was) | set(now)):
+        month_key, date, amount = key
+        before, after = was.get(key), now.get(key)
+        item = DeltaItem(month_key, date, amount, before or (0, 0), after or (0, 0))
+        if before is None:
+            newly_broken.append(item)
+        elif after is None:
+            fixed.append(item)
+        elif before == after:
+            unchanged += 1
+        elif item.now_gap < item.was_gap:
+            improved.append(item)
+        else:
+            worsened.append(item)
+
+    was_months = set((baseline.get("report") or {}).keys())
+    now_months = {f"{m.account}@{m.month}" for m in current.months}
+    return BaselineDelta(
+        fixed=tuple(fixed),
+        improved=tuple(improved),
+        worsened=tuple(worsened),
+        newly_broken=tuple(newly_broken),
+        unchanged=unchanged,
+        lost_coverage=tuple(sorted(was_months - now_months)),
+        new_coverage=tuple(sorted(now_months - was_months)),
+    )
+
+
+def format_delta(delta: BaselineDelta) -> str:
+    lines: List[str] = ["", "===== baseline delta ====="]
+    for label, items in (
+        ("fixed", delta.fixed),
+        ("improved", delta.improved),
+        ("WORSENED", delta.worsened),
+        ("NEWLY BROKEN", delta.newly_broken),
+    ):
+        if items:
+            lines.append(f"{label} ({len(items)}):")
+            lines.extend(item.line() for item in items)
+    if delta.lost_coverage:
+        lines.append(f"LOST COVERAGE ({len(delta.lost_coverage)}):")
+        lines.extend(f"  {key}" for key in delta.lost_coverage)
+    if delta.new_coverage:
+        lines.append(f"new coverage ({len(delta.new_coverage)}):")
+        lines.extend(f"  {key}" for key in delta.new_coverage)
+    lines.append(
+        f"unchanged: {delta.unchanged}  fixed: {len(delta.fixed)}  "
+        f"improved: {len(delta.improved)}  worsened: {len(delta.worsened)}  "
+        f"newly broken: {len(delta.newly_broken)}  "
+        f"lost coverage: {len(delta.lost_coverage)}"
+    )
+    lines.append("BASELINE CLEAN" if delta.clean else "BASELINE REGRESSION")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # Reporting
 # --------------------------------------------------------------------------
 
@@ -597,6 +749,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Extract and verify statements only; never touch the ledger.",
     )
+    parser.add_argument(
+        "--baseline",
+        help=(
+            "Compare this run against a stored report and print the delta. "
+            "Exits non-zero only on a regression (a worsened or new mismatch, "
+            "or a month that dropped out of the comparison)."
+        ),
+    )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Write this run's report to --baseline, making it the new reference.",
+    )
     return parser
 
 
@@ -657,7 +822,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(report.as_dict(), fh, indent=1)
         print(f"report written to {args.json}")
+
+    if args.baseline and os.path.exists(args.baseline):
+        with open(args.baseline, "r", encoding="utf-8") as fh:
+            delta = compare_to_baseline(report, json.load(fh))
+        print(format_delta(delta))
+        if args.update_baseline:
+            _write_baseline(report, args.baseline)
+        # In baseline mode the known differences are the point of the exercise,
+        # so only a regression against the reference is a failure.
+        return 0 if delta.clean else 1
+    if args.baseline:
+        _write_baseline(report, args.baseline)
+        print(f"no baseline at {args.baseline}; wrote this run as the reference")
+        return 0
     return 1 if report.differing else 0
+
+
+def _write_baseline(report: ReconcileReport, path: str) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(report.as_dict(), fh, indent=1)
+    print(f"baseline written to {path}")
 
 
 if __name__ == "__main__":  # pragma: no cover

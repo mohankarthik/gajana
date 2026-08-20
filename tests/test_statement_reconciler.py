@@ -12,6 +12,8 @@ from src.statement_reconciler import (
     account_from_filename,
     canonical_statements,
     compare_month,
+    compare_to_baseline,
+    format_delta,
     fold_salary_splits,
     format_report,
     load_ledger,
@@ -503,3 +505,184 @@ def test_make_data_source_picks_the_backend_from_the_flag(tmp_path, monkeypatch)
 
     monkeypatch.setattr(gds, "GoogleDataSource", StubGoogle)
     assert isinstance(_make_data_source(None), StubGoogle)
+
+
+# --------------------------------------------------------------------------
+# Baseline comparison
+# --------------------------------------------------------------------------
+
+
+def _report_with(items):
+    """A stored-report dict carrying one month's difference items."""
+    return {
+        "report": {
+            "bank-axis-karti@2024-07": {
+                "stmt_n": 2,
+                "led_n": 2,
+                "items": [
+                    {
+                        "date": d,
+                        "amt": a,
+                        "stmt": s,
+                        "led": ledger,
+                        "sdesc": "",
+                        "ldesc": "",
+                        "lcat": "",
+                    }
+                    for d, a, s, ledger in items
+                ],
+                "splits": {},
+            }
+        },
+        "dupfiles": [],
+        "unverified": [],
+    }
+
+
+def _run(statement_rows, ledger_txns, since="2024-07"):
+    records = [_record("bank-axis-karti-2024-08.pdf", statement_rows)]
+    return reconcile(records, ledger_txns, since=since)
+
+
+def test_identical_run_against_its_own_baseline_is_empty():
+    report = _run([("2024-07-01", 50000.0, "SAL")], [])
+    delta = compare_to_baseline(report, report.as_dict())
+    assert delta.empty and delta.clean
+    assert delta.unchanged == 1
+    assert "BASELINE CLEAN" in format_delta(delta)
+
+
+def test_a_row_that_got_booked_reads_as_fixed():
+    baseline = _report_with([("2024-07-01", 50000.0, 1, 0)])
+    report = _run([("2024-07-01", 50000.0, "SAL")], [_txn("2024-07-01", 50000.0)])
+    delta = compare_to_baseline(report, baseline)
+    assert [i.date for i in delta.fixed] == ["2024-07-01"]
+    assert delta.clean and not delta.empty
+    assert "fixed (1)" in format_delta(delta)
+
+
+def test_a_narrowed_gap_reads_as_improved_not_fixed():
+    # Statement prints the row three times, ledger had none; now it has two.
+    baseline = _report_with([("2024-07-05", -10000.0, 3, 0)])
+    report = _run(
+        [("2024-07-05", -10000.0, "ATM")] * 3,
+        [_txn("2024-07-05", -10000.0), _txn("2024-07-05", -10000.0)],
+    )
+    delta = compare_to_baseline(report, baseline)
+    assert delta.fixed == ()
+    assert [(i.was, i.now) for i in delta.improved] == [((3, 0), (3, 2))]
+    assert delta.clean
+
+
+def test_a_widened_gap_is_a_regression():
+    baseline = _report_with([("2024-07-05", -10000.0, 3, 2)])
+    report = _run([("2024-07-05", -10000.0, "ATM")] * 3, [])
+    delta = compare_to_baseline(report, baseline)
+    assert [(i.was, i.now) for i in delta.worsened] == [((3, 2), (3, 0))]
+    assert not delta.clean
+    assert "WORSENED" in format_delta(delta)
+
+
+def test_a_mismatch_the_baseline_never_saw_is_a_regression():
+    baseline = _report_with([])
+    report = _run([("2024-07-01", 50000.0, "SAL")], [])
+    delta = compare_to_baseline(report, baseline)
+    assert [i.date for i in delta.newly_broken] == ["2024-07-01"]
+    assert not delta.clean
+    assert "BASELINE REGRESSION" in format_delta(delta)
+
+
+def test_a_month_dropping_out_of_the_comparison_is_a_regression():
+    # A statement that stops verifying takes its month with it: the month
+    # becomes unknown, which is not the same as clean.
+    baseline = _report_with([("2024-07-01", 50000.0, 1, 0)])
+    delta = compare_to_baseline(reconcile([], []), baseline)
+    assert delta.lost_coverage == ("bank-axis-karti@2024-07",)
+    assert not delta.clean
+    assert "LOST COVERAGE" in format_delta(delta)
+
+
+def test_a_newly_covered_month_is_reported_but_not_a_regression():
+    baseline = {"report": {}, "dupfiles": [], "unverified": []}
+    report = _run([("2024-07-01", 50000.0, "SAL")], [_txn("2024-07-01", 50000.0)])
+    delta = compare_to_baseline(report, baseline)
+    assert delta.new_coverage == ("bank-axis-karti@2024-07",)
+    assert delta.clean and not delta.empty
+    assert "new coverage (1)" in format_delta(delta)
+
+
+def test_cli_writes_a_baseline_when_none_exists_then_compares_against_it(
+    tmp_path, capsys, monkeypatch, fake_source
+):
+    _, snapshot = records_from_data_source(fake_source, "bank-", "2024-08")
+    snap_path = tmp_path / "snapshot.json"
+    snap_path.write_text(json.dumps(snapshot))
+    monkeypatch.setattr(
+        "src.statement_reconciler._make_data_source", lambda csv_db_path: fake_source
+    )
+    baseline = tmp_path / "state" / "baseline.json"
+    argv = [
+        "--statements-json",
+        str(snap_path),
+        "--since",
+        "2024-07",
+        "--baseline",
+        str(baseline),
+    ]
+    assert main(argv) == 0
+    assert "wrote this run as the reference" in capsys.readouterr().out
+    # Second run compares instead of writing, and nothing has moved.
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "BASELINE CLEAN" in out
+    assert "newly broken: 0" in out
+
+
+def test_cli_exits_nonzero_when_a_run_regresses_against_the_baseline(
+    tmp_path, monkeypatch, capsys, fake_source
+):
+    _, snapshot = records_from_data_source(fake_source, "bank-", "2024-08")
+    snap_path = tmp_path / "snapshot.json"
+    snap_path.write_text(json.dumps(snapshot))
+    monkeypatch.setattr(
+        "src.statement_reconciler._make_data_source", lambda csv_db_path: fake_source
+    )
+    baseline = tmp_path / "baseline.json"
+    argv = [
+        "--statements-json",
+        str(snap_path),
+        "--since",
+        "2024-07",
+        "--baseline",
+        str(baseline),
+    ]
+    assert main(argv) == 0  # writes the reference: ledger matches the statement
+    fake_source.log_rows = fake_source.log_rows[:2]  # someone deletes the coffee row
+    assert main(argv) == 1
+    assert "NEWLY BROKEN (1)" in capsys.readouterr().out
+
+
+def test_cli_update_baseline_accepts_the_new_reality(
+    tmp_path, monkeypatch, capsys, fake_source
+):
+    _, snapshot = records_from_data_source(fake_source, "bank-", "2024-08")
+    snap_path = tmp_path / "snapshot.json"
+    snap_path.write_text(json.dumps(snapshot))
+    monkeypatch.setattr(
+        "src.statement_reconciler._make_data_source", lambda csv_db_path: fake_source
+    )
+    baseline = tmp_path / "baseline.json"
+    argv = [
+        "--statements-json",
+        str(snap_path),
+        "--since",
+        "2024-07",
+        "--baseline",
+        str(baseline),
+    ]
+    assert main(argv) == 0
+    fake_source.log_rows = fake_source.log_rows[:2]
+    assert main(argv + ["--update-baseline"]) == 1  # still reports the regression
+    capsys.readouterr()
+    assert main(argv) == 0  # ... but it is now the reference
+    assert "BASELINE CLEAN" in capsys.readouterr().out
