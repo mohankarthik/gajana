@@ -329,3 +329,31 @@ def test_atm_withdrawal_beats_merchant_name_in_the_atm_location():
         )
         != "Transfer:Cash"
     )
+
+
+def test_icici_card_bill_is_booked_as_spend_not_a_transfer():
+    """The Amazon Pay ICICI card has no statement feed (it stopped 2024-08), so
+    its bill payment IS the spend -- as a transfer it would net out to zero.
+
+    The pattern has to be tight: 'ICICI Bank' appears in hundreds of unrelated
+    UPI descriptions, so it keys on the standing-instruction reference instead.
+    """
+    from src.categorizer import Categorizer
+
+    categorizer = Categorizer()
+    bill = {
+        "description": "SI HGALP073821003596845 ICICI C-27/07/26Value Dt 27/07/2026",
+        "account": "bank-hdfc-karti",
+    }
+    assert categorizer._match_rules(bill, is_debit=True) == "Expense:Household"
+    # ...and must not swallow ordinary payments routed through ICICI.
+    for other in (
+        "UPI/P2M/657863952538/SWIGGY /UPI/ICICI Bank",
+        "NEFT DR-ICIC0000605-AMIT KUMAR SINGH-SANDOZ - MUM",
+    ):
+        assert (
+            categorizer._match_rules(
+                {"description": other, "account": "x"}, is_debit=True
+            )
+            != "Expense:Household"
+        )
