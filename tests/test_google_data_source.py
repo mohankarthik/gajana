@@ -427,3 +427,42 @@ def test_write_review_rows_noop_on_empty(
     _, mock_sheets_service = mock_google_services
     gds.write_review_rows([])
     mock_sheets_service.spreadsheets.return_value.values.return_value.update.assert_not_called()
+
+
+# --- Tests for update_transaction_categories ---
+def test_update_transaction_categories_writes_column_f(
+    mock_service_account_credentials, mock_google_services
+):
+    from src.google_data_source import GoogleDataSource
+
+    _, mock_sheets_service = mock_google_services
+    gds = GoogleDataSource()
+    batch = (
+        mock_sheets_service.spreadsheets.return_value.values.return_value.batchUpdate
+    )
+    batch.return_value.execute.return_value = {"totalUpdatedCells": 2}
+
+    updated = gds.update_transaction_categories(
+        "cc", [(0, "Expense:Fuel"), (4, "Expense:Dining")]
+    )
+
+    assert updated == 2
+    body = batch.call_args.kwargs["body"]
+    # Data row 0 is sheet row 3 (B2 is the header); Category is column F.
+    assert [d["range"].split("!")[1] for d in body["data"]] == ["F3", "F7"]
+    assert [d["values"] for d in body["data"]] == [
+        [["Expense:Fuel"]],
+        [["Expense:Dining"]],
+    ]
+
+
+def test_update_transaction_categories_no_updates_makes_no_call(
+    mock_service_account_credentials, mock_google_services
+):
+    from src.google_data_source import GoogleDataSource
+
+    _, mock_sheets_service = mock_google_services
+    gds = GoogleDataSource()
+
+    assert gds.update_transaction_categories("cc", []) == 0
+    mock_sheets_service.spreadsheets.return_value.values.return_value.batchUpdate.assert_not_called()

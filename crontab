@@ -18,9 +18,13 @@ SHELL=/bin/sh
 # Weekly Sunday 07:00 IST: back up Google Sheets to the local SQLite DB.
 0 7 * * 0 cd /app && python main.py --backup-db
 
-# Monthly 5th 08:00 IST: split the previous month's Google payslip into the
-# salary sheet + the ledger (no arg -> previous calendar month; idempotent).
-0 8 5 * * cd /app && python run_salary_splitter.py
+# DISABLED 2026-08-21. The splitter mis-booked 10 of the last 16 months: two
+# months were never booked at all (2025-11, 2025-12) and 2026-04 netted to the
+# right bank credit while recording income of Rs 775,252 against an actual
+# Rs 5,696,385. The manual "Google Salary" sheet is the source of truth; the
+# ledger is being conformed to it. Do not re-enable until the splitter reads
+# that sheet and asserts every component, not just the net.
+# 0 8 5 * * cd /app && python run_salary_splitter.py
 
 # Every minute: poll Telegram for cash entries and append them to the Cash
 # Transactions sheet (no-op until the bot is configured).

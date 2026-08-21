@@ -65,7 +65,9 @@ def test_data_source_interface_requires_all_methods_implemented():
         ) -> None:
             pass  # Implemented
 
-        def clear_transaction_log_range(self, log_type: str) -> None:
+        def clear_transaction_log_range(
+            self, log_type: str, start_row: int = 3
+        ) -> None:
             pass  # Implemented
 
         def write_transactions_to_log(
@@ -103,13 +105,20 @@ def test_data_source_interface_requires_all_methods_implemented():
         ) -> None:
             pass
 
-        def clear_transaction_log_range(self, log_type: str) -> None:
+        def clear_transaction_log_range(
+            self, log_type: str, start_row: int = 3
+        ) -> None:
             pass
 
         def write_transactions_to_log(
             self, log_type: str, data_values: List[List[Any]]
         ) -> None:
             pass
+
+        def update_transaction_categories(
+            self, log_type: str, updates: List[Any]
+        ) -> int:
+            return 0
 
         def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
             return "Sheet1"

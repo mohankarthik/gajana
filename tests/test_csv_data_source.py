@@ -241,3 +241,36 @@ def test_csv_data_source_download_file(temp_csv_dir):
 
     content = ds.download_file("statement.pdf")
     assert content == b"dummy pdf content"
+
+
+def test_update_transaction_categories(temp_csv_dir):
+    from src.csv_data_source import CSVDataSource
+
+    ds = CSVDataSource(temp_csv_dir)
+    ds.write_transactions_to_log(
+        "cc",
+        [
+            ["2025-01-01", "A", "10.00", "", "Uncategorized", "", "cc-hdfc-og"],
+            ["2025-01-02", "B", "20.00", "", "Expense:Dining", "", "cc-hdfc-og"],
+        ],
+    )
+
+    assert ds.update_transaction_categories("cc", [(0, "Expense:Fuel")]) == 1
+
+    rows = ds.get_transaction_log_data("cc")
+    assert rows[1][4] == "Expense:Fuel"
+    # Every other cell in both rows is untouched.
+    assert rows[1][:4] == ["2025-01-01", "A", "10.00", ""]
+    assert rows[2][4] == "Expense:Dining"
+
+
+def test_update_transaction_categories_out_of_range_is_skipped(temp_csv_dir):
+    from src.csv_data_source import CSVDataSource
+
+    ds = CSVDataSource(temp_csv_dir)
+    ds.write_transactions_to_log(
+        "cc", [["2025-01-01", "A", "10.00", "", "Uncategorized", "", "cc-hdfc-og"]]
+    )
+
+    assert ds.update_transaction_categories("cc", [(5, "Expense:Fuel")]) == 0
+    assert ds.get_transaction_log_data("cc")[1][4] == "Uncategorized"

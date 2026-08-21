@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional, Dict, Tuple
 
 
 class DataSourceFile:
@@ -94,6 +94,27 @@ class DataSourceInterface(abc.ABC):
         Args:
             log_type: Identifier for the log (e.g., "bank", "cc").
             data_values: A list of lists, where each inner list is a row to write.
+        """
+        pass
+
+    @abc.abstractmethod
+    def update_transaction_categories(
+        self, log_type: str, updates: List[Tuple[int, str]]
+    ) -> int:
+        """Rewrite only the Category cell of specific rows, leaving all else alone.
+
+        Recategorization changes at most a few hundred cells; rewriting the whole
+        log to do that puts every row in the blast radius for no reason (and a
+        full round-trip re-formats amounts that nobody asked to touch).
+
+        Args:
+            log_type: Identifier for the log (e.g., "bank", "cc").
+            updates: (row_index, category) pairs. row_index indexes the *data*
+                rows of get_transaction_log_data(), i.e. 0 is the first row
+                after the header, so callers never deal in backend addressing.
+
+        Returns:
+            The number of rows actually updated.
         """
         pass
 
