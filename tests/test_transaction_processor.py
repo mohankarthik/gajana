@@ -982,3 +982,79 @@ def test_statement_ending_on_the_watermark_is_still_read(
         "cc", {"cc-hdfc-infiniametal": datetime.datetime(2026, 8, 13)}
     )
     assert not parsed.called
+
+
+# --- Targeted category updates (recategorize writes cells, not sheets) -------
+
+
+def _log_rows():
+    return [
+        ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+        ["2025-01-01", "SHOP A", "100.00", "", "Uncategorized", "", "cc-hdfc-og"],
+        ["2025-01-02", "SHOP B", "200.00", "", "Expense:Dining", "", "cc-hdfc-og"],
+        ["2025-01-03", "SHOP C", "300.00", "", "Uncategorized", "", "cc-hdfc-og"],
+    ]
+
+
+def test_apply_category_updates_writes_only_uncategorized_rows(
+    transaction_processor, mock_data_source
+):
+    mock_data_source.get_transaction_log_data.return_value = _log_rows()
+    mock_data_source.update_transaction_categories.return_value = 2
+
+    updated = transaction_processor.apply_category_updates(
+        "cc", [(0, "Expense:Clothing"), (2, "Expense:Medical")]
+    )
+
+    assert updated == 2
+    mock_data_source.update_transaction_categories.assert_called_once_with(
+        "cc", [(0, "Expense:Clothing"), (2, "Expense:Medical")]
+    )
+
+
+def test_apply_category_updates_refuses_already_labeled_row(
+    transaction_processor, mock_data_source
+):
+    """A stale index must never overwrite a real category."""
+    mock_data_source.get_transaction_log_data.return_value = _log_rows()
+    mock_data_source.update_transaction_categories.return_value = 1
+
+    transaction_processor.apply_category_updates(
+        "cc", [(1, "Expense:Clothing"), (2, "Expense:Medical")]
+    )
+
+    # Row 1 already carries Expense:Dining, so it is dropped, not overwritten.
+    mock_data_source.update_transaction_categories.assert_called_once_with(
+        "cc", [(2, "Expense:Medical")]
+    )
+
+
+def test_apply_category_updates_drops_out_of_range_rows(
+    transaction_processor, mock_data_source
+):
+    mock_data_source.get_transaction_log_data.return_value = _log_rows()
+    mock_data_source.update_transaction_categories.return_value = 0
+
+    transaction_processor.apply_category_updates("cc", [(99, "Expense:Clothing")])
+
+    mock_data_source.update_transaction_categories.assert_called_once_with("cc", [])
+
+
+def test_apply_category_updates_no_updates_skips_read(
+    transaction_processor, mock_data_source
+):
+    assert transaction_processor.apply_category_updates("cc", []) == 0
+    mock_data_source.update_transaction_categories.assert_not_called()
+
+
+def test_get_old_transactions_carries_row_index(
+    transaction_processor, mock_data_source
+):
+    """ROW_KEY must be each txn's position among the log's data rows."""
+    from src.transaction_processor import ROW_KEY
+
+    mock_data_source.get_transaction_log_data.return_value = _log_rows()
+    txns = transaction_processor.get_old_transactions("cc")
+
+    assert [t[ROW_KEY] for t in txns] == [0, 1, 2]
+    assert [t["description"] for t in txns] == ["SHOP A", "SHOP B", "SHOP C"]

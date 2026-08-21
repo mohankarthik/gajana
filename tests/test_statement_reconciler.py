@@ -326,6 +326,9 @@ class FakeDataSource(DataSourceInterface):
     def clear_transaction_log_range(self, log_type, start_row=3):
         self.writes += 1
 
+    def update_transaction_categories(self, log_type, updates):
+        return 0
+
     def write_transactions_to_log(self, log_type, data_values):
         self.writes += 1
 

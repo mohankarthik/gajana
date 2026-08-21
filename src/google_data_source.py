@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
@@ -168,6 +168,45 @@ class GoogleDataSource(DataSourceInterface):
                 logger, f"Unexpected error listing files from Google Drive: {e}", e
             )
         return files_details
+
+    @retry_on_gcp_error()
+    def update_transaction_categories(
+        self, log_type: str, updates: List[Tuple[int, str]]
+    ) -> int:
+        """Write only column F (Category) for the given rows, in one batch."""
+        if not updates:
+            logger.info(f"No category updates for {log_type} log.")
+            return 0
+        sheet_name = (
+            BANK_TRANSACTIONS_SHEET_NAME
+            if log_type == "bank"
+            else CC_TRANSACTIONS_SHEET_NAME
+        )
+        # get_transaction_log_data starts at B2 (the header), so data row 0 is
+        # sheet row 3. Category is column F.
+        data = [
+            {
+                "range": f"{sheet_name}!F{row_index + 3}",
+                "values": [[category]],
+            }
+            for row_index, category in updates
+        ]
+        logger.info(
+            f"Updating {len(data)} category cells in {log_type} log in Sheet ID: "
+            f"{TRANSACTIONS_SHEET_ID}, Sheet: {sheet_name}"
+        )
+        result = (
+            self.sheets_service.spreadsheets()
+            .values()
+            .batchUpdate(
+                spreadsheetId=TRANSACTIONS_SHEET_ID,
+                body={"valueInputOption": "RAW", "data": data},
+            )
+            .execute()
+        )
+        updated = int(result.get("totalUpdatedCells", 0))
+        logger.info(f"Successfully updated {updated} category cells in {log_type} log.")
+        return updated
 
     @retry_on_gcp_error()
     def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:

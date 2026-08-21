@@ -13,6 +13,7 @@ from src.constants import (
     BANK_ACCOUNTS,
     CC_ACCOUNTS,
     DEFAULT_CATEGORY,
+    EXPECTED_SHEET_COLUMNS,
     INTERNAL_TXN_KEYS,
     PARSING_CONFIG,
 )
@@ -21,6 +22,10 @@ from src.transaction_matcher import SOURCE_KEY
 from src.utils import log_and_exit, parse_mixed_datetime
 
 logger = logging.getLogger(__name__)
+
+# Transient key: a txn's position among the log's data rows (0 = first
+# row after the header). Set by get_old_transactions, never stored.
+ROW_KEY = "_row"
 
 
 class TransactionProcessor:
@@ -472,7 +477,14 @@ class TransactionProcessor:
                 return []
 
             txns = standardized_df.to_dict("records")
-            for txn in txns:
+            # The DataFrame index is still each row's position among the log's
+            # data rows: nothing in this pipeline resets it and dropna preserves
+            # it. Carrying it lets recategorize address a row exactly instead of
+            # matching it back by content (descriptions repeat; amounts repeat).
+            # Transient, like SOURCE_KEY - storage and backup read named keys
+            # only, so it never reaches either.
+            for txn, row_index in zip(txns, standardized_df.index):
+                txn[ROW_KEY] = int(row_index)
                 if isinstance(txn["date"], pd.Timestamp):
                     txn["date"] = txn["date"].to_pydatetime()
 
@@ -808,6 +820,53 @@ class TransactionProcessor:
         logger.info(f"Preparing to add {len(txns)} new {account_type} txns to log.")
         data_values = self._format_txns_for_storage(txns)
         self.data_source.append_transactions_to_log(account_type, data_values)
+
+    def apply_category_updates(
+        self, account_type: str, updates: list[Tuple[int, str]]
+    ) -> int:
+        """Write new categories into specific log rows, and nothing else.
+
+        Re-reads the log and refuses any row whose Category cell is not still
+        DEFAULT_CATEGORY. Recategorization only ever *fills in* a blank label, so
+        a row that already carries one means the index is stale (something wrote
+        to this log in between) — better to skip it and say so than to overwrite
+        a real category.
+        """
+        if not updates:
+            logger.info(f"No category updates to apply for {account_type}.")
+            return 0
+
+        raw = self.data_source.get_transaction_log_data(account_type)
+        rows = raw[1:] if raw else []
+        cat_col = EXPECTED_SHEET_COLUMNS.index("Category")
+
+        safe: list[Tuple[int, str]] = []
+        skipped: list[Tuple[int, str]] = []
+        for row_index, category in updates:
+            if not 0 <= row_index < len(rows):
+                skipped.append((row_index, "row index out of range"))
+                continue
+            row = rows[row_index]
+            current = str(row[cat_col]).strip() if len(row) > cat_col else ""
+            if current != DEFAULT_CATEGORY:
+                skipped.append(
+                    (row_index, f"category is {current!r}, not uncategorized")
+                )
+                continue
+            safe.append((row_index, category))
+
+        if skipped:
+            logger.warning(
+                f"Skipping {len(skipped)} category update(s) for {account_type}: "
+                + "; ".join(f"row {i}: {why}" for i, why in skipped[:10])
+            )
+
+        updated = self.data_source.update_transaction_categories(account_type, safe)
+        logger.info(
+            f"Applied {updated} category update(s) to the {account_type} log "
+            f"({len(skipped)} skipped)."
+        )
+        return updated
 
     def overwrite_transaction_log(self, txns: list[dict], account_type: str) -> None:
         if not txns:

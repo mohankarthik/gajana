@@ -22,7 +22,7 @@ from src.constants import (
 from src.llm_categorizer import LLMCategorizer
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
-from src.transaction_processor import TransactionProcessor
+from src.transaction_processor import ROW_KEY, TransactionProcessor
 from src.utils import log_and_exit
 
 logging.basicConfig(
@@ -107,12 +107,17 @@ def assert_safe_to_overwrite(
     buckets: dict[str, list[dict[Any, Any]]],
     unknown: list[dict[Any, Any]],
     require_baseline: bool,
+    check_row_counts: bool = True,
 ) -> None:
     """Abort (log_and_exit) if an overwrite would lose data.
 
     - unknown-prefix accounts present -> refuse (would be dropped).
     - live row count far below the backup baseline -> refuse (truncated read).
     - require_baseline and no backup exists -> refuse (no safety net).
+
+    check_row_counts guards the truncated-read case, which only matters when the
+    whole log is rewritten. A caller that writes individual cells cannot delete a
+    row it failed to read, so it passes False.
     """
     if unknown:
         sample = {str(t.get("account")) for t in unknown[:5]}
@@ -130,6 +135,8 @@ def assert_safe_to_overwrite(
                 "Refusing overwrite: no local backup found as a safety baseline. "
                 "Run `python main.py --backup-db` first.",
             )
+        return
+    if not check_row_counts:
         return
     for sheet in ("bank", "cc"):
         have, base = len(buckets[sheet]), baseline.get(sheet, 0)
@@ -239,18 +246,23 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
     )
 
 
-def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categorizer):
+def run_recategorize_mode(
+    processor: TransactionProcessor, categorizer: Categorizer, dry_run: bool = False
+):
     logger.info("Running in RECATEGORIZE mode.")
     all_existing_txns = processor.get_all_transactions_for_recategorize()
     if not all_existing_txns:
         logger.warning("No existing transactions for recategorization.")
         return
 
-    # Safety gate FIRST, before anything else: a full overwrite will rewrite the
-    # whole sheet, so validate the read up front (truncated read or unknown-prefix
-    # accounts -> refuse) regardless of whether there is anything to recategorize.
+    # Unknown-prefix accounts still refuse (they would be invisible to the
+    # per-sheet split below) and a backup is still required. The truncated-read
+    # check is not: this mode writes individual Category cells now, so a short
+    # read can only mean fewer updates, never a deleted row.
     buckets, unknown = partition_by_sheet(all_existing_txns)
-    assert_safe_to_overwrite(buckets, unknown, require_baseline=True)
+    assert_safe_to_overwrite(
+        buckets, unknown, require_baseline=True, check_row_counts=False
+    )
 
     txns_to_categorize = [
         txn
@@ -270,11 +282,50 @@ def run_recategorize_mode(processor: TransactionProcessor, categorizer: Categori
     categorizer.build_index(all_existing_txns, enable_llm=categorizer.llm is not None)
     categorizer.categorize(txns_to_categorize)  # Modifies in-place
 
+    # Identity, not equality: two rows can hold equal field values, and `in` on a
+    # list of dicts is both O(n^2) and wrong here.
+    pending = {id(txn) for txn in txns_to_categorize}
+    total = 0
     for sheet in ("bank", "cc"):
-        buckets[sheet].sort(key=itemgetter("date", "account", "amount", "description"))
-        logger.info(f"--- Overwriting {sheet.upper()} Transactions Sheet ---")
-        processor.overwrite_transaction_log(buckets[sheet], sheet)
-    logger.info("Recategorize mode finished.")
+        updates = [
+            (txn[ROW_KEY], str(txn["category"]))
+            for txn in buckets[sheet]
+            if txn.get(ROW_KEY) is not None
+            and txn.get("category")
+            and txn["category"] != DEFAULT_CATEGORY
+            and id(txn) in pending
+        ]
+        if not updates:
+            logger.info(f"No {sheet} rows changed category.")
+            continue
+        if dry_run:
+            logger.info(
+                f"--- DRY RUN: would update {len(updates)} {sheet.upper()} "
+                f"category cells (no write) ---"
+            )
+            by_row = {
+                txn[ROW_KEY]: txn
+                for txn in buckets[sheet]
+                if txn.get(ROW_KEY) is not None
+            }
+            for row_index, category in updates:
+                txn = by_row[row_index]
+                date = txn.get("date")
+                logger.info(
+                    "    row %-6s %s  %-45s -> %s",
+                    row_index,
+                    date.strftime("%Y-%m-%d") if date else "?",
+                    str(txn.get("description", ""))[:45],
+                    category,
+                )
+            continue
+        logger.info(f"--- Updating {len(updates)} {sheet.upper()} category cells ---")
+        total += processor.apply_category_updates(sheet, updates)
+
+    if dry_run:
+        logger.info("Recategorize dry run finished. Nothing was written.")
+    else:
+        logger.info(f"Recategorize mode finished. {total} categories updated.")
 
 
 def run_learn_mode(processor: TransactionProcessor):
@@ -467,6 +518,11 @@ def main():
         action="store_true",
         help="Recategorize 'Uncategorized' txns.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute everything but write nothing (recategorize mode).",
+    )
     mode_group.add_argument(
         "--learn-categories",
         action="store_true",
@@ -557,7 +613,7 @@ def main():
             llm = LLMCategorizer() if args.llm_categorize else None
             categorizer = Categorizer(llm=llm)
             if args.recategorize_only:
-                run_recategorize_mode(processor, categorizer)
+                run_recategorize_mode(processor, categorizer, dry_run=args.dry_run)
             else:
                 run_normal_mode(processor, categorizer)
 

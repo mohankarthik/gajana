@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from src.interfaces import DataSourceFile, DataSourceInterface
 from src.constants import (
@@ -186,6 +186,46 @@ class CSVDataSource(DataSourceInterface):
             self.logger.error(f"Error writing {path}: {e}")
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    def update_transaction_categories(
+        self, log_type: str, updates: List[Tuple[int, str]]
+    ) -> int:
+        """Rewrite only the Category field of the given rows, atomically."""
+        if not updates:
+            return 0
+        path = self._get_log_path(log_type)
+        if not os.path.exists(path):
+            self.logger.warning(f"No log to update at {path}")
+            return 0
+        with open(path, "r", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        if not rows:
+            return 0
+        header, data = rows[0], rows[1:]
+        cat_col = EXPECTED_SHEET_COLUMNS.index("Category")
+        updated = 0
+        for row_index, category in updates:
+            if not 0 <= row_index < len(data):
+                self.logger.warning(f"Row index {row_index} out of range; skipped.")
+                continue
+            row = data[row_index]
+            if len(row) <= cat_col:
+                row.extend([""] * (cat_col + 1 - len(row)))
+            row[cat_col] = category
+            updated += 1
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(data)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            self.logger.error(f"Error writing {path}: {e}")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return 0
+        return updated
 
     def get_first_sheet_name_from_file(self, file_id: str) -> Optional[str]:
         """For CSV, we just return the filename or a dummy value."""
