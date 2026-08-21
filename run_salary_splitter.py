@@ -18,6 +18,20 @@ SETTINGS_PATH = os.path.join(
 )
 
 
+# Kill switch. The splitter wrote wrong ledger rows for 10 of the last 16
+# months -- including two it never wrote at all, and one (2026-04) whose legs
+# netted exactly to the bank credit while understating income by Rs 4.92M, so a
+# net-level check could not see it. Until it reads the manual "Google Salary"
+# sheet and asserts every component against it, running it makes the ledger
+# worse. Set GAJANA_ALLOW_SALARY_SPLITTER=1 to override deliberately.
+DISABLED_REASON = (
+    "The salary splitter is disabled: it mis-booked 10 of the last 16 months "
+    "and the ledger is being conformed to the manual 'Google Salary' sheet. "
+    "Re-enable only once it validates every split component against that "
+    "sheet, not just the net. Override with GAJANA_ALLOW_SALARY_SPLITTER=1."
+)
+
+
 def main() -> None:
     """Split a Google payslip into the salary sheet and the gajana ledger.
 
@@ -28,6 +42,10 @@ def main() -> None:
     rows without writing them to the ledger. Already-split months are a no-op.
     """
     import datetime
+
+    if os.environ.get("GAJANA_ALLOW_SALARY_SPLITTER") != "1":
+        logger.error(DISABLED_REASON)
+        sys.exit(1)
 
     argv = [a for a in sys.argv[1:] if a != "--dry-run"]
     dry_run = "--dry-run" in sys.argv
