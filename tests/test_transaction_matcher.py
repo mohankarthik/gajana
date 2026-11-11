@@ -643,3 +643,41 @@ def test_matcher_watermark_account_name_case_and_whitespace_fallback():
         old_txns, potential, watermark_by_account=watermark
     )
     assert result == []
+
+
+def test_matcher_lookback_handles_none_or_nan_description():
+    """Unmatched lookback booking with None/NaN description does not raise TypeError."""
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 1),
+            "account": "cc-hdfc-test",
+            "amount": -10.0,
+            "description": "EARLIER ROW",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -75.0,
+            "description": "VALID STRING",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -75.0,
+            "description": None,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -75.0,
+            "description": float("nan"),
+        },
+    ]
+    res = TransactionMatcher.find_new_txns(
+        old_txns, potential, watermark_by_account=watermark
+    )
+    assert len(res) == 3
+    assert [r["amount"] for r in res] == [-75.0, -75.0, -75.0]

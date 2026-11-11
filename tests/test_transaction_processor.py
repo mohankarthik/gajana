@@ -1438,11 +1438,129 @@ def test_day1_100pct_flagged_pdf_records_partial_cache(
             "f_flagged": {
                 "status": "partial",
                 "base_watermark": "2026-07-01T00:00:00",
-                "opened_lookback": True,
+                "opened_lookback": False,
+                "was_first_ingest": True,
                 "emitted": [],
             }
         }
     )
+
+
+def test_partial_retry_opened_lookback_false_and_pre_cutoff_leaves_partial_state(
+    transaction_processor, mock_data_source, mocker
+):
+    """A partial retry with opened_lookback=False (or pre-cutoff rows) promotes cleanly
+    to an ISO date and clears Review once pdf_clean=True, rather than looping forever.
+    """
+    last_txn = datetime.datetime(2026, 7, 15, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "description": "PRE-WATERMARK HISTORICAL ROW",
+            "amount": -50.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "description": "DAY 1 PASSED ROW",
+            "amount": -100.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "description": "DAY 2 RESCUED ROW",
+            "amount": -200.0,
+        },
+    ]
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_selfheal", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {
+        "f_selfheal": {
+            "status": "partial",
+            "base_watermark": "2026-07-10T00:00:00",
+            "opened_lookback": False,
+            "was_first_ingest": False,
+            "emitted": [["2026-07-11", -100.0]],
+        }
+    }
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}",
+                    "credit": "",
+                }
+                for t in statement_txns
+            ],
+            True,
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    assert len(parsed_txns) == 1
+    assert parsed_txns[0]["description"] == "DAY 2 RESCUED ROW"
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {
+            "f_selfheal": "2026-07-15",
+        }
+    )
+    mock_data_source.clear_review_rows.assert_called_once_with(
+        "cc-hdfc-test", "cc-hdfc-test-2026-07.pdf"
+    )
+
+
+def test_run_normal_mode_does_not_commit_partial_cache_when_sheet_write_fails(
+    transaction_processor, mock_data_source, mocker
+):
+    """When add_new_transactions_to_log fails in run_normal_mode, partial emitted rows
+    and Review clears are NOT persisted so the next run retries without losing rows."""
+    import main as gajana_main
+    from src.categorizer import Categorizer
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", [])
+    mock_data_source.get_transaction_log_data.return_value = []
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_fail", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-07-15",
+                    "description": "PASSED ROW",
+                    "debit": "125.00",
+                    "credit": "",
+                }
+            ],
+            False,  # Partial (some other row flagged)
+        ),
+    )
+    mocker.patch.object(
+        transaction_processor,
+        "add_new_transactions_to_log",
+        side_effect=RuntimeError("Sheets 503"),
+    )
+    categorizer = Categorizer(matchers_file="data/matchers.example.json", llm=None)
+
+    errors = gajana_main.run_normal_mode(transaction_processor, categorizer)
+    assert errors == ["cc: Sheets 503"]
+
+    # Sheet write failed -> save_processed_statements and clear_review_rows must NOT have run!
+    mock_data_source.save_processed_statements.assert_not_called()
+    mock_data_source.clear_review_rows.assert_not_called()
 
 
 def test_non_pdf_sheet_statements_use_strict_forward_filter(

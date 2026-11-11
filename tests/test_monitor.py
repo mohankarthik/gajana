@@ -175,6 +175,31 @@ def test_run_daily_mode_uses_unresolved_review_counts_when_available(monkeypatch
     assert "OK" in captured_push["msg"]
 
 
+def test_run_daily_mode_propagates_normal_mode_errors(monkeypatch):
+    import main
+    from unittest.mock import MagicMock
+
+    mock_ds = MagicMock()
+    mock_ds.get_unresolved_review_counts.return_value = {}
+    mock_processor = MagicMock()
+    mock_processor.quarantined_files = {}
+    mock_categorizer = MagicMock()
+
+    captured_push = {}
+    monkeypatch.setattr(
+        main.monitor,
+        "push_daily",
+        lambda is_up, msg: captured_push.update(is_up=is_up, msg=msg),
+    )
+    monkeypatch.setattr(main, "run_normal_mode", lambda proc, cat: ["cc: Sheets 503"])
+    monkeypatch.setattr(main, "_latest_txn_date", lambda proc: datetime.datetime.now())
+    monitor.record_pdf_fetch(1, today=datetime.date.today())
+
+    main.run_daily_mode(mock_ds, mock_processor, mock_categorizer, fetch_days=1)
+    assert captured_push["is_up"] is False
+    assert "cc: Sheets 503" in captured_push["msg"]
+
+
 def test_push_noop_when_url_empty(monkeypatch):
     called = {"n": 0}
 

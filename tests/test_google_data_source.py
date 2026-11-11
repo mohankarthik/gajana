@@ -678,10 +678,26 @@ def test_write_review_rows_matches_ack_with_formatted_amounts_and_dates(
     ]
     values.get.return_value.execute.return_value = {"values": existing}
 
-    # Incoming rows formatted with ISO date and 2-decimal amounts
+    # Incoming rows formatted with ISO date, 2-decimal amounts, and drifted LLM descriptions!
     new_rows = [
-        ["cc-test", "2026-07-15", "Merchant A", "50.00", "", "Reason", "stmt.pdf"],
-        ["cc-test", "2026-07-16", "Merchant B", "1000.00", "", "Reason", "stmt.pdf"],
+        [
+            "cc-test",
+            "2026-07-15",
+            "Merchant A (LLM reworded)",
+            "50.00",
+            "",
+            "Reason",
+            "stmt.pdf",
+        ],
+        [
+            "cc-test",
+            "2026-07-16",
+            "Merchant B (LLM reworded)",
+            "1000.00",
+            "",
+            "Reason",
+            "stmt.pdf",
+        ],
     ]
     gds.write_review_rows(new_rows)
 

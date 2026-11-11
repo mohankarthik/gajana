@@ -195,10 +195,13 @@ def find_latest_transaction_by_account(
     return latest
 
 
-def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
+def run_normal_mode(
+    processor: TransactionProcessor, categorizer: Categorizer
+) -> list[str]:
     logger.info("Running in NORMAL mode.")
     processor.quarantined_files.clear()
     all_new_txns_added_count = 0
+    errors: list[str] = []
 
     # Fetch existing history for both account types up front and build the
     # category lookup index from it (exact + fuzzy layers).
@@ -214,7 +217,7 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 old_txns, statement_only=True
             )
             potential_new_txns = processor.get_new_transactions_from_statements(
-                acc_type, latest_by_account
+                acc_type, latest_by_account, defer_commit=True
             )
 
             # TransactionMatcher.find_new_txns now returns only new_txns
@@ -231,22 +234,26 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 )
                 categorized_txns = categorizer.categorize(new_txns_to_add)
                 processor.add_new_transactions_to_log(categorized_txns, acc_type)
+                processor.commit_statement_progress(acc_type)
                 all_new_txns_added_count += len(categorized_txns)
                 # Bank cash movements (ATM withdrawals, cash deposits) mirror
                 # into the shared Cash Transactions ledger. No-op for cc.
                 if acc_type == "bank":
                     mirror_bank_cash_txns(processor.data_source, categorized_txns)
             else:
+                processor.commit_statement_progress(acc_type)
                 logger.info(f"No new {acc_type} transactions found to add.")
         except Exception as e:  # Catch exceptions per account type processing
+            errors.append(f"{acc_type}: {e}")
             logger.error(
-                f"Error processing {acc_type} transactions in normal mode: {e}", e
+                f"Error processing {acc_type} transactions in normal mode: {e}",
+                exc_info=e,
             )
-            # Decide if you want to continue to the next account type or assert False here
 
     logger.info(
         f"Normal mode finished. Added {all_new_txns_added_count} new transactions."
     )
+    return errors
 
 
 def run_recategorize_mode(
@@ -455,7 +462,9 @@ def run_daily_mode(
             logger.warning("Daily mode without GoogleDataSource; skipping email fetch.")
         monitor.record_pdf_fetch(new_pdf_count)
 
-        run_normal_mode(processor, categorizer)
+        normal_errors = run_normal_mode(processor, categorizer)
+        if normal_errors:
+            pipeline_error = "; ".join(normal_errors)
     except Exception as e:
         pipeline_error = str(e)
         logger.error(f"Daily pipeline error: {e}", exc_info=e)

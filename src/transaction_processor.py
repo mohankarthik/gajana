@@ -41,6 +41,31 @@ class TransactionProcessor:
         self.data_source = data_source
         self.quarantined_files: dict[str, int] = {}
         self._soft_flagged_files: set[str] = set()
+        self._pending_cache_updates: dict[str, dict[str, Any]] = {}
+        self._pending_review_clears: dict[str, list[tuple[str, str]]] = {}
+
+    def commit_statement_progress(self, account_type: str) -> None:
+        """Persist staged statement cache updates and execute queued Review-tab clears
+        only after ledger booking has succeeded."""
+        pending_updates = self._pending_cache_updates.pop(account_type, None)
+        if pending_updates:
+            current_cache = self.data_source.get_processed_statements()
+            self.data_source.save_processed_statements(
+                {**current_cache, **pending_updates}
+            )
+            logger.info(
+                f"Cached {len(pending_updates)} processed {account_type} "
+                "statement(s) to skip next run."
+            )
+        pending_clears = self._pending_review_clears.pop(account_type, None)
+        if pending_clears:
+            for matched_account, file_name in pending_clears:
+                try:
+                    self.data_source.clear_review_rows(matched_account, file_name)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to clear review rows for '{file_name}': {e}"
+                    )
 
     @staticmethod
     def _parse_amount(value: Any) -> float:
@@ -555,8 +580,13 @@ class TransactionProcessor:
             return []
 
     def get_new_transactions_from_statements(
-        self, account_type: str, latest_txn_by_account: dict[str, datetime.datetime]
+        self,
+        account_type: str,
+        latest_txn_by_account: dict[str, datetime.datetime],
+        defer_commit: bool = False,
     ) -> list[dict[Hashable, Any]]:
+        self._pending_cache_updates.pop(account_type, None)
+        self._pending_review_clears.pop(account_type, None)
         all_parsed_txns = []
         account_list = BANK_ACCOUNTS if account_type == "bank" else CC_ACCOUNTS
         statement_files = self.data_source.list_statement_file_details()
@@ -571,6 +601,7 @@ class TransactionProcessor:
         # deleted the watermark drops below the cached date and it re-parses.
         processed_cache = self.data_source.get_processed_statements()
         newly_processed: dict[str, Any] = {}
+        pending_clears: list[tuple[str, str]] = []
 
         seen_account_dates: set[tuple[str, Any]] = set()
         for file_info in statement_files:
@@ -783,7 +814,7 @@ class TransactionProcessor:
                         max(t["date"] for t in file_txns) if file_txns else None
                     )
                     original_count = len(file_txns)
-                    rescued_dropped = False
+                    parse_loss = bool(unparseable_count or future)
 
                     if is_pdf:
                         if is_partial_retry:
@@ -797,18 +828,6 @@ class TransactionProcessor:
                                 if isinstance(cached_entry, dict)
                                 else []
                             )
-                            prev_counts = Counter((d, a) for d, a in prev_emitted_list)
-                            rescued_raw: list[dict[Hashable, Any]] = []
-                            for txn in file_txns:
-                                ms_key = (
-                                    txn["date"].strftime("%Y-%m-%d"),
-                                    round(float(txn["amount"]), 2),
-                                )
-                                if prev_counts[ms_key] > 0:
-                                    prev_counts[ms_key] -= 1
-                                else:
-                                    rescued_raw.append(txn)
-
                             base_wm: Optional[datetime.datetime] = None
                             if isinstance(cached_entry, dict) and cached_entry.get(
                                 "base_watermark"
@@ -820,36 +839,49 @@ class TransactionProcessor:
                                 except Exception:
                                     base_wm = None
 
-                            rescued = rescued_raw
+                            opened_lookback_flag = (
+                                bool(cached_entry.get("opened_lookback", False))
+                                if isinstance(cached_entry, dict)
+                                else True
+                            )
+                            if (
+                                not opened_lookback_flag
+                                and isinstance(cached_entry, dict)
+                                and cached_entry.get("was_first_ingest", False)
+                                and not prev_emitted_list
+                                and base_wm is not None
+                                and stmt_max_date
+                                and stmt_max_date.date() > base_wm.date()
+                            ):
+                                opened_lookback_flag = True
+
                             if base_wm is not None:
-                                opened_lookback_flag = (
-                                    cached_entry.get("opened_lookback", False)
-                                    if isinstance(cached_entry, dict)
-                                    else True
-                                )
-                                if opened_lookback_flag or (
-                                    stmt_max_date
-                                    and stmt_max_date.date() > base_wm.date()
-                                ):
+                                if opened_lookback_flag:
                                     cutoff = base_wm - datetime.timedelta(
                                         days=STATEMENT_LOOKBACK_DAYS
                                     )
-                                    rescued = [
-                                        t for t in rescued_raw if t["date"] >= cutoff
+                                    file_txns = [
+                                        t for t in file_txns if t["date"] >= cutoff
                                     ]
                                 else:
-                                    rescued = [
-                                        t for t in rescued_raw if t["date"] > base_wm
+                                    file_txns = [
+                                        t for t in file_txns if t["date"] > base_wm
                                     ]
 
-                            rescued_dropped = bool(
-                                unparseable_count
-                                or future
-                                or len(rescued) < len(rescued_raw)
-                            )
+                            prev_counts = Counter((d, a) for d, a in prev_emitted_list)
+                            rescued: list[dict[Hashable, Any]] = []
+                            for txn in file_txns:
+                                ms_key = (
+                                    txn["date"].strftime("%Y-%m-%d"),
+                                    round(float(txn["amount"]), 2),
+                                )
+                                if prev_counts[ms_key] > 0:
+                                    prev_counts[ms_key] -= 1
+                                else:
+                                    rescued.append(txn)
                             file_txns = rescued
 
-                            if pdf_clean and stmt_max_date and not rescued_dropped:
+                            if pdf_clean and stmt_max_date and not parse_loss:
                                 newly_processed[file_id] = (
                                     stmt_max_date.date().isoformat()
                                 )
@@ -861,10 +893,11 @@ class TransactionProcessor:
                                         if isinstance(cached_entry, dict)
                                         else (base_wm.isoformat() if base_wm else None)
                                     ),
-                                    "opened_lookback": (
-                                        cached_entry.get("opened_lookback", False)
+                                    "opened_lookback": opened_lookback_flag,
+                                    "was_first_ingest": (
+                                        cached_entry.get("was_first_ingest", False)
                                         if isinstance(cached_entry, dict)
-                                        else True
+                                        else False
                                     ),
                                     "emitted": prev_emitted_list
                                     + [
@@ -876,8 +909,9 @@ class TransactionProcessor:
                                     ],
                                 }
                         else:
+                            was_first_ingest = file_id not in processed_cache
                             opened_lookback = bool(
-                                file_id not in processed_cache
+                                was_first_ingest
                                 and last_txn_date
                                 and stmt_max_date
                                 and stmt_max_date.date() > last_txn_date.date()
@@ -899,12 +933,7 @@ class TransactionProcessor:
                                         if txn["date"] > last_txn_date
                                     ]
 
-                            if (
-                                pdf_clean
-                                and stmt_max_date
-                                and not unparseable_count
-                                and not future
-                            ):
+                            if pdf_clean and stmt_max_date and not parse_loss:
                                 newly_processed[file_id] = (
                                     stmt_max_date.date().isoformat()
                                 )
@@ -917,6 +946,7 @@ class TransactionProcessor:
                                         else None
                                     ),
                                     "opened_lookback": opened_lookback,
+                                    "was_first_ingest": was_first_ingest,
                                     "emitted": [
                                         [
                                             t["date"].strftime("%Y-%m-%d"),
@@ -949,37 +979,22 @@ class TransactionProcessor:
                     if (
                         is_pdf
                         and pdf_clean
-                        and not rescued_dropped
-                        and not unparseable_count
-                        and not future
+                        and not parse_loss
                         and file_name not in self._soft_flagged_files
                     ):
-                        try:
-                            self.data_source.clear_review_rows(
-                                matched_account, file_name
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to clear review rows for '{file_name}': {e}"
-                            )
+                        pending_clears.append((matched_account, file_name))
                 else:
                     if is_pdf and not passed_txns:
                         if pdf_clean and file_name not in self._soft_flagged_files:
-                            try:
-                                self.data_source.clear_review_rows(
-                                    matched_account, file_name
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to clear review rows for '{file_name}': {e}"
-                                )
+                            pending_clears.append((matched_account, file_name))
                         elif not pdf_clean and file_id not in processed_cache:
                             newly_processed[file_id] = {
                                 "status": "partial",
                                 "base_watermark": (
                                     last_txn_date.isoformat() if last_txn_date else None
                                 ),
-                                "opened_lookback": True,
+                                "opened_lookback": False,
+                                "was_first_ingest": True,
                                 "emitted": [],
                             }
                     logger.info(f"0 txns or empty DataFrame from '{file_name}'.")
@@ -998,13 +1013,11 @@ class TransactionProcessor:
             logger.info(f"No new {account_type} txns from statements.")
 
         if newly_processed:
-            self.data_source.save_processed_statements(
-                {**processed_cache, **newly_processed}
-            )
-            logger.info(
-                f"Cached {len(newly_processed)} fully-parsed {account_type} "
-                "statement(s) to skip next run."
-            )
+            self._pending_cache_updates[account_type] = newly_processed
+        if pending_clears:
+            self._pending_review_clears[account_type] = pending_clears
+        if not defer_commit:
+            self.commit_statement_progress(account_type)
         return all_parsed_txns
 
     @staticmethod

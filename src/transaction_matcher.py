@@ -5,7 +5,6 @@ import datetime
 import logging
 import re
 from collections import Counter, defaultdict
-from operator import itemgetter
 from typing import Any, Hashable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,6 +23,21 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 SOURCE_KEY = "_source"
 
 LOOKBACK_DATE_TOLERANCE_DAYS = 3
+
+
+def _clean_desc_str(raw_desc: Any) -> str:
+    if raw_desc is None or (isinstance(raw_desc, float) and raw_desc != raw_desc):
+        return ""
+    return str(raw_desc)
+
+
+def _txn_sort_key(txn: Mapping[Hashable, Any]) -> tuple[Any, str, float, str]:
+    return (
+        txn["date"],
+        str(txn.get("account") or ""),
+        float(txn.get("amount") or 0.0),
+        _clean_desc_str(txn.get("description")),
+    )
 
 
 class TransactionMatcher:
@@ -103,9 +117,7 @@ class TransactionMatcher:
             logger.info(
                 "No old transactions provided, considering all potential transactions as new."
             )
-            all_potential_txns.sort(
-                key=itemgetter("date", "account", "amount", "description")
-            )
+            all_potential_txns.sort(key=_txn_sort_key)
             for txn in all_potential_txns:
                 txn.pop(SOURCE_KEY, None)
             return all_potential_txns
@@ -275,7 +287,7 @@ class TransactionMatcher:
                     if available_old[n_key] > 0:
                         available_old[n_key] -= 1
                         matched[i] = True
-                        logger.debug(
+                        logger.info(
                             f"Drift match in lookback window (delta={delta}d): "
                             f"{c_date} -> {neighbor_date} for {acc_clean} {amt_val}"
                         )
@@ -293,14 +305,14 @@ class TransactionMatcher:
                 )
                 acc_clean = str(cand["account"]).strip().lower()
                 amt_val = round(float(cand["amount"]), 2)
-                desc_snip = cand.get("description", "")[:60]
+                desc_snip = _clean_desc_str(cand.get("description"))[:60]
                 logger.info(
                     f"Booking unmatched lookback txn (<= watermark): "
                     f"{c_date} {acc_clean} {amt_val} {desc_snip}"
                 )
                 new_txns.append(cand)
 
-        new_txns.sort(key=itemgetter("date", "account", "amount", "description"))
+        new_txns.sort(key=_txn_sort_key)
         for txn in new_txns:
             txn.pop(SOURCE_KEY, None)  # transient: never reaches storage
         logger.info(

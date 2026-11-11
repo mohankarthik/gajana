@@ -60,14 +60,13 @@ def _normalize_amount_str(val: Any) -> str:
         return s
 
 
-def _review_row_key(r: Sequence[Any]) -> tuple[str, str, str, str, str, str]:
+def _review_row_key(r: Sequence[Any]) -> tuple[str, str, str, str, str]:
     account = str(r[0]).strip() if len(r) > 0 else ""
     date_str = _normalize_date_str(str(r[1])) if len(r) > 1 else ""
-    desc = str(r[2]).strip() if len(r) > 2 else ""
     debit = _normalize_amount_str(r[3]) if len(r) > 3 else ""
     credit = _normalize_amount_str(r[4]) if len(r) > 4 else ""
     file_name = str(r[6]).strip() if len(r) > 6 else ""
-    return (account, date_str, desc, debit, credit, file_name)
+    return (account, date_str, debit, credit, file_name)
 
 
 def retry_on_gcp_error(max_retries=3, initial_backoff=5):
