@@ -481,6 +481,7 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                             date_x = min(starts) if starts else 0
                             ref = re.search(r"Chq\./Ref\.No\.", line)
                             desc_end = ref.start() if ref else found["dr"][0]
+                            can_append = bool(st.rows)
                         break
                 pending = []
                 continue

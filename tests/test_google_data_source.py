@@ -429,62 +429,94 @@ def test_write_review_rows_noop_on_empty(
     mock_sheets_service.spreadsheets.return_value.values.return_value.update.assert_not_called()
 
 
-def test_write_review_rows_idempotent_replace(
+def test_write_review_rows_idempotent_delete_dimension(
     mock_service_account_credentials, mock_google_services
 ):
-    """When incoming (account, file_name) exists in Review, old rows for that file
-    are replaced while preserving other files' rows."""
+    """write_review_rows deletes prior unacknowledged rows via deleteDimension batchUpdate,
+    preserves acknowledged rows, and appends remaining incoming rows via RAW.
+    """
     gds = GoogleDataSource()
     _, mock_sheets_service = mock_google_services
-    values = mock_sheets_service.spreadsheets.return_value.values.return_value
-    existing = [
-        ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf"],
-        ["acc-target", "2026-07-05", "old txn 1", "50.00", "", "why2", "target.pdf"],
-        ["acc-target", "2026-07-06", "old txn 2", "60.00", "", "why3", "target.pdf"],
-    ]
-    values.get.return_value.execute.return_value = {"values": existing}
-    values.update.return_value.execute.return_value = {"updatedCells": 14}
-    values.clear.return_value.execute.return_value = {}
+    sheets = mock_sheets_service.spreadsheets.return_value
+    values = sheets.values.return_value
 
-    new_rows = [
+    sheets.get.return_value.execute.return_value = {
+        "sheets": [{"properties": {"title": "Review", "sheetId": 999}}]
+    }
+    sheets.batchUpdate.return_value.execute.return_value = {}
+
+    existing = [
+        ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf", ""],
         [
             "acc-target",
             "2026-07-05",
-            "rescued txn",
+            "old unack",
             "50.00",
             "",
-            "why-new",
+            "why2",
             "target.pdf",
-        ]
+            "",
+        ],
+        [
+            "acc-target",
+            "2026-07-06",
+            "old acked",
+            "60.00",
+            "",
+            "why3",
+            "target.pdf",
+            "ack",
+        ],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+    values.update.return_value.execute.return_value = {"updatedCells": 7}
+
+    new_rows = [
+        ["acc-target", "2026-07-05", "new unack", "50.00", "", "why-new", "target.pdf"],
+        [
+            "acc-target",
+            "2026-07-06",
+            "old acked",
+            "60.00",
+            "",
+            "why3",
+            "target.pdf",
+        ],  # Matches acked row
     ]
     gds.write_review_rows(new_rows)
 
-    values.append.assert_not_called()
+    # Row 1 (unacknowledged target) was deleted via batchUpdate deleteDimension
+    sheets.batchUpdate.assert_called_once()
+    reqs = sheets.batchUpdate.call_args.kwargs["body"]["requests"]
+    assert len(reqs) == 1
+    del_req = reqs[0]["deleteDimension"]["range"]
+    assert del_req["sheetId"] == 999
+    assert del_req["startIndex"] == 1
+    assert del_req["endIndex"] == 2
+
+    # Acknowledged row 07-06 was filtered out of incoming; only 07-05 was appended at row 3 (len 3 - 1 del + 1)
+    values.update.assert_called_once()
     update_kwargs = values.update.call_args.kwargs
-    assert update_kwargs["range"].endswith("!A1")
+    assert update_kwargs["range"].endswith("!A3")
     assert update_kwargs["valueInputOption"] == "RAW"
-    written = update_kwargs["body"]["values"]
-    assert len(written) == 2
-    assert written[0][0] == "acc-other" and written[0][6] == "other.pdf"
-    assert (
-        written[1][0] == "acc-target"
-        and written[1][2] == "rescued txn"
-        and written[1][6] == "target.pdf"
-    )
-    # len(written) == 2 < len(existing) == 3, so clear trailing row 3
-    clear_kwargs = values.clear.call_args.kwargs
-    assert clear_kwargs["range"].endswith("!A3:G")
+    appended = update_kwargs["body"]["values"]
+    assert len(appended) == 1
+    assert appended[0][2] == "new unack"
 
 
-def test_clear_review_rows_removes_matching_and_clears_trailing(
-    mock_service_account_credentials, mock_google_services, mocker
+def test_clear_review_rows_deletes_matching_rows_atomically(
+    mock_service_account_credentials, mock_google_services
 ):
-    """clear_review_rows rewrites kept rows from !A1 with RAW and clears trailing."""
-    from src.google_data_source import GoogleDataSource
-
-    _, mock_sheets_service = mock_google_services
+    """clear_review_rows deletes matching rows atomically via deleteDimension batchUpdate."""
     gds = GoogleDataSource()
-    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+    _, mock_sheets_service = mock_google_services
+    sheets = mock_sheets_service.spreadsheets.return_value
+    values = sheets.values.return_value
+
+    sheets.get.return_value.execute.return_value = {
+        "sheets": [{"properties": {"title": "Review", "sheetId": 888}}]
+    }
+    sheets.batchUpdate.return_value.execute.return_value = {}
 
     existing = [
         ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf"],
@@ -492,28 +524,27 @@ def test_clear_review_rows_removes_matching_and_clears_trailing(
         ["acc-target", "2026-07-06", "flagged 2", "60.00", "", "why3", "target.pdf"],
     ]
     values.get.return_value.execute.return_value = {"values": existing}
-    values.update.return_value.execute.return_value = {"updatedCells": 7}
-    values.clear.return_value.execute.return_value = {}
 
     gds.clear_review_rows("acc-target", "target.pdf")
 
-    update_kwargs = values.update.call_args.kwargs
-    assert update_kwargs["range"].endswith("!A1")
-    assert update_kwargs["valueInputOption"] == "RAW"
-    assert update_kwargs["body"]["values"] == [existing[0]]
-    clear_kwargs = values.clear.call_args.kwargs
-    assert clear_kwargs["range"].endswith("!A2:G")
+    sheets.batchUpdate.assert_called_once()
+    reqs = sheets.batchUpdate.call_args.kwargs["body"]["requests"]
+    assert len(reqs) == 1
+    del_range = reqs[0]["deleteDimension"]["range"]
+    assert del_range["sheetId"] == 888
+    # Merged contiguous rows 1 and 2 -> range startIndex=1, endIndex=3
+    assert del_range["startIndex"] == 1
+    assert del_range["endIndex"] == 3
 
 
 def test_clear_review_rows_no_matching_makes_zero_writes(
-    mock_service_account_credentials, mock_google_services, mocker
+    mock_service_account_credentials, mock_google_services
 ):
-    """When no matching rows exist, clear_review_rows makes zero update/clear calls."""
-    from src.google_data_source import GoogleDataSource
-
-    _, mock_sheets_service = mock_google_services
+    """When no matching rows exist, clear_review_rows makes zero update or delete calls."""
     gds = GoogleDataSource()
-    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+    _, mock_sheets_service = mock_google_services
+    sheets = mock_sheets_service.spreadsheets.return_value
+    values = sheets.values.return_value
 
     existing = [
         ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf"]
@@ -522,31 +553,42 @@ def test_clear_review_rows_no_matching_makes_zero_writes(
 
     gds.clear_review_rows("acc-target", "clean.pdf")
 
+    sheets.batchUpdate.assert_not_called()
     values.update.assert_not_called()
     values.clear.assert_not_called()
 
 
-def test_clear_review_rows_all_matching_clears_entire_range(
-    mock_service_account_credentials, mock_google_services, mocker
+def test_get_unresolved_review_counts_filters_headers_and_ack_tokens(
+    mock_service_account_credentials, mock_google_services
 ):
-    """When all existing rows match, clear_review_rows clears !A1:G without update."""
-    from src.google_data_source import GoogleDataSource
-
-    _, mock_sheets_service = mock_google_services
+    """get_unresolved_review_counts counts unresolved rows per file, ignoring headers and acked rows."""
     gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
     values = mock_sheets_service.spreadsheets.return_value.values.return_value
 
     existing = [
-        ["acc-target", "2026-07-05", "flagged 1", "50.00", "", "why2", "target.pdf"]
+        [
+            "Account",
+            "Date",
+            "Description",
+            "Debit",
+            "Credit",
+            "Reason",
+            "File",
+            "Status",
+        ],
+        ["acc1", "2026-07-01", "txn1", "10.00", "", "why1", "file1.pdf", ""],
+        ["acc1", "2026-07-02", "txn2", "20.00", "", "why2", "file1.pdf", "ack"],
+        ["acc2", "2026-07-03", "txn3", "30.00", "", "why3", "file2.pdf", "DONE"],
+        ["acc2", "2026-07-04", "txn4", "40.00", "", "why4", "file2.pdf", "pending"],
     ]
     values.get.return_value.execute.return_value = {"values": existing}
-    values.clear.return_value.execute.return_value = {}
 
-    gds.clear_review_rows("acc-target", "target.pdf")
+    counts = gds.get_unresolved_review_counts()
+    assert counts == {"file1.pdf": 1, "file2.pdf": 1}
 
     values.update.assert_not_called()
-    clear_kwargs = values.clear.call_args.kwargs
-    assert clear_kwargs["range"].endswith("!A1:G")
+    values.clear.assert_not_called()
 
 
 # --- Tests for update_transaction_categories ---

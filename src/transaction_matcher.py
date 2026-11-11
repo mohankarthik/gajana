@@ -23,6 +23,8 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 # Used only to count a statement's internal repeats; stripped before storage.
 SOURCE_KEY = "_source"
 
+LOOKBACK_DATE_TOLERANCE_DAYS = 3
+
 
 class TransactionMatcher:
     """
@@ -114,7 +116,13 @@ class TransactionMatcher:
             acc_name = str(txn_item.get("account", ""))
             wm = watermark_by_account.get(acc_name)
             if wm is None:
-                wm = watermark_by_account.get(acc_name.strip().lower())
+                acc_norm = acc_name.strip().lower()
+                wm = watermark_by_account.get(acc_norm)
+                if wm is None:
+                    for k, v in watermark_by_account.items():
+                        if str(k).strip().lower() == acc_norm:
+                            wm = v
+                            break
             if wm is None:
                 return False
             t_d = txn_item.get("date")
@@ -147,20 +155,21 @@ class TransactionMatcher:
         # Multiset counts by (date, account, amount) for transactions inside the
         # lookback window (<= watermark), ignoring descriptions. Exclude
         # synthetic plugin rows (e.g. payslip split) from old counts.
-        old_da_counts: Counter[tuple[str, str, float]] = Counter()
+        available_old: Counter[tuple[datetime.date, str, float]] = Counter()
         for t in old_txns:
             if "auto-split from payslip" in str(t.get("description", "")).lower():
                 continue
             try:
                 t_date = t["date"]
-                d_str = (
-                    t_date.strftime("%Y-%m-%d")
-                    if hasattr(t_date, "strftime")
-                    else str(t_date)[:10]
-                )
+                if hasattr(t_date, "date"):
+                    dt_val = t_date.date()
+                elif isinstance(t_date, datetime.date):
+                    dt_val = t_date
+                else:
+                    dt_val = datetime.date.fromisoformat(str(t_date)[:10])
                 acc_clean = str(t.get("account", "")).strip().lower()
                 amt_val = round(float(t.get("amount", 0.0)), 2)
-                old_da_counts[(d_str, acc_clean, amt_val)] += 1
+                available_old[(dt_val, acc_clean, amt_val)] += 1
             except Exception:
                 continue
 
@@ -180,10 +189,11 @@ class TransactionMatcher:
 
         new_txns = []
         emitted: Counter = Counter()
-        source_da_counts: dict[Any, Counter[tuple[str, str, float]]] = defaultdict(
-            Counter
+        source_da_counts: dict[Any, Counter[tuple[datetime.date, str, float]]] = (
+            defaultdict(Counter)
         )
-        seen_window_keys: set[tuple[tuple[str, str, float], int]] = set()
+        seen_window_keys: set[tuple[tuple[datetime.date, str, float], int]] = set()
+        lookback_candidates: list[dict[Hashable, Any]] = []
 
         for txn in all_potential_txns:
             try:
@@ -193,23 +203,17 @@ class TransactionMatcher:
                         raise TypeError(
                             f"Date is not datetime/date: {type(t_date)} for {txn}"
                         )
-                    d_str = t_date.strftime("%Y-%m-%d")
+                    c_date = t_date.date() if hasattr(t_date, "date") else t_date
                     acc_clean = str(txn["account"]).strip().lower()
                     amt_val = round(float(txn["amount"]), 2)
-                    da_key = (d_str, acc_clean, amt_val)
+                    da_key = (c_date, acc_clean, amt_val)
                     source = txn.get(SOURCE_KEY, "")
                     source_da_counts[source][da_key] += 1
                     occ = source_da_counts[source][da_key]
                     window_key = (da_key, occ)
                     if window_key not in seen_window_keys:
                         seen_window_keys.add(window_key)
-                        if occ > old_da_counts[da_key]:
-                            new_txns.append(txn)
-                        else:
-                            logger.debug(
-                                f"Skipping already-booked lookback txn: {da_key} "
-                                f"(occ={occ} <= {old_da_counts[da_key]})"
-                            )
+                        lookback_candidates.append(txn)
                     else:
                         logger.debug(
                             f"Skipping duplicate feed lookback txn: {da_key} (occ={occ})"
@@ -235,6 +239,54 @@ class TransactionMatcher:
                     f"Error creating ID for potential transaction: {e}. Skipping matching for: {txn}",
                     exc_info=True,
                 )
+
+        # Deterministic 2-pass greedy matching for lookback candidates:
+        matched = [False] * len(lookback_candidates)
+
+        # Pass 1 (Exact date, delta = 0):
+        for i, cand in enumerate(lookback_candidates):
+            c_date = (
+                cand["date"].date() if hasattr(cand["date"], "date") else cand["date"]
+            )
+            acc_clean = str(cand["account"]).strip().lower()
+            amt_val = round(float(cand["amount"]), 2)
+            key = (c_date, acc_clean, amt_val)
+            if available_old[key] > 0:
+                available_old[key] -= 1
+                matched[i] = True
+                logger.debug(f"Exact match in lookback window: {key}")
+
+        # Pass 2 (Value-date drift, delta = 1 .. LOOKBACK_DATE_TOLERANCE_DAYS):
+        for i, cand in enumerate(lookback_candidates):
+            if matched[i]:
+                continue
+            c_date = (
+                cand["date"].date() if hasattr(cand["date"], "date") else cand["date"]
+            )
+            acc_clean = str(cand["account"]).strip().lower()
+            amt_val = round(float(cand["amount"]), 2)
+            for delta in range(1, LOOKBACK_DATE_TOLERANCE_DAYS + 1):
+                found_neighbor = False
+                for neighbor_date in (
+                    c_date - datetime.timedelta(days=delta),
+                    c_date + datetime.timedelta(days=delta),
+                ):
+                    n_key = (neighbor_date, acc_clean, amt_val)
+                    if available_old[n_key] > 0:
+                        available_old[n_key] -= 1
+                        matched[i] = True
+                        logger.debug(
+                            f"Drift match in lookback window (delta={delta}d): "
+                            f"{c_date} -> {neighbor_date} for {acc_clean} {amt_val}"
+                        )
+                        found_neighbor = True
+                        break
+                if found_neighbor:
+                    break
+
+        for i, cand in enumerate(lookback_candidates):
+            if not matched[i]:
+                new_txns.append(cand)
 
         new_txns.sort(key=itemgetter("date", "account", "amount", "description"))
         for txn in new_txns:

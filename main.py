@@ -467,11 +467,23 @@ def run_daily_mode(
         pipeline_error = pipeline_error or f"could not read latest txn: {e}"
         logger.error(f"Failed reading latest txn date: {e}", exc_info=e)
 
+    unresolved_review: dict[str, int] | None = None
+    try:
+        unresolved_review = data_source.get_unresolved_review_counts()
+    except Exception as e:
+        logger.warning(f"Failed to query unresolved review counts: {e}")
+
+    quarantined_to_report = (
+        unresolved_review
+        if isinstance(unresolved_review, dict)
+        else processor.quarantined_files
+    )
+
     is_up, msg = monitor.evaluate_health(
         pipeline_error=pipeline_error,
         new_pdf_count=new_pdf_count,
         latest_txn_date=latest_txn_date,
-        quarantined_files=processor.quarantined_files,
+        quarantined_files=quarantined_to_report,
     )
     monitor.push_daily(is_up, msg)
     logger.info(f"Daily mode finished. health={'UP' if is_up else 'DOWN'} | {msg}")

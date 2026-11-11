@@ -262,6 +262,34 @@ Opening Balance      : 10,000.00                                        Limit   
     assert [r.amount for r in st.rows] == [5000.0, -500.0]
 
 
+def test_bank_narration_continuation_across_page_break():
+    """A narration line wrapping across a page break right under Page 2's repeated
+    table header attaches to the last row of Page 1.
+    """
+    page1 = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+    01/08/2026        NEFT CR-ACME TECH SOLUTIONS                     0.00           10,000.00                20,000.00
+"""
+    page2 = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+                      INDIA PRIVATE LIMITED CONTINUATION
+    02/08/2026        UPI-GROCERY STORE                             500.00                0.00                19,500.00
+                      Closing Balance                                                                         19,500.00
+"""
+    st = extract_bank_statement([page1, page2])
+    assert len(st.rows) == 2
+    assert (
+        st.rows[0].description
+        == "NEFT CR-ACME TECH SOLUTIONS INDIA PRIVATE LIMITED CONTINUATION"
+    )
+    assert st.rows[1].description == "UPI-GROCERY STORE"
+    assert st.verified
+
+
 def test_hdfc_rel_verifies_and_folds_continuation_lines():
     st = extract_bank_statement(pages(HDFC_REL))
     assert st.kind == "hdfc-rel"

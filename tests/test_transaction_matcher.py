@@ -579,3 +579,67 @@ def test_matcher_duplicate_feeds_collapse_in_lookback_window():
     )
     assert len(result) == 1
     assert result[0]["description"] == "CGST TAX LEG"
+
+
+def test_matcher_value_date_drift_tolerance_in_lookback_window():
+    """Value-date drift (±1..3 days) inside the lookback window is absorbed so
+    txns booked on value date by LLM are not double-booked when extractor reads txn date.
+    """
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 10, 10)}
+    # Ledger holds 1 transaction booked by LLM on value date (2026-10-02)
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 10, 2),
+            "account": "cc-hdfc-test",
+            "amount": -100.0,
+            "description": "LLM BOOKED ON VALUE DATE",
+        }
+    ]
+    # Extractor reads 2 transactions with amount -100:
+    # 1. 2026-10-01 (drifted by 1 day from 10-02) -> should match old_txns[0] and NOT be re-booked
+    # 2. 2026-10-03 (a second genuine txn on 10-03) -> unmatched, must be booked!
+    potential = [
+        {
+            "date": datetime.datetime(2026, 10, 1),
+            "account": "cc-hdfc-test",
+            "amount": -100.0,
+            "description": "SWIPE ON TXN DATE",
+        },
+        {
+            "date": datetime.datetime(2026, 10, 3),
+            "account": "cc-hdfc-test",
+            "amount": -100.0,
+            "description": "SECOND GENUINE SWIPE",
+        },
+    ]
+    result = TransactionMatcher.find_new_txns(
+        old_txns, potential, watermark_by_account=watermark
+    )
+    assert len(result) == 1
+    assert result[0]["description"] == "SECOND GENUINE SWIPE"
+
+
+def test_matcher_watermark_account_name_case_and_whitespace_fallback():
+    """watermark_by_account matches account names with leading/trailing whitespace or mixed case."""
+    watermark = {"  CC-HDFC-TEST  ": datetime.datetime(2026, 7, 10)}
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -50.0,
+            "description": "LLM BOOKED ROW",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -50.0,
+            "description": "EXTRACTOR ROW WITH DRIFTED DESC",
+        }
+    ]
+    # Because watermark_by_account matched cc-hdfc-test, lookback window dedup applies
+    result = TransactionMatcher.find_new_txns(
+        old_txns, potential, watermark_by_account=watermark
+    )
+    assert result == []

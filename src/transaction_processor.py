@@ -622,9 +622,11 @@ class TransactionProcessor:
 
             # Skip statements we've already fully parsed whose latest txn the
             # account watermark still covers — no re-download, no LLM call.
+            # A "partial:..." entry must NOT skip re-parsing so daily retries continue.
             cached_max = processed_cache.get(file_id)
             if (
                 cached_max
+                and not str(cached_max).startswith("partial:")
                 and last_txn_date
                 and last_txn_date.date() >= datetime.date.fromisoformat(cached_max)
             ):
@@ -774,17 +776,27 @@ class TransactionProcessor:
 
                     # Cache a clean PDF by its latest booked txn date (computed
                     # before the incremental filter, so it reflects the whole
-                    # statement). Only when nothing was flagged — a statement with
-                    # rows in review must keep re-parsing so a retry can rescue
-                    # them.
-                    if pdf_clean and file_txns:
-                        newly_processed[file_id] = (
-                            max(t["date"] for t in file_txns).date().isoformat()
-                        )
+                    # statement). When rows are flagged, record "partial:<date>"
+                    # so daily retries do not re-open the lookback window.
+                    stmt_max_date = (
+                        max(t["date"] for t in file_txns) if file_txns else None
+                    )
+                    if file_txns and stmt_max_date:
+                        if pdf_clean:
+                            newly_processed[file_id] = stmt_max_date.date().isoformat()
+                        elif is_pdf:
+                            newly_processed[file_id] = (
+                                f"partial:{stmt_max_date.date().isoformat()}"
+                            )
 
                     if last_txn_date:
                         original_count = len(file_txns)
-                        if is_pdf:
+                        if (
+                            is_pdf
+                            and file_id not in processed_cache
+                            and stmt_max_date
+                            and stmt_max_date.date() > last_txn_date.date()
+                        ):
                             cutoff = last_txn_date - datetime.timedelta(
                                 days=STATEMENT_LOOKBACK_DAYS
                             )

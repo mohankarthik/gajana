@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import wraps
+from collections import Counter, defaultdict
 import json
 import logging
 import os
@@ -28,6 +29,8 @@ from src.interfaces import DataSourceFile, DataSourceInterface
 from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
+
+_ACK_TOKENS = {"ack", "acknowledged", "resolved", "done", "ignore", "ignored"}
 
 
 def retry_on_gcp_error(max_retries=3, initial_backoff=5):
@@ -81,6 +84,7 @@ class GoogleDataSource(DataSourceInterface):
         self.logger = logger
         self.drive_service = self._get_drive_service()
         self.sheets_service = self._get_sheets_service()
+        self._sheet_id_cache: dict[str, int] = {}
 
     def _get_credential(self) -> ServiceAccountCredentials:
         logger.info(
@@ -339,17 +343,74 @@ class GoogleDataSource(DataSourceInterface):
         updated = result.get("updates", {}).get("updatedCells", 0)
         logger.info(f"Appended {updated} cells ({len(data_values)} rows) to cash log.")
 
+    def _get_sheet_id(self, sheet_name: str) -> Optional[int]:
+        """Gets numeric sheetId for a sheet tab title, caching across calls."""
+        if not hasattr(self, "_sheet_id_cache"):
+            self._sheet_id_cache = {}
+        if sheet_name in self._sheet_id_cache:
+            return self._sheet_id_cache[sheet_name]
+        try:
+            metadata = (
+                self.sheets_service.spreadsheets()
+                .get(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    fields="sheets.properties(sheetId,title)",
+                )
+                .execute()
+            )
+            for s in metadata.get("sheets", []):
+                props = s.get("properties", {})
+                title = props.get("title")
+                sid = props.get("sheetId")
+                if title and sid is not None:
+                    self._sheet_id_cache[title] = int(sid)
+            return self._sheet_id_cache.get(sheet_name)
+        except Exception as e:
+            logger.warning(f"Could not retrieve sheetId for '{sheet_name}': {e}")
+            return None
+
+    def _delete_sheet_rows(
+        self, sheet_id: int, zero_based_row_indices: List[int]
+    ) -> None:
+        """Deletes rows in a sheet atomically via deleteDimension batchUpdate,
+        merging contiguous indices and deleting descending to preserve row offsets."""
+        if not zero_based_row_indices:
+            return
+        sorted_indices = sorted(set(zero_based_row_indices))
+        ranges: list[tuple[int, int]] = []
+        for idx in sorted_indices:
+            if ranges and idx == ranges[-1][1]:
+                ranges[-1] = (ranges[-1][0], idx + 1)
+            else:
+                ranges.append((idx, idx + 1))
+        # Sort descending by start index so deletions never shift earlier row offsets
+        ranges.sort(key=lambda r: r[0], reverse=True)
+        requests = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": start_idx,
+                        "endIndex": end_idx,
+                    }
+                }
+            }
+            for start_idx, end_idx in ranges
+        ]
+        self.sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=TRANSACTIONS_SHEET_ID,
+            body={"requests": requests},
+        ).execute()
+
     @retry_on_gcp_error()
     def write_review_rows(self, data_values: List[List[Any]]) -> None:
         """Appends validation-flagged rows to the Review tab for manual triage.
 
-        Writes at an explicitly computed row rather than via ``append``: with a
-        column-range target, append re-anchors on the table it finds and each
-        batch landed five columns right of the last one (A, then F, then K...),
-        so the tab read as a staircase instead of a list.
-
-        Idempotent across daily retries: replaces prior rows for the same
-        (account, file_name) rather than stacking duplicate blocks daily.
+        Idempotent across daily retries:
+        - Keeps acknowledged rows in col H (e.g. ack, resolved, done, ignore) untouched.
+        - Deletes unacknowledged prior rows for the incoming (account, file_name) via deleteDimension.
+        - Appends incoming unacknowledged rows at the tail via valueInputOption='RAW'.
         """
         if not data_values:
             return
@@ -358,18 +419,63 @@ class GoogleDataSource(DataSourceInterface):
             .values()
             .get(
                 spreadsheetId=TRANSACTIONS_SHEET_ID,
-                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:G",
+                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:H",
             )
             .execute()
             .get("values", [])
         )
+
         incoming_keys = {(row[0], row[6]) for row in data_values if len(row) >= 7}
-        has_matching = bool(
-            incoming_keys
-            and any(len(r) >= 7 and (r[0], r[6]) in incoming_keys for r in existing)
+
+        # Count acknowledged rows matching incoming keys so multiplicity is preserved
+        ack_counts = Counter(
+            (r[0], r[1], r[2], r[3], r[4], r[6])
+            for r in existing
+            if len(r) >= 7
+            and (r[0], r[6]) in incoming_keys
+            and (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
         )
-        if not has_matching:
-            start = len(existing) + 1
+
+        remaining_values: List[List[Any]] = []
+        for v in data_values:
+            if len(v) >= 7:
+                key = (v[0], v[1], v[2], v[3], v[4], v[6])
+                if ack_counts[key] > 0:
+                    ack_counts[key] -= 1
+                    continue
+            remaining_values.append(v)
+
+        # Find 0-based indices of UNACKNOWLEDGED rows matching incoming_keys to delete
+        unack_indices = [
+            i
+            for i, r in enumerate(existing)
+            if len(r) >= 7
+            and (r[0], r[6]) in incoming_keys
+            and not (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
+        ]
+
+        deleted_count = 0
+        if unack_indices:
+            if len(unack_indices) == len(existing):
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:Z",
+                ).execute()
+                deleted_count = len(existing)
+                logger.info(
+                    f"Cleared all {deleted_count} prior unacknowledged review row(s)."
+                )
+            else:
+                sheet_id = self._get_sheet_id(REVIEW_TRANSACTIONS_SHEET_NAME)
+                if sheet_id is not None:
+                    self._delete_sheet_rows(sheet_id, unack_indices)
+                    deleted_count = len(unack_indices)
+                    logger.info(
+                        f"Deleted {deleted_count} prior unacknowledged review row(s) via deleteDimension."
+                    )
+
+        if remaining_values:
+            start = (len(existing) - deleted_count) + 1
             result = (
                 self.sheets_service.spreadsheets()
                 .values()
@@ -377,54 +483,26 @@ class GoogleDataSource(DataSourceInterface):
                     spreadsheetId=TRANSACTIONS_SHEET_ID,
                     range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
                     valueInputOption="RAW",
-                    body={"values": data_values},
+                    body={"values": remaining_values},
                 )
                 .execute()
             )
             updated = result.get("updatedCells", 0)
             logger.info(
-                f"Wrote {updated} cells ({len(data_values)} rows) to Review tab "
-                f"from row {start}."
-            )
-        else:
-            combined = [
-                r
-                for r in existing
-                if not (len(r) >= 7 and (r[0], r[6]) in incoming_keys)
-            ] + data_values
-            result = (
-                self.sheets_service.spreadsheets()
-                .values()
-                .update(
-                    spreadsheetId=TRANSACTIONS_SHEET_ID,
-                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
-                    valueInputOption="RAW",
-                    body={"values": combined},
-                )
-                .execute()
-            )
-            updated = result.get("updatedCells", 0)
-            if len(combined) < len(existing):
-                clear_start = len(combined) + 1
-                self.sheets_service.spreadsheets().values().clear(
-                    spreadsheetId=TRANSACTIONS_SHEET_ID,
-                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{clear_start}:G",
-                ).execute()
-            logger.info(
-                f"Replaced review rows: wrote {len(combined)} rows ({updated} cells) "
-                f"to Review tab (was {len(existing)})."
+                f"Wrote {updated} cells ({len(remaining_values)} rows) to Review tab from row {start}."
             )
 
     def clear_review_rows(self, account: str, file_name: str) -> None:
         """Removes review rows for (account, file_name) when a statement later parses cleanly.
-        Makes zero write calls if no matching rows exist."""
+        Uses atomic deleteDimension; makes zero write calls if no matching rows exist.
+        """
         try:
             existing: List[List[Any]] = (
                 self.sheets_service.spreadsheets()
                 .values()
                 .get(
                     spreadsheetId=TRANSACTIONS_SHEET_ID,
-                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:G",
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:H",
                 )
                 .execute()
                 .get("values", [])
@@ -435,50 +513,74 @@ class GoogleDataSource(DataSourceInterface):
             )
             return
 
-        matching = [
-            r for r in existing if len(r) >= 7 and r[0] == account and r[6] == file_name
+        indices = [
+            i
+            for i, r in enumerate(existing)
+            if len(r) >= 7 and r[0] == account and r[6] == file_name
         ]
-        if not matching:
+        if not indices:
             return
 
-        kept = [
-            r
-            for r in existing
-            if not (len(r) >= 7 and r[0] == account and r[6] == file_name)
-        ]
         try:
-            if kept:
-                result = (
-                    self.sheets_service.spreadsheets()
-                    .values()
-                    .update(
-                        spreadsheetId=TRANSACTIONS_SHEET_ID,
-                        range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
-                        valueInputOption="RAW",
-                        body={"values": kept},
-                    )
-                    .execute()
-                )
-                updated = result.get("updatedCells", 0)
-                clear_start = len(kept) + 1
+            if len(indices) == len(existing):
                 self.sheets_service.spreadsheets().values().clear(
                     spreadsheetId=TRANSACTIONS_SHEET_ID,
-                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{clear_start}:G",
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:Z",
                 ).execute()
                 logger.info(
-                    f"Cleared {len(matching)} review row(s) for '{file_name}' ({account}); "
-                    f"{len(kept)} rows remaining ({updated} cells rewritten)."
+                    f"Cleared all {len(indices)} review row(s) for '{file_name}' ({account})."
+                )
+                return
+            sheet_id = self._get_sheet_id(REVIEW_TRANSACTIONS_SHEET_NAME)
+            if sheet_id is not None:
+                self._delete_sheet_rows(sheet_id, indices)
+                logger.info(
+                    f"Deleted {len(indices)} review row(s) for '{file_name}' ({account}) via deleteDimension."
                 )
             else:
+                kept = [r for i, r in enumerate(existing) if i not in indices]
+                self.sheets_service.spreadsheets().values().update(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
+                    valueInputOption="RAW",
+                    body={"values": kept},
+                ).execute()
                 self.sheets_service.spreadsheets().values().clear(
                     spreadsheetId=TRANSACTIONS_SHEET_ID,
-                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1:G",
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{len(kept) + 1}:H",
                 ).execute()
-                logger.info(
-                    f"Cleared all {len(matching)} review row(s) for '{file_name}' ({account})."
-                )
         except Exception as e:
-            logger.warning(f"Failed to clear review rows for '{file_name}': {e}")
+            logger.warning(f"Failed to delete review rows for '{file_name}': {e}")
+
+    def get_unresolved_review_counts(self) -> Optional[Dict[str, int]]:
+        """Reads Review tab and returns counts of unacknowledged rows grouped by file_name.
+        Returns None on read failure."""
+        try:
+            existing: List[List[Any]] = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .get(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:H",
+                )
+                .execute()
+                .get("values", [])
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read Review tab for unresolved counts: {e}")
+            return None
+
+        counts: dict[str, int] = defaultdict(int)
+        for r in existing:
+            if not r or (len(r) > 0 and str(r[0]).strip().lower() == "account"):
+                continue
+            if len(r) >= 7:
+                col_h = str(r[7]).strip().lower() if len(r) >= 8 else ""
+                if col_h not in _ACK_TOKENS:
+                    file_name = str(r[6]).strip()
+                    if file_name:
+                        counts[file_name] += 1
+        return dict(counts)
 
     # --- Processed-statements cache (local state; avoids re-parsing/paying the
     # LLM for immutable statements the account watermark already covers) --------

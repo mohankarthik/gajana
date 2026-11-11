@@ -139,6 +139,11 @@ class DataSourceInterface(abc.ABC):
         Default is a no-op so backends without a review surface simply skip it."""
         return None
 
+    def get_unresolved_review_counts(self) -> Optional[Dict[str, int]]:
+        """Returns unresolved review rows mapped by file_name -> count.
+        Returns None if not supported or unable to read, so caller can fall back."""
+        return None
+
     def get_processed_statements(self) -> Dict[str, str]:
         """Returns a cache of statement file IDs already fully parsed, mapping
         file ID -> the latest transaction date (ISO) that parse booked. Used to

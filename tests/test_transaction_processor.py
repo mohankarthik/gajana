@@ -1188,9 +1188,15 @@ def test_settlement_lag_lookback_and_boundary_dedup(
             "account": "cc-hdfc-test",
         },
         {
-            "date": datetime.datetime(2026, 7, 11),  # new
-            "description": "NEW SWIPE",
+            "date": datetime.datetime(2026, 7, 11),  # forward txn with spaced Ref#
+            "description": "FORWARD SWIPE (Ref# VT9999)",
             "amount": -150.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 12),  # genuine new forward txn
+            "description": "NEW SWIPE",
+            "amount": -200.0,
             "account": "cc-hdfc-test",
         },
     ]
@@ -1223,22 +1229,32 @@ def test_settlement_lag_lookback_and_boundary_dedup(
         "cc", {"cc-hdfc-test": last_txn}
     )
 
-    # 1 (OLD TXN) was dropped (>45d); 2, 3, 4 were kept by the 45d lookback
-    assert len(parsed_txns) == 3
+    # 1 (OLD TXN) was dropped (>45d); 2, 3, 4, 5 were kept
+    assert len(parsed_txns) == 4
     descriptions = [t["description"] for t in parsed_txns]
     assert "OLD TXN" not in descriptions
     assert "BACKDATED REFUND" in descriptions
     assert "ADDON SWIPE (Ref# VT262860075035080000135)" in descriptions
+    assert "FORWARD SWIPE (Ref# VT9999)" in descriptions
     assert "NEW SWIPE" in descriptions
 
-    # Now deduplicate against already-booked sheet transactions:
+    # Deduplicate against already-booked sheet transactions:
+    # - Row 3 (ADDON SWIPE) is <= watermark: multiset matching dedupes it against old_booked_txns[0].
+    # - Row 4 (FORWARD SWIPE) is > watermark: _description_signature normalizes Ref# spacing
+    #   and dedupes it against old_booked_txns[1].
     old_booked_txns = [
         {
             "date": datetime.datetime(2026, 7, 10),
             "account": "cc-hdfc-test",
             "amount": -500.0,
             "description": "ADDON SWIPE (Ref#VT262860075035080000135)",
-        }
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "account": "cc-hdfc-test",
+            "amount": -150.0,
+            "description": "FORWARD SWIPE (Ref#VT9999)",
+        },
     ]
     new_final = TransactionMatcher.find_new_txns(
         old_booked_txns, parsed_txns, watermark_by_account={"cc-hdfc-test": last_txn}
@@ -1248,6 +1264,120 @@ def test_settlement_lag_lookback_and_boundary_dedup(
     assert "BACKDATED REFUND" in final_descs
     assert "NEW SWIPE" in final_descs
     assert "ADDON SWIPE (Ref# VT262860075035080000135)" not in final_descs
+    assert "FORWARD SWIPE (Ref# VT9999)" not in final_descs
+
+
+def test_first_deploy_uncached_legacy_pdf_uses_strict_filter(
+    transaction_processor, mock_data_source, mocker
+):
+    """On first deploy, an uncached legacy PDF whose max date <= last_txn_date uses
+    strict forward filter (re-booking 0 edited/deleted rows) and writes its clean cache entry.
+    """
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 6, 25),
+            "description": "USER DELETED ROW",
+            "amount": -500.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "description": "LAST ROW IN STMT",
+            "amount": -200.0,
+        },
+    ]
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_legacy", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}",
+                    "credit": "",
+                }
+                for t in statement_txns
+            ],
+            True,
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    # stmt_max_date (2026-07-10) <= last_txn_date (2026-07-10) -> strict > filter applied -> 0 rows
+    assert len(parsed_txns) == 0
+    # Clean PDF cache entry was saved
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {"f_legacy": "2026-07-10"}
+    )
+
+
+def test_daily_retry_of_partially_quarantined_pdf(
+    transaction_processor, mock_data_source, mocker
+):
+    """On Day 2 of a partially-quarantined PDF, 'partial:...' does NOT skip re-parsing,
+    does NOT re-open the lookback window (strict > filter applied), and rescues rows > last_txn_date.
+    """
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 9),
+            "description": "DAY 1 PASSED ROW",
+            "amount": -300.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 12),
+            "description": "RESCUED ROW AFTER RETRY",
+            "amount": -400.0,
+        },
+    ]
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_partial", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    # Present in processed_cache as "partial:..."
+    mock_data_source.get_processed_statements.return_value = {
+        "f_partial": "partial:2026-07-12"
+    }
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}",
+                    "credit": "",
+                }
+                for t in statement_txns
+            ],
+            True,  # Now verified clean on retry!
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    # Because f_partial is in processed_cache, lookback window did NOT open: strict > last_txn_date
+    assert len(parsed_txns) == 1
+    assert parsed_txns[0]["description"] == "RESCUED ROW AFTER RETRY"
+    assert parsed_txns[0]["amount"] == -400.0
+    # Overwrites "partial:..." with clean date
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {"f_partial": "2026-07-12"}
+    )
 
 
 def test_non_pdf_sheet_statements_use_strict_forward_filter(
