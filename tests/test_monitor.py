@@ -200,7 +200,9 @@ def test_run_daily_mode_propagates_normal_mode_errors(monkeypatch):
     assert "cc: Sheets 503" in captured_push["msg"]
 
 
-def test_run_daily_mode_merges_parse_loss_counts_with_unresolved_review(monkeypatch):
+def test_run_daily_mode_merges_review_write_failures_with_unresolved_review(
+    monkeypatch,
+):
     import main
     from unittest.mock import MagicMock
 
@@ -208,7 +210,7 @@ def test_run_daily_mode_merges_parse_loss_counts_with_unresolved_review(monkeypa
     mock_ds.get_unresolved_review_counts.return_value = {}
     mock_processor = MagicMock()
     mock_processor.quarantined_files = {"bad.pdf": 1}
-    mock_processor.parse_loss_counts = {"bad.pdf": 1}
+    mock_processor.review_write_failed_files = {"bad.pdf": 1}
     mock_categorizer = MagicMock()
 
     captured_push = {}

@@ -45,7 +45,7 @@ class TransactionProcessor:
     def __init__(self, data_source: DataSourceInterface):
         self.data_source = data_source
         self.quarantined_files: dict[str, int] = {}
-        self.parse_loss_counts: dict[str, int] = {}
+        self.review_write_failed_files: dict[str, int] = {}
         self._soft_flagged_files: set[str] = set()
         self._pending_cache_updates: dict[str, dict[str, Any]] = {}
         self._pending_review_clears: dict[str, list[tuple[str, str]]] = {}
@@ -309,7 +309,10 @@ class TransactionProcessor:
             return
         try:
             self.data_source.write_review_rows(rows)
+            self.review_write_failed_files.pop(file_name, None)
         except Exception as e:
+            if result.flagged:
+                self.review_write_failed_files[file_name] = len(result.flagged)
             logger.error(f"Failed to write review rows for '{file_name}': {e}")
 
     def _parse_statement_data_with_pandas(
@@ -784,23 +787,38 @@ class TransactionProcessor:
 
                 if df is not None and not df.empty:
                     std_df = self._standardize_parsed_df(df, config, matched_account)
-                    if std_df is None or std_df.empty:
+                    surviving_idx = (
+                        set(std_df.index)
+                        if (std_df is not None and not std_df.empty)
+                        else set()
+                    )
+                    std_dropped_raw: list[dict[str, Any]] = (
+                        [
+                            passed_txns[idx]
+                            for idx in range(len(passed_txns))
+                            if idx not in surviving_idx
+                        ]
+                        if is_pdf
+                        else []
+                    )
+                    if (std_df is None or std_df.empty) and not std_dropped_raw:
                         logger.warning(f"Standardization empty for '{file_name}'.")
                         continue
 
-                    file_txns = std_df.to_dict("records")
-                    raw_std_count = len(file_txns)
+                    file_txns = (
+                        std_df.to_dict("records")
+                        if (std_df is not None and not std_df.empty)
+                        else []
+                    )
                     for txn in file_txns:
                         if isinstance(txn["date"], pd.Timestamp):
                             txn["date"] = txn["date"].to_pydatetime()
-                        if not isinstance(txn["date"], datetime.datetime):
-                            txn["date"] = None
                     file_txns = [
                         txn
                         for txn in file_txns
                         if isinstance(txn["date"], datetime.datetime)
                     ]
-                    unparseable_count = raw_std_count - len(file_txns)
+                    unparseable_count = len(std_dropped_raw)
 
                     # Universal future-date guard: a real transaction cannot be
                     # dated after today. Catches parser hallucinations on every
@@ -827,10 +845,43 @@ class TransactionProcessor:
                             self.quarantined_files.get(file_name, 0)
                             + dropped_parse_rows
                         )
-                        self.parse_loss_counts[file_name] = (
-                            self.parse_loss_counts.get(file_name, 0)
-                            + dropped_parse_rows
-                        )
+                        if pdf_clean:
+                            loss_rows: list[list[Any]] = []
+                            for raw_ut in std_dropped_raw:
+                                loss_rows.append(
+                                    [
+                                        matched_account,
+                                        str(raw_ut.get("date") or "UNPARSEABLE"),
+                                        str(raw_ut.get("description") or ""),
+                                        str(raw_ut.get("debit") or ""),
+                                        str(raw_ut.get("credit") or ""),
+                                        "unparseable date",
+                                        file_name,
+                                    ]
+                                )
+                            for ft in future:
+                                amt = float(ft.get("amount", 0.0) or 0.0)
+                                loss_rows.append(
+                                    [
+                                        matched_account,
+                                        ft["date"].strftime("%Y-%m-%d"),
+                                        self._clean_cell(ft.get("description", "")),
+                                        f"{-amt:.2f}" if amt < 0 else "",
+                                        f"{amt:.2f}" if amt >= 0 else "",
+                                        "future date",
+                                        file_name,
+                                    ]
+                                )
+                            try:
+                                self.data_source.write_review_rows(loss_rows)
+                                self.review_write_failed_files.pop(file_name, None)
+                            except Exception as e:
+                                self.review_write_failed_files[file_name] = (
+                                    dropped_parse_rows
+                                )
+                                logger.error(
+                                    f"Failed to write parse-loss review rows for '{file_name}': {e}"
+                                )
 
                     if is_pdf:
                         if is_partial_retry:

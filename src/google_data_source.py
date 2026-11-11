@@ -8,6 +8,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -42,7 +43,17 @@ def _normalize_date_str(date_str: str) -> str:
         return datetime.date.fromisoformat(s).isoformat()
     except ValueError:
         pass
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%d %b %Y", "%d-%b-%Y"):
+    for fmt in (
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%m/%d/%Y",
+        "%d %b %Y",
+        "%d-%b-%Y",
+        "%d %b %y",
+        "%d-%b-%y",
+    ):
         try:
             return datetime.datetime.strptime(s, fmt).date().isoformat()
         except ValueError:
@@ -66,7 +77,7 @@ def _review_row_key(r: Sequence[Any]) -> tuple[str, str, str, str, str, str]:
     debit = _normalize_amount_str(r[3]) if len(r) > 3 else ""
     credit = _normalize_amount_str(r[4]) if len(r) > 4 else ""
     reason_disc = (
-        str(r[5]).strip()
+        re.sub(r"[-+]?\d[\d,.]*", "#", str(r[5]).strip().lower())
         if (not date_str and not debit and not credit and len(r) > 5)
         else ""
     )

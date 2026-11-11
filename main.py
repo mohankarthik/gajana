@@ -200,7 +200,7 @@ def run_normal_mode(
 ) -> list[str]:
     logger.info("Running in NORMAL mode.")
     processor.quarantined_files.clear()
-    processor.parse_loss_counts.clear()
+    processor.review_write_failed_files.clear()
     all_new_txns_added_count = 0
     errors: list[str] = []
 
@@ -485,10 +485,12 @@ def run_daily_mode(
 
     if isinstance(unresolved_review, dict):
         quarantined_to_report = dict(unresolved_review)
-        parse_loss = getattr(processor, "parse_loss_counts", None)
-        if isinstance(parse_loss, dict):
-            for fname, cnt in parse_loss.items():
-                quarantined_to_report[fname] = quarantined_to_report.get(fname, 0) + cnt
+        failed_writes = getattr(processor, "review_write_failed_files", None)
+        if isinstance(failed_writes, dict):
+            for fname, cnt in failed_writes.items():
+                quarantined_to_report[fname] = max(
+                    quarantined_to_report.get(fname, 0), cnt
+                )
     else:
         quarantined_to_report = processor.quarantined_files
 

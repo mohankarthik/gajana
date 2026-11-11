@@ -829,7 +829,7 @@ def test_write_review_rows_distinguishes_statement_flags_by_reason(
     values.update.return_value.execute.return_value = {"updatedCells": 7}
     gds.write_review_rows(
         [
-            ["acc-1", "", "STATEMENT", "", "", "reconcile off by 1.50", "f1.pdf"],
+            ["acc-1", "", "STATEMENT", "", "", "reconcile off by 2.10", "f1.pdf"],
             ["acc-1", "", "STATEMENT", "", "", "missing closing balance", "f1.pdf"],
         ]
     )

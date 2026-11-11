@@ -727,3 +727,72 @@ def test_matcher_pre_consumed_lookback_drift_accounting():
     assert res[0]["amount"] == -500.0
     assert EFFECTIVE_WM_KEY not in res[0]
     assert PRE_CONSUMED_KEY not in res[0]
+
+
+def test_matcher_does_not_absorb_missing_lookback_row_into_nearby_forward_row():
+    """A genuinely missing lookback row (Jul 9, <= Jul 10 watermark) and a new forward
+    row (Jul 11, > Jul 10 watermark) of the same amount (-10,000) in one statement are
+    BOTH booked; the forward row never satisfies ±3d drift matching."""
+    from src.transaction_matcher import EFFECTIVE_WM_KEY, SOURCE_KEY
+
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "bank-hdfc-test",
+            "amount": -250.0,
+            "description": "WATERMARK GROCERY",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 9),
+            "account": "bank-hdfc-test",
+            "amount": -10000.0,
+            "description": "ATM WDL JUL 9",
+            SOURCE_KEY: "stmt-jul.pdf",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "account": "bank-hdfc-test",
+            "amount": -10000.0,
+            "description": "ATM WDL JUL 11",
+            SOURCE_KEY: "stmt-jul.pdf",
+        },
+    ]
+    res = TransactionMatcher.find_new_txns(
+        old_txns,
+        potential,
+        watermark_by_account={"bank-hdfc-test": datetime.datetime(2026, 7, 10)},
+    )
+    assert len(res) == 2
+    assert [(r["date"], r["amount"]) for r in res] == [
+        (datetime.datetime(2026, 7, 9), -10000.0),
+        (datetime.datetime(2026, 7, 11), -10000.0),
+    ]
+
+    # Cross-source exact-date overlap (partial-retry forward row + second PDF lookback row)
+    # deduplicates once instead of double-booking:
+    cross_pot = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "bank-hdfc-test",
+            "amount": -400.0,
+            "description": "RESCUED FORWARD ROW",
+            SOURCE_KEY: "stmt-jul.pdf",
+            EFFECTIVE_WM_KEY: datetime.datetime(2026, 6, 30),
+        },
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "bank-hdfc-test",
+            "amount": -400.0,
+            "description": "SAME ROW IN OVERLAPPING AUG LOOKBACK",
+            SOURCE_KEY: "stmt-aug.pdf",
+        },
+    ]
+    cross_res = TransactionMatcher.find_new_txns(
+        old_txns,
+        cross_pot,
+        watermark_by_account={"bank-hdfc-test": datetime.datetime(2026, 7, 10)},
+    )
+    assert len(cross_res) == 1
+    assert cross_res[0]["amount"] == -400.0

@@ -326,8 +326,11 @@ class TransactionMatcher:
                     exc_info=True,
                 )
 
-        # Forward-emitted rows are being booked now, so register them in
-        # available_old before evaluating overlapping lookback candidates.
+        # Track forward-booked rows separately from available_old so same-source
+        # or ±3d drift never absorbs a genuinely missing lookback row; only
+        # cross-source exact-date duplicates (e.g. a partial-retry forward row +
+        # a second overlapping statement's lookback row) can match here.
+        forward_cross_source: list[tuple[datetime.date, str, float, Any]] = []
         for f_txn in new_txns:
             try:
                 f_date = (
@@ -337,9 +340,12 @@ class TransactionMatcher:
                 )
                 f_acc = str(f_txn["account"]).strip().lower()
                 f_amt = round(float(f_txn["amount"]), 2)
-                available_old[(f_date, f_acc, f_amt)] += 1
+                forward_cross_source.append(
+                    (f_date, f_acc, f_amt, f_txn.get(SOURCE_KEY, ""))
+                )
             except Exception:
                 continue
+        forward_used = [False] * len(forward_cross_source)
 
         # Deterministic 2-pass greedy matching for lookback candidates:
         matched = [False] * len(lookback_candidates)
@@ -356,6 +362,18 @@ class TransactionMatcher:
                 available_old[key] -= 1
                 matched[i] = True
                 logger.debug(f"Exact match in lookback window: {key}")
+                continue
+            cand_src = cand.get(SOURCE_KEY, "")
+            for j, (f_date, f_acc, f_amt, f_src) in enumerate(forward_cross_source):
+                if (
+                    not forward_used[j]
+                    and f_src != cand_src
+                    and (f_date, f_acc, f_amt) == key
+                ):
+                    forward_used[j] = True
+                    matched[i] = True
+                    logger.debug(f"Cross-source exact match in lookback window: {key}")
+                    break
 
         # Pass 2 (Value-date drift, delta = 1 .. LOOKBACK_DATE_TOLERANCE_DAYS):
         for i, cand in enumerate(lookback_candidates):

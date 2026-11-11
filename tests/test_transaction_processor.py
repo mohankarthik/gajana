@@ -1687,7 +1687,8 @@ def test_pdf_parse_loss_records_quarantine_and_partial_cache(
     transaction_processor, mock_data_source, mocker
 ):
     """When a PDF drops unparseable or future-dated rows (parse_loss=True), those rows
-    are recorded in quarantined_files and valid rows are saved in a partial cache entry.
+    are written to Review, recorded in quarantined_files, and valid rows are saved in
+    a partial cache entry; if write_review_rows fails, review_write_failed_files tracks it.
     """
     mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
     mock_data_source.list_statement_file_details.return_value = [
@@ -1708,6 +1709,12 @@ def test_pdf_parse_loss_records_quarantine_and_partial_cache(
                     "credit": "",
                 },
                 {
+                    "date": "NOT-A-DATE",
+                    "description": "BAD DATE TOKEN",
+                    "debit": "111.00",
+                    "credit": "",
+                },
+                {
                     "date": future_date,
                     "description": "HALLUCINATED FUTURE ROW",
                     "debit": "999.00",
@@ -1723,10 +1730,23 @@ def test_pdf_parse_loss_records_quarantine_and_partial_cache(
     )
     assert len(res) == 1
     assert res[0]["amount"] == -250.0
-    assert transaction_processor.quarantined_files["cc-hdfc-test-2026-07.pdf"] == 1
+    assert transaction_processor.quarantined_files["cc-hdfc-test-2026-07.pdf"] == 2
+    mock_data_source.write_review_rows.assert_called_once()
+    review_written = mock_data_source.write_review_rows.call_args[0][0]
+    assert len(review_written) == 2
+    assert review_written[0][5] == "unparseable date"
+    assert review_written[1][5] == "future date"
     saved = mock_data_source.save_processed_statements.call_args[0][0]["f_loss"]
     assert saved["status"] == "partial"
     assert saved["emitted"] == [["2026-07-15", -250.0]]
+
+    mock_data_source.write_review_rows.side_effect = RuntimeError("Sheets timeout")
+    transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    )
+    assert (
+        transaction_processor.review_write_failed_files["cc-hdfc-test-2026-07.pdf"] == 2
+    )
 
 
 def test_partial_retry_through_matcher_preserves_repeated_identical_rows(
