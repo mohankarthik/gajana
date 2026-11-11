@@ -564,6 +564,45 @@ def test_hdfc_card_without_any_period_marker_has_none():
     assert st.verified
 
 
+def test_hdfc_card_preserves_trailing_c_in_merchant_names():
+    """Merchant names ending in 'C' (IRCTC, ACME LLC, WIDGETS INC) are not truncated
+    by the optional rupee-glyph 'C' prefix on either old or new HDFC card layouts."""
+    old_c = """
+0      Address    : A1106 Some Street                     Statement Date:12/01/2025
+                                                     Account Summary
+                                        Opening        Payment/         Purchase/        Finance        Total Dues
+                                        Balance          Credits          Debits         Charges
+
+                                       1,000.00          500.00         1,234.00          0.00          1,734.00
+
+      10/01/2025             IRCTC                                                       1,234.00
+      11/01/2025             ACME LLC                                                      500.00Cr
+"""
+    st_old = extract_from_pages(pages(old_c), "cc-hdfc-regaliagold-2025-02.pdf")
+    assert st_old.verified
+    assert [(r.description, r.amount) for r in st_old.rows] == [
+        ("IRCTC", -1234.0),
+        ("ACME LLC", 500.0),
+    ]
+
+    new_c = """
+ BENGALURU 560049 KAR                                Billing Period               13 Jul, 2026 - 12 Aug, 2026
+       PREVIOUS STATEMENT DUES        PAYMENTS/CREDITS            PURCHASES/DEBIT              FINANCE CHARGES
+                   C0.00                   C500.00                   C2,034.00                    C0.00
+   Domestic Transactions
+14/07/2026| 16:14            IRCTC                                                                            C 1,234.00     l
+15/07/2026| 12:00            WIDGETS INC                                          + 20                        C 800.00       l
+16/07/2026| 09:00            ACME LLC                                                                      +  C 500.00       l
+"""
+    st_new = extract_from_pages(pages(new_c), "cc-hdfc-infiniametal-2026-08.pdf")
+    assert st_new.verified
+    assert [(r.description, r.amount) for r in st_new.rows] == [
+        ("IRCTC", -1234.0),
+        ("WIDGETS INC", -800.0),
+        ("ACME LLC", 500.0),
+    ]
+
+
 def test_card_family_dispatch_follows_the_registry():
     assert [layout.name for layout in CARD_LAYOUTS] == ["hdfc-cc", "axis-cc"]
     assert (

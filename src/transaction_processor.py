@@ -19,7 +19,7 @@ from src.constants import (
     PARSING_CONFIG,
 )
 from src.interfaces import DataSourceInterface
-from src.transaction_matcher import SOURCE_KEY
+from src.transaction_matcher import LOOKBACK_DATE_TOLERANCE_DAYS, SOURCE_KEY
 from src.utils import log_and_exit, parse_mixed_datetime
 
 logger = logging.getLogger(__name__)
@@ -814,7 +814,13 @@ class TransactionProcessor:
                         max(t["date"] for t in file_txns) if file_txns else None
                     )
                     original_count = len(file_txns)
-                    parse_loss = bool(unparseable_count or future)
+                    dropped_parse_rows = unparseable_count + len(future)
+                    parse_loss = bool(dropped_parse_rows)
+                    if is_pdf and dropped_parse_rows:
+                        self.quarantined_files[file_name] = (
+                            self.quarantined_files.get(file_name, 0)
+                            + dropped_parse_rows
+                        )
 
                     if is_pdf:
                         if is_partial_retry:
@@ -869,7 +875,7 @@ class TransactionProcessor:
                                     ]
 
                             prev_counts = Counter((d, a) for d, a in prev_emitted_list)
-                            rescued: list[dict[Hashable, Any]] = []
+                            pass1_remaining: list[dict[Hashable, Any]] = []
                             for txn in file_txns:
                                 ms_key = (
                                     txn["date"].strftime("%Y-%m-%d"),
@@ -877,6 +883,31 @@ class TransactionProcessor:
                                 )
                                 if prev_counts[ms_key] > 0:
                                     prev_counts[ms_key] -= 1
+                                else:
+                                    pass1_remaining.append(txn)
+
+                            # Pass 2: absorb value-date vs transaction-date drift
+                            # (±LOOKBACK_DATE_TOLERANCE_DAYS) when Day 1 used the LLM
+                            # and Day 2 used deterministic extraction on the same row.
+                            rescued: list[dict[Hashable, Any]] = []
+                            for txn in pass1_remaining:
+                                t_date = txn["date"].date()
+                                t_amt = round(float(txn["amount"]), 2)
+                                matched_drift_key: Optional[tuple[str, float]] = None
+                                for delta in range(1, LOOKBACK_DATE_TOLERANCE_DAYS + 1):
+                                    for sign in (-1, 1):
+                                        cand_d = (
+                                            t_date
+                                            + datetime.timedelta(days=sign * delta)
+                                        ).isoformat()
+                                        cand_key = (cand_d, t_amt)
+                                        if prev_counts[cand_key] > 0:
+                                            matched_drift_key = cand_key
+                                            break
+                                    if matched_drift_key is not None:
+                                        break
+                                if matched_drift_key is not None:
+                                    prev_counts[matched_drift_key] -= 1
                                 else:
                                     rescued.append(txn)
                             file_txns = rescued
@@ -937,7 +968,7 @@ class TransactionProcessor:
                                 newly_processed[file_id] = (
                                     stmt_max_date.date().isoformat()
                                 )
-                            elif not pdf_clean:
+                            elif not pdf_clean or parse_loss:
                                 newly_processed[file_id] = {
                                     "status": "partial",
                                     "base_watermark": (

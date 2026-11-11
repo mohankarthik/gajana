@@ -1628,3 +1628,102 @@ def test_clean_pdf_clears_review_rows(transaction_processor, mock_data_source, m
     mock_data_source.clear_review_rows.assert_called_once_with(
         "bank-axis-test", "bank-axis-test-2026-06.pdf"
     )
+
+
+def test_partial_retry_absorbs_llm_to_extractor_date_drift(
+    transaction_processor, mock_data_source, mocker
+):
+    """When Day 1 emitted a row via LLM at its value date (Jul 16) and Day 2 re-parses
+    via deterministic extractor at its transaction date (Jul 15, within ±3d), the Day 1
+    row is subtracted rather than emitted twice."""
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_drift", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {
+        "f_drift": {
+            "status": "partial",
+            "base_watermark": "2026-07-10T00:00:00",
+            "opened_lookback": True,
+            "was_first_ingest": True,
+            "emitted": [["2026-07-16", -500.0]],
+        }
+    }
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-07-15",
+                    "description": "SAME PURCHASE TXN DATE",
+                    "debit": "500.00",
+                    "credit": "",
+                },
+                {
+                    "date": "2026-07-18",
+                    "description": "RESCUED ROW",
+                    "debit": "900.00",
+                    "credit": "",
+                },
+            ],
+            True,
+        ),
+    )
+
+    res = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": datetime.datetime(2026, 7, 16)}
+    )
+    assert len(res) == 1
+    assert res[0]["amount"] == -900.0
+    assert (
+        mock_data_source.save_processed_statements.call_args[0][0]["f_drift"]
+        == "2026-07-18"
+    )
+
+
+def test_pdf_parse_loss_records_quarantine_and_partial_cache(
+    transaction_processor, mock_data_source, mocker
+):
+    """When a PDF drops unparseable or future-dated rows (parse_loss=True), those rows
+    are recorded in quarantined_files and valid rows are saved in a partial cache entry.
+    """
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_loss", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+    future_date = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-07-15",
+                    "description": "VALID ROW",
+                    "debit": "250.00",
+                    "credit": "",
+                },
+                {
+                    "date": future_date,
+                    "description": "HALLUCINATED FUTURE ROW",
+                    "debit": "999.00",
+                    "credit": "",
+                },
+            ],
+            True,
+        ),
+    )
+
+    res = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    )
+    assert len(res) == 1
+    assert res[0]["amount"] == -250.0
+    assert transaction_processor.quarantined_files["cc-hdfc-test-2026-07.pdf"] == 1
+    saved = mock_data_source.save_processed_statements.call_args[0][0]["f_loss"]
+    assert saved["status"] == "partial"
+    assert saved["emitted"] == [["2026-07-15", -250.0]]
