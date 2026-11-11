@@ -1727,3 +1727,119 @@ def test_pdf_parse_loss_records_quarantine_and_partial_cache(
     saved = mock_data_source.save_processed_statements.call_args[0][0]["f_loss"]
     assert saved["status"] == "partial"
     assert saved["emitted"] == [["2026-07-15", -250.0]]
+
+
+def test_partial_retry_through_matcher_preserves_repeated_identical_rows(
+    transaction_processor, mock_data_source, mocker
+):
+    """End-to-end processor + matcher check for repeated identical rows:
+    1) Forward case (5 Jul > base_watermark 30 Jun, Day 1 advances watermark to 31 Jul):
+       Statement has two -10,000 ATM rows on 5 Jul and one -500 row on 31 Jul.
+       Day 1 books one -10,000 row + the -500 row; Day 2 rescues and books the second
+       -10,000 row through TransactionMatcher without double-subtracting Day 1's row.
+    2) Lookback case (5 Jul <= base_watermark 10 Jul):
+       Same two -10,000 rows inside Day 1's lookback window; Day 2 still rescues and
+       books the second -10,000 row cleanly and strips all transient keys."""
+    from src.transaction_matcher import TransactionMatcher
+
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-hdfc-test"])
+
+    for base_wm_day in (30, 10):
+        base_wm = (
+            datetime.datetime(2026, 6, 30)
+            if base_wm_day == 30
+            else datetime.datetime(2026, 7, 10)
+        )
+        ledger = [
+            {
+                "date": base_wm,
+                "account": "bank-hdfc-test",
+                "amount": -100.0,
+                "description": "PRIOR WATERMARK ROW",
+            }
+        ]
+        cache: dict = {}
+        mock_data_source.list_statement_file_details.return_value = [
+            DataSourceFile(id="f_atm", name="bank-hdfc-test-2026-07.pdf")
+        ]
+        mock_data_source.download_file.return_value = b"dummy"
+        mock_data_source.get_processed_statements.side_effect = lambda c=cache: dict(c)
+        mock_data_source.save_processed_statements.side_effect = (
+            lambda u, c=cache: c.update(u)
+        )
+
+        # Day 1: one ATM row passes, second ATM row was flagged, 31 Jul row passes
+        mocker.patch.object(
+            transaction_processor,
+            "_parse_validate_pdf",
+            return_value=(
+                [
+                    {
+                        "date": "2026-07-05",
+                        "description": "ATM CASH WDL",
+                        "debit": "10000.00",
+                        "credit": "",
+                    },
+                    {
+                        "date": "2026-07-31",
+                        "description": "END OF MONTH PURCHASE",
+                        "debit": "500.00",
+                        "credit": "",
+                    },
+                ],
+                False,
+            ),
+        )
+        wm_day1 = {"bank-hdfc-test": max(t["date"] for t in ledger)}
+        pot_day1 = transaction_processor.get_new_transactions_from_statements(
+            "bank", wm_day1
+        )
+        booked_day1 = TransactionMatcher.find_new_txns(
+            ledger, pot_day1, watermark_by_account=wm_day1
+        )
+        assert [t["amount"] for t in booked_day1] == [-10000.0, -500.0]
+        ledger.extend(booked_day1)
+
+        # Day 2: watermark is now 2026-07-31; full statement parses cleanly with BOTH ATM rows
+        mocker.patch.object(
+            transaction_processor,
+            "_parse_validate_pdf",
+            return_value=(
+                [
+                    {
+                        "date": "2026-07-05",
+                        "description": "ATM CASH WDL",
+                        "debit": "10000.00",
+                        "credit": "",
+                    },
+                    {
+                        "date": "2026-07-05",
+                        "description": "ATM CASH WDL",
+                        "debit": "10000.00",
+                        "credit": "",
+                    },
+                    {
+                        "date": "2026-07-31",
+                        "description": "END OF MONTH PURCHASE",
+                        "debit": "500.00",
+                        "credit": "",
+                    },
+                ],
+                True,
+            ),
+        )
+        wm_day2 = {"bank-hdfc-test": max(t["date"] for t in ledger)}
+        assert wm_day2["bank-hdfc-test"] == datetime.datetime(2026, 7, 31)
+        pot_day2 = transaction_processor.get_new_transactions_from_statements(
+            "bank", wm_day2
+        )
+        booked_day2 = TransactionMatcher.find_new_txns(
+            ledger, pot_day2, watermark_by_account=wm_day2
+        )
+        assert len(booked_day2) == 1
+        assert booked_day2[0]["amount"] == -10000.0
+        assert booked_day2[0]["date"] == datetime.datetime(2026, 7, 5)
+        assert "_effective_wm" not in booked_day2[0]
+        assert "_pre_consumed" not in booked_day2[0]
+        assert "_source" not in booked_day2[0]
+        assert cache["f_atm"] == "2026-07-31"

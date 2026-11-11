@@ -681,3 +681,49 @@ def test_matcher_lookback_handles_none_or_nan_description():
     )
     assert len(res) == 3
     assert [r["amount"] for r in res] == [-75.0, -75.0, -75.0]
+
+
+def test_matcher_pre_consumed_lookback_drift_accounting():
+    """Pre-consumed partial-retry rows with ±3d value-date drift consume Day 1's
+    ledger entry in available_old so Day 2's rescued sibling row is booked."""
+    from src.transaction_matcher import (
+        EFFECTIVE_WM_KEY,
+        PRE_CONSUMED_KEY,
+        SOURCE_KEY,
+    )
+
+    base_wm = datetime.datetime(2026, 7, 10)
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 6),  # Day 1 LLM value date
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "LLM VALUE DATE ROW",
+        }
+    ]
+    pre_ct = {
+        "date": datetime.datetime(2026, 7, 5),
+        "account": "cc-hdfc-test",
+        "amount": -500.0,
+        "description": "EXTRACTOR SIBLING 1",
+        SOURCE_KEY: "stmt.pdf",
+        EFFECTIVE_WM_KEY: base_wm,
+    }
+    rescued = {
+        "date": datetime.datetime(2026, 7, 5),
+        "account": "cc-hdfc-test",
+        "amount": -500.0,
+        "description": "EXTRACTOR SIBLING 2",
+        SOURCE_KEY: "stmt.pdf",
+        EFFECTIVE_WM_KEY: base_wm,
+        PRE_CONSUMED_KEY: [pre_ct],
+    }
+    res = TransactionMatcher.find_new_txns(
+        old_txns,
+        [rescued],
+        watermark_by_account={"cc-hdfc-test": datetime.datetime(2026, 7, 31)},
+    )
+    assert len(res) == 1
+    assert res[0]["amount"] == -500.0
+    assert EFFECTIVE_WM_KEY not in res[0]
+    assert PRE_CONSUMED_KEY not in res[0]

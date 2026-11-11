@@ -200,6 +200,7 @@ def run_normal_mode(
 ) -> list[str]:
     logger.info("Running in NORMAL mode.")
     processor.quarantined_files.clear()
+    processor.parse_loss_counts.clear()
     all_new_txns_added_count = 0
     errors: list[str] = []
 
@@ -482,11 +483,14 @@ def run_daily_mode(
     except Exception as e:
         logger.warning(f"Failed to query unresolved review counts: {e}")
 
-    quarantined_to_report = (
-        unresolved_review
-        if isinstance(unresolved_review, dict)
-        else processor.quarantined_files
-    )
+    if isinstance(unresolved_review, dict):
+        quarantined_to_report = dict(unresolved_review)
+        parse_loss = getattr(processor, "parse_loss_counts", None)
+        if isinstance(parse_loss, dict):
+            for fname, cnt in parse_loss.items():
+                quarantined_to_report[fname] = quarantined_to_report.get(fname, 0) + cnt
+    else:
+        quarantined_to_report = processor.quarantined_files
 
     is_up, msg = monitor.evaluate_health(
         pipeline_error=pipeline_error,

@@ -19,7 +19,12 @@ from src.constants import (
     PARSING_CONFIG,
 )
 from src.interfaces import DataSourceInterface
-from src.transaction_matcher import LOOKBACK_DATE_TOLERANCE_DAYS, SOURCE_KEY
+from src.transaction_matcher import (
+    EFFECTIVE_WM_KEY,
+    LOOKBACK_DATE_TOLERANCE_DAYS,
+    PRE_CONSUMED_KEY,
+    SOURCE_KEY,
+)
 from src.utils import log_and_exit, parse_mixed_datetime
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,7 @@ class TransactionProcessor:
     def __init__(self, data_source: DataSourceInterface):
         self.data_source = data_source
         self.quarantined_files: dict[str, int] = {}
+        self.parse_loss_counts: dict[str, int] = {}
         self._soft_flagged_files: set[str] = set()
         self._pending_cache_updates: dict[str, dict[str, Any]] = {}
         self._pending_review_clears: dict[str, list[tuple[str, str]]] = {}
@@ -821,6 +827,10 @@ class TransactionProcessor:
                             self.quarantined_files.get(file_name, 0)
                             + dropped_parse_rows
                         )
+                        self.parse_loss_counts[file_name] = (
+                            self.parse_loss_counts.get(file_name, 0)
+                            + dropped_parse_rows
+                        )
 
                     if is_pdf:
                         if is_partial_retry:
@@ -875,6 +885,7 @@ class TransactionProcessor:
                                     ]
 
                             prev_counts = Counter((d, a) for d, a in prev_emitted_list)
+                            consumed_txns: list[dict[Hashable, Any]] = []
                             pass1_remaining: list[dict[Hashable, Any]] = []
                             for txn in file_txns:
                                 ms_key = (
@@ -883,6 +894,7 @@ class TransactionProcessor:
                                 )
                                 if prev_counts[ms_key] > 0:
                                     prev_counts[ms_key] -= 1
+                                    consumed_txns.append(txn)
                                 else:
                                     pass1_remaining.append(txn)
 
@@ -908,9 +920,18 @@ class TransactionProcessor:
                                         break
                                 if matched_drift_key is not None:
                                     prev_counts[matched_drift_key] -= 1
+                                    consumed_txns.append(txn)
                                 else:
                                     rescued.append(txn)
                             file_txns = rescued
+                            if file_txns:
+                                for ct in consumed_txns:
+                                    ct[SOURCE_KEY] = file_name
+                                    ct[EFFECTIVE_WM_KEY] = base_wm
+                                for rt in file_txns:
+                                    rt[EFFECTIVE_WM_KEY] = base_wm
+                                if consumed_txns:
+                                    file_txns[0][PRE_CONSUMED_KEY] = consumed_txns
 
                             if pdf_clean and stmt_max_date and not parse_loss:
                                 newly_processed[file_id] = (

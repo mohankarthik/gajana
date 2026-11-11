@@ -799,6 +799,46 @@ def test_clear_review_rows_preserves_acknowledged_rows(
     assert del_range["endIndex"] == 1  # Only row 0 was deleted!
 
 
+def test_write_review_rows_distinguishes_statement_flags_by_reason(
+    mock_service_account_credentials, mock_google_services
+):
+    """Acknowledging one STATEMENT-level soft flag (empty date/amount) does not suppress
+    a different STATEMENT-level reason for the same file."""
+    _, mock_sheets_service = mock_google_services
+    gds = GoogleDataSource()
+    sheets = mock_sheets_service.spreadsheets.return_value
+    sheets.get.return_value.execute.return_value = {
+        "sheets": [{"properties": {"title": "Review", "sheetId": 77}}]
+    }
+    values = sheets.values.return_value
+    values.get.return_value.execute.return_value = {
+        "values": [
+            [
+                "acc-1",
+                "",
+                "STATEMENT",
+                "",
+                "",
+                "reconcile off by 1.50",
+                "f1.pdf",
+                "ack",
+            ]
+        ]
+    }
+
+    values.update.return_value.execute.return_value = {"updatedCells": 7}
+    gds.write_review_rows(
+        [
+            ["acc-1", "", "STATEMENT", "", "", "reconcile off by 1.50", "f1.pdf"],
+            ["acc-1", "", "STATEMENT", "", "", "missing closing balance", "f1.pdf"],
+        ]
+    )
+    values.update.assert_called_once()
+    written = values.update.call_args.kwargs["body"]["values"]
+    assert len(written) == 1
+    assert written[0][5] == "missing closing balance"
+
+
 # --- Tests for update_transaction_categories ---
 def test_update_transaction_categories_writes_column_f(
     mock_service_account_credentials, mock_google_services

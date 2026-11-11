@@ -18,9 +18,10 @@ _REF_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")  # 12-digit UPI/IMPS/NEFT RRN
 _GST_RE = re.compile(r"\b([csi]gst)\b", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 
-# Transient key set by TransactionProcessor naming the statement a txn came from.
-# Used only to count a statement's internal repeats; stripped before storage.
+# Transient keys set by TransactionProcessor; stripped before storage.
 SOURCE_KEY = "_source"
+EFFECTIVE_WM_KEY = "_effective_wm"
+PRE_CONSUMED_KEY = "_pre_consumed"
 
 LOOKBACK_DATE_TOLERANCE_DAYS = 3
 
@@ -113,6 +114,12 @@ class TransactionMatcher:
         if not all_potential_txns:
             logger.info("No potential new transactions provided to match.")
             return []
+        pre_consumed_txns: list[dict[Hashable, Any]] = []
+        for txn in all_potential_txns:
+            extra = txn.pop(PRE_CONSUMED_KEY, None)
+            if isinstance(extra, list):
+                pre_consumed_txns.extend(extra)
+
         if not old_txns:
             logger.info(
                 "No old transactions provided, considering all potential transactions as new."
@@ -120,21 +127,25 @@ class TransactionMatcher:
             all_potential_txns.sort(key=_txn_sort_key)
             for txn in all_potential_txns:
                 txn.pop(SOURCE_KEY, None)
+                txn.pop(EFFECTIVE_WM_KEY, None)
             return all_potential_txns
 
-        def _in_lookback_window(txn_item: dict[Hashable, Any]) -> bool:
-            if not watermark_by_account:
-                return False
-            acc_name = str(txn_item.get("account", ""))
-            wm = watermark_by_account.get(acc_name)
-            if wm is None:
-                acc_norm = acc_name.strip().lower()
-                wm = watermark_by_account.get(acc_norm)
+        def _in_lookback_window(txn_item: Mapping[Hashable, Any]) -> bool:
+            if EFFECTIVE_WM_KEY in txn_item:
+                wm = txn_item[EFFECTIVE_WM_KEY]
+            elif watermark_by_account:
+                acc_name = str(txn_item.get("account", ""))
+                wm = watermark_by_account.get(acc_name)
                 if wm is None:
-                    for k, v in watermark_by_account.items():
-                        if str(k).strip().lower() == acc_norm:
-                            wm = v
-                            break
+                    acc_norm = acc_name.strip().lower()
+                    wm = watermark_by_account.get(acc_norm)
+                    if wm is None:
+                        for k, v in watermark_by_account.items():
+                            if str(k).strip().lower() == acc_norm:
+                                wm = v
+                                break
+            else:
+                return False
             if wm is None:
                 return False
             t_d = txn_item.get("date")
@@ -186,6 +197,14 @@ class TransactionMatcher:
                 continue
 
         per_source: dict[Any, Counter] = defaultdict(Counter)
+        for ct in pre_consumed_txns:
+            try:
+                if not _in_lookback_window(ct):
+                    per_source[ct.get(SOURCE_KEY, "")][
+                        TransactionMatcher._txn_id(ct)
+                    ] += 1
+            except Exception:
+                continue
         for txn in all_potential_txns:
             try:
                 if not _in_lookback_window(txn):
@@ -206,6 +225,61 @@ class TransactionMatcher:
         )
         seen_window_keys: set[tuple[tuple[datetime.date, str, float], int]] = set()
         lookback_candidates: list[dict[Hashable, Any]] = []
+
+        # Account for Day-1 partial-retry lookback rows already subtracted by
+        # TransactionProcessor so Day 2 does not double-subtract them against
+        # available_old when identical sibling rows are rescued.
+        pre_lookback: list[dict[Hashable, Any]] = []
+        for ct in pre_consumed_txns:
+            if not _in_lookback_window(ct):
+                continue
+            try:
+                t_date = ct["date"]
+                c_date = t_date.date() if hasattr(t_date, "date") else t_date
+                acc_clean = str(ct["account"]).strip().lower()
+                amt_val = round(float(ct["amount"]), 2)
+                da_key = (c_date, acc_clean, amt_val)
+                source = ct.get(SOURCE_KEY, "")
+                source_da_counts[source][da_key] += 1
+                occ = source_da_counts[source][da_key]
+                window_key = (da_key, occ)
+                if window_key not in seen_window_keys:
+                    seen_window_keys.add(window_key)
+                    pre_lookback.append(ct)
+            except Exception:
+                continue
+
+        pre_matched = [False] * len(pre_lookback)
+        for i, ct in enumerate(pre_lookback):
+            c_date = ct["date"].date() if hasattr(ct["date"], "date") else ct["date"]
+            key = (
+                c_date,
+                str(ct["account"]).strip().lower(),
+                round(float(ct["amount"]), 2),
+            )
+            if available_old[key] > 0:
+                available_old[key] -= 1
+                pre_matched[i] = True
+        for i, ct in enumerate(pre_lookback):
+            if pre_matched[i]:
+                continue
+            c_date = ct["date"].date() if hasattr(ct["date"], "date") else ct["date"]
+            acc_clean = str(ct["account"]).strip().lower()
+            amt_val = round(float(ct["amount"]), 2)
+            for delta in range(1, LOOKBACK_DATE_TOLERANCE_DAYS + 1):
+                found_pre = False
+                for neighbor_date in (
+                    c_date - datetime.timedelta(days=delta),
+                    c_date + datetime.timedelta(days=delta),
+                ):
+                    n_key = (neighbor_date, acc_clean, amt_val)
+                    if available_old[n_key] > 0:
+                        available_old[n_key] -= 1
+                        pre_matched[i] = True
+                        found_pre = True
+                        break
+                if found_pre:
+                    break
 
         for txn in all_potential_txns:
             try:
@@ -251,6 +325,21 @@ class TransactionMatcher:
                     f"Error creating ID for potential transaction: {e}. Skipping matching for: {txn}",
                     exc_info=True,
                 )
+
+        # Forward-emitted rows are being booked now, so register them in
+        # available_old before evaluating overlapping lookback candidates.
+        for f_txn in new_txns:
+            try:
+                f_date = (
+                    f_txn["date"].date()
+                    if hasattr(f_txn["date"], "date")
+                    else f_txn["date"]
+                )
+                f_acc = str(f_txn["account"]).strip().lower()
+                f_amt = round(float(f_txn["amount"]), 2)
+                available_old[(f_date, f_acc, f_amt)] += 1
+            except Exception:
+                continue
 
         # Deterministic 2-pass greedy matching for lookback candidates:
         matched = [False] * len(lookback_candidates)
@@ -315,6 +404,7 @@ class TransactionMatcher:
         new_txns.sort(key=_txn_sort_key)
         for txn in new_txns:
             txn.pop(SOURCE_KEY, None)  # transient: never reaches storage
+            txn.pop(EFFECTIVE_WM_KEY, None)
         logger.info(
             f"Transaction matching complete. Identified {len(new_txns)} new transactions."
         )
