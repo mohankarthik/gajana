@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 # row after the header). Set by get_old_transactions, never stored.
 ROW_KEY = "_row"
 
+STATEMENT_LOOKBACK_DAYS = 45
+
 
 class TransactionProcessor:
     """
@@ -36,6 +38,7 @@ class TransactionProcessor:
 
     def __init__(self, data_source: DataSourceInterface):
         self.data_source = data_source
+        self.quarantined_files: dict[str, int] = {}
 
     @staticmethod
     def _parse_amount(value: Any) -> float:
@@ -154,6 +157,41 @@ class TransactionProcessor:
         ``(passed_transactions, clean)`` where ``clean`` is True only if nothing
         was flagged for review — the caller caches only fully-clean statements so
         flagged ones keep re-parsing until a retry rescues them."""
+        # First try deterministic extraction via StatementExtractor
+        try:
+            pw_list: list[str] = (
+                [password] if isinstance(password, str) else list(password)
+            )
+            from src.statement_extractor import extract_statement_bytes
+
+            st = extract_statement_bytes(pdf_bytes, file_name, pw_list)
+            if st.verified:
+                self.quarantined_files.pop(file_name, None)
+                passed_txns = [
+                    {
+                        "date": r.date.strftime("%Y-%m-%d"),
+                        "description": r.description,
+                        "debit": f"{-r.amount:.2f}" if r.amount < 0 else "",
+                        "credit": f"{r.amount:.2f}" if r.amount >= 0 else "",
+                    }
+                    for r in st.rows
+                ]
+                logger.info(
+                    f"'{file_name}': deterministic extractor verified "
+                    f"({st.kind}, {len(passed_txns)} txn(s)); skipping LLM parser."
+                )
+                return passed_txns, True
+            else:
+                logger.info(
+                    f"'{file_name}': deterministic extractor not verified "
+                    f"({st.problems}); falling back to LLM parser."
+                )
+        except Exception as e:
+            logger.debug(
+                f"'{file_name}': deterministic extraction failed ({e}); "
+                "falling back to LLM parser."
+            )
+
         from src.pdf_parser import PDFParser
         from src.statement_validator import validate_statement
 
@@ -197,6 +235,11 @@ class TransactionProcessor:
 
         if result.flagged or result.statement_flags:
             self._write_review_rows(result, matched_account, file_name)
+
+        if result.flagged:
+            self.quarantined_files[file_name] = len(result.flagged)
+        else:
+            self.quarantined_files.pop(file_name, None)
 
         logger.info(
             f"'{file_name}': {len(result.passed)} txn(s) passed validation, "
@@ -729,9 +772,10 @@ class TransactionProcessor:
 
                     if last_txn_date:
                         original_count = len(file_txns)
-                        file_txns = [
-                            txn for txn in file_txns if txn["date"] > last_txn_date
-                        ]
+                        cutoff = last_txn_date - datetime.timedelta(
+                            days=STATEMENT_LOOKBACK_DAYS
+                        )
+                        file_txns = [txn for txn in file_txns if txn["date"] >= cutoff]
                         logger.debug(
                             f"Filtered {original_count - len(file_txns)} old txns from '{file_name}'."
                         )

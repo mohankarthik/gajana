@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # those variations away when building the dedup signature.
 _META_SUFFIX_RE = re.compile(r"\s+(?:value dt|ref)\b.*$", re.IGNORECASE)
 _REF_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")  # 12-digit UPI/IMPS/NEFT RRN
+_CC_REF_RE = re.compile(r"ref#\s*([a-z0-9]{10,})", re.IGNORECASE)
 _GST_RE = re.compile(r"\b([csi]gst)\b", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 
@@ -50,11 +51,14 @@ class TransactionMatcher:
           non-alphanumerics to absorb case and whitespace/OCR artifacts.
         """
         desc = description or ""
-        refs = tuple(sorted(set(_REF_RE.findall(desc))))
+        rrn_refs = _REF_RE.findall(desc)
+        cc_refs = [m.group(1).lower() for m in _CC_REF_RE.finditer(desc)]
+        refs = tuple(sorted(set(rrn_refs + cc_refs)))
         if refs:
             gst = _GST_RE.search(desc)
             return ("ref", refs, gst.group(1).lower() if gst else "")
-        stripped = _META_SUFFIX_RE.sub("", desc)
+        desc_norm = re.sub(r"ref#\s*", "ref#", desc, flags=re.IGNORECASE)
+        stripped = _META_SUFFIX_RE.sub("", desc_norm)
         return ("txt", _NON_ALNUM_RE.sub("", stripped.lower()), "")
 
     @staticmethod

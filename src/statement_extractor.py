@@ -55,7 +55,9 @@ DATE_RE = re.compile(r"\b(\d{2})[-/](\d{2})[-/](\d{4}|\d{2})\b")
 SLASH_DATE_RE = re.compile(r"\b(\d{2})/(\d{2})/(\d{4})\b")
 # Axis cards print the side after the amount; HDFC prints "Cr" or nothing.
 CARD_AMOUNT_RE = re.compile(r"(?<![\d.,])(\d[\d,]*\.\d{2})\s*(Dr|Cr)?(?![\w])")
-HDFC_CARD_AMOUNT_RE = re.compile(r"(?<![\d.,])(\d[\d,]*\.\d{2})\s*(Cr)?(?!\d)")
+HDFC_CARD_AMOUNT_RE = re.compile(
+    r"(\+\s*(?=C\s*\d))?(?:C\s*)?(?<![\d.,])(\d[\d,]*\.\d{2})\s*(Cr)?(?!\d)"
+)
 
 # Cheap pre-filter so the (expensive) header patterns are only tried on lines
 # that could plausibly be a transaction-table header.
@@ -455,11 +457,16 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
     desc_end = 0
     prev_balance = st.opening
     pending: List[str] = []
+    stopped = False
 
     for page_no, lines in enumerate(page_lines):
+        if stopped:
+            break
+        can_append = False
         for line in lines:
             norm = _norm(line)
             if HEADER_HINT_RE.search(line):
+                can_append = False
                 for layout in BANK_LAYOUTS:
                     if re.search(layout.header, norm):
                         found = _columns(line, layout.columns)
@@ -481,12 +488,17 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                 continue
 
             upper = norm.upper()
-            if (
-                "OPENING BALANCE" in upper
-                or "CLOSING BALANCE" in upper
-                or re.match(r"^(TRANSACTION TOTAL|Total)\b", norm, re.I)
+            if "CLOSING BALANCE" in upper and not norm.startswith("*"):
+                pending = []
+                can_append = False
+                stopped = True
+                break
+
+            if "OPENING BALANCE" in upper or re.match(
+                r"^(TRANSACTION TOTAL|Total)\b", norm, re.I
             ):
                 pending = []
+                can_append = False
                 continue
 
             numbers = [(m.group(), m.start(), m.end()) for m in NUM_RE.finditer(line)]
@@ -495,11 +507,22 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                 date_match and date_match.start() <= max(6, date_x + 10) and numbers
             ):
                 # A continuation line: narration wrapped below its own row.
+                # Real continuations sit under the description column (leaving
+                # the date column blank); left-margin lines are page footers.
+                indent = len(line) - len(line.lstrip())
                 body = line[:desc_end].strip()
+                if body and indent < date_x + 6:
+                    can_append = False
+                    continue
                 if len(body) > 2 and not re.search(
                     r"Page No|Balance|Statement|Narration", body
                 ):
-                    pending.append(body)
+                    if st.kind == "axis-compact":
+                        pending.append(body)
+                    elif can_append and st.rows:
+                        st.rows[-1].description = _norm(
+                            f"{st.rows[-1].description} {body}"
+                        )
                 continue
 
             values = [(_num(t), s, e) for t, s, e in numbers]
@@ -522,14 +545,22 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                 signed = -value if side == "dr" else value
                 stated: Optional[float] = value
                 balance: Optional[float] = None
+                head_end = min(desc_end, start)
             else:
                 signed, stated, balance = _row_sign_from_balance(
                     st, values, columns, prev_balance, date_match.group(), norm
                 )
                 prev_balance = balance
+                cand_amounts = [v for v in values[:-1] if v[1] >= columns["dr"][0] - 24]
+                head_end = (
+                    min(desc_end, cand_amounts[0][1]) if cand_amounts else desc_end
+                )
 
-            head = DATE_RE.sub("", line[:desc_end], count=1).strip()
-            description = _norm(" ".join([head] + pending))
+            head = DATE_RE.sub("", line[:head_end], count=1).strip()
+            if st.kind == "axis-compact":
+                description = _norm(" ".join(pending + [head]))
+            else:
+                description = _norm(head)
             pending = []
             st.rows.append(
                 StatementRow(
@@ -541,6 +572,7 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                     page=page_no,
                 )
             )
+            can_append = True
 
     if st.period is None and st.rows:
         dates = sorted(r.date for r in st.rows)
@@ -633,10 +665,20 @@ def _hdfc_card_period_from_statement_date(norm: str) -> Optional[Tuple[str, str]
 def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
     """HDFC credit card, both generations: credits carry a bare ``Cr``."""
     st = ExtractedStatement(kind="hdfc-cc", family="card")
+    stopped = False
     for text in pages:
+        if stopped:
+            break
         lines = text.split("\n")
         for i, line in enumerate(lines):
             norm = _norm(line)
+            if re.search(
+                r"Rewards Program Points Summary|GST Summary|Cash Back Summary",
+                norm,
+                re.I,
+            ):
+                stopped = True
+                break
             if st.period is None:
                 p = re.search(
                     r"Billing Period\s+(\d{1,2} \w{3}, \d{4})\s*-\s*(\d{1,2} \w{3}, \d{4})",
@@ -661,7 +703,7 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                 # Newer layout prints the same four boxes prefixed with the
                 # rupee glyph, which extracts as a bare "C".
                 for j in range(i, min(i + 6, len(lines))):
-                    values = re.findall(r"C\s?([\d,]+\.\d{2})", lines[j])
+                    values = re.findall(r"C\s?(-?[\d,]+\.\d{2})", lines[j])
                     if len(values) >= 4:
                         st.payments = _num(values[1])
                         st.purchases = _num(values[2])
@@ -679,7 +721,11 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                 st.warnings.append(f"{line[:40]} no amount")
                 continue
             amount = found[-1]
-            value = _num(amount.group(1))
+            value = _num(amount.group(2))
+            is_credit = bool(amount.group(1) or amount.group(3))
+            raw_desc = tail[: amount.start()]
+            raw_desc = re.sub(r"^\s*EMI\s{2,}", "", raw_desc)
+            raw_desc = re.sub(r"\s{2,}[+-]\s*\d+\s*$", "", raw_desc)
             st.rows.append(
                 StatementRow(
                     date=datetime.datetime(
@@ -687,8 +733,8 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                         int(date_match.group(2)),
                         int(date_match.group(1)),
                     ),
-                    description=_norm(tail[: amount.start()]),
-                    amount=value if amount.group(2) == "Cr" else -value,
+                    description=_norm(raw_desc),
+                    amount=value if is_credit else -value,
                 )
             )
     _apply_card_summary(st)

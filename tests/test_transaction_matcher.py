@@ -397,3 +397,38 @@ def test_find_new_txns_keeps_distinct_references_distinct():
     ]
     result = TransactionMatcher.find_new_txns([], potential)
     assert len(result) == 3
+
+
+def test_matcher_ref_spacing_and_gst_distinction():
+    """Spacing around Ref# normalizes identically; CGST and SGST remain distinct."""
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "ONLINE RETAILER (Ref# VT262860075035080000135)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -45.0,
+            "description": "FEE CGST (Ref# VT262860075035080000135)",
+        },
+    ]
+    potential_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "ONLINE RETAILER (Ref#VT262860075035080000135)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -45.0,
+            "description": "FEE SGST (Ref# VT262860075035080000135)",
+        },
+    ]
+    new_txns = TransactionMatcher.find_new_txns(old_txns, potential_txns)
+    assert len(new_txns) == 1
+    assert "SGST" in new_txns[0]["description"]

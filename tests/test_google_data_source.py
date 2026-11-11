@@ -429,6 +429,52 @@ def test_write_review_rows_noop_on_empty(
     mock_sheets_service.spreadsheets.return_value.values.return_value.update.assert_not_called()
 
 
+def test_write_review_rows_idempotent_replace(
+    mock_service_account_credentials, mock_google_services
+):
+    """When incoming (account, file_name) exists in Review, old rows for that file
+    are replaced while preserving other files' rows."""
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+    existing = [
+        ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf"],
+        ["acc-target", "2026-07-05", "old txn 1", "50.00", "", "why2", "target.pdf"],
+        ["acc-target", "2026-07-06", "old txn 2", "60.00", "", "why3", "target.pdf"],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+    values.update.return_value.execute.return_value = {"updatedCells": 14}
+    values.clear.return_value.execute.return_value = {}
+
+    new_rows = [
+        [
+            "acc-target",
+            "2026-07-05",
+            "rescued txn",
+            "50.00",
+            "",
+            "why-new",
+            "target.pdf",
+        ]
+    ]
+    gds.write_review_rows(new_rows)
+
+    values.append.assert_not_called()
+    update_kwargs = values.update.call_args.kwargs
+    assert update_kwargs["range"].endswith("!A1")
+    written = update_kwargs["body"]["values"]
+    assert len(written) == 2
+    assert written[0][0] == "acc-other" and written[0][6] == "other.pdf"
+    assert (
+        written[1][0] == "acc-target"
+        and written[1][2] == "rescued txn"
+        and written[1][6] == "target.pdf"
+    )
+    # len(written) == 2 < len(existing) == 3, so clear trailing row 3
+    clear_kwargs = values.clear.call_args.kwargs
+    assert clear_kwargs["range"].endswith("!A3:G")
+
+
 # --- Tests for update_transaction_categories ---
 def test_update_transaction_categories_writes_column_f(
     mock_service_account_credentials, mock_google_services

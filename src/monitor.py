@@ -89,11 +89,13 @@ def evaluate_health(
     new_pdf_count: int,
     latest_txn_date: Optional[datetime.datetime],
     today: Optional[datetime.date] = None,
+    quarantined_files: Optional[dict[str, int]] = None,
 ) -> tuple[bool, str]:
     """Fold the daily run's signals into a single (is_up, message) verdict.
 
-    DOWN if the pipeline raised, if no new statement PDF has arrived in
-    STALE_DAYS, or if the newest transaction in the log is older than STALE_DAYS.
+    DOWN if the pipeline raised, if any statements were quarantined for review,
+    if no new statement PDF has arrived in STALE_DAYS, or if the newest
+    transaction in the log is older than STALE_DAYS.
     """
     today = today or datetime.date.today()
     state = load_state()
@@ -101,6 +103,13 @@ def evaluate_health(
 
     if pipeline_error:
         problems.append(f"pipeline error: {pipeline_error}")
+
+    if quarantined_files:
+        total_quarantined = sum(quarantined_files.values())
+        files_str = ", ".join(
+            f"{f} ({c})" for f, c in sorted(quarantined_files.items())
+        )
+        problems.append(f"{total_quarantined} txn(s) quarantined in {files_str}")
 
     pdf_age = days_since(state.get("last_new_pdf_date"), today)
     if pdf_age is None:

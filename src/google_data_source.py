@@ -347,36 +347,73 @@ class GoogleDataSource(DataSourceInterface):
         column-range target, append re-anchors on the table it finds and each
         batch landed five columns right of the last one (A, then F, then K...),
         so the tab read as a staircase instead of a list.
+
+        Idempotent across daily retries: replaces prior rows for the same
+        (account, file_name) rather than stacking duplicate blocks daily.
         """
         if not data_values:
             return
-        existing = (
+        existing: List[List[Any]] = (
             self.sheets_service.spreadsheets()
             .values()
             .get(
                 spreadsheetId=TRANSACTIONS_SHEET_ID,
-                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:A",
+                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:G",
             )
             .execute()
             .get("values", [])
         )
-        start = len(existing) + 1
-        result = (
-            self.sheets_service.spreadsheets()
-            .values()
-            .update(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
-                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
-                valueInputOption="USER_ENTERED",
-                body={"values": data_values},
+        incoming_keys = {(row[0], row[6]) for row in data_values if len(row) >= 7}
+        has_matching = bool(
+            incoming_keys
+            and any(len(r) >= 7 and (r[0], r[6]) in incoming_keys for r in existing)
+        )
+        if not has_matching:
+            start = len(existing) + 1
+            result = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": data_values},
+                )
+                .execute()
             )
-            .execute()
-        )
-        updated = result.get("updatedCells", 0)
-        logger.info(
-            f"Wrote {updated} cells ({len(data_values)} rows) to Review tab "
-            f"from row {start}."
-        )
+            updated = result.get("updatedCells", 0)
+            logger.info(
+                f"Wrote {updated} cells ({len(data_values)} rows) to Review tab "
+                f"from row {start}."
+            )
+        else:
+            combined = [
+                r
+                for r in existing
+                if not (len(r) >= 7 and (r[0], r[6]) in incoming_keys)
+            ] + data_values
+            result = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": combined},
+                )
+                .execute()
+            )
+            updated = result.get("updatedCells", 0)
+            if len(combined) < len(existing):
+                clear_start = len(combined) + 1
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{clear_start}:G",
+                ).execute()
+            logger.info(
+                f"Replaced review rows: wrote {len(combined)} rows ({updated} cells) "
+                f"to Review tab (was {len(existing)})."
+            )
 
     # --- Processed-statements cache (local state; avoids re-parsing/paying the
     # LLM for immutable statements the account watermark already covers) --------

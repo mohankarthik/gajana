@@ -1058,3 +1058,191 @@ def test_get_old_transactions_carries_row_index(
 
     assert [t[ROW_KEY] for t in txns] == [0, 1, 2]
     assert [t["description"] for t in txns] == ["SHOP A", "SHOP B", "SHOP C"]
+
+
+def _generate_synthetic_pdf(text: str) -> bytes:
+    import io
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    pdf = canvas.Canvas(buf, pagesize=A4)
+    pdf.setFont("Courier", 6)
+    y = A4[1] - 30
+    for line in text.lstrip("\n").split("\n"):
+        pdf.drawString(20, y, line)
+        y -= 8
+    pdf.save()
+    return buf.getvalue()
+
+
+_SYNTHETIC_AXIS_NEW = """
+ Statement Period From : 01-06-2026 To : 30-06-2026
+  Txn Date                    Transaction                 Withdrawals        Deposits           Balance
+                Opening Balance                                                              200,000.00
+  02-06-2026    UPI/SYNTHETIC GROCERY/1234                   2,000.00
+  09-06-2026    NEFT REFUND FROM STORE                                       1,000.00
+               Closing Balance                                                               199,000.00
+"""
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_deterministic_extractor_used_ahead_of_pdf_parser(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """When StatementExtractor verifies, PDFParser is never instantiated."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-axis-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="bank-axis-test-2026-06.pdf")
+    ]
+    mock_data_source.download_file.return_value = _generate_synthetic_pdf(
+        _SYNTHETIC_AXIS_NEW
+    )
+    mock_data_source.get_processed_statements.return_value = {}
+
+    txns = transaction_processor.get_new_transactions_from_statements(
+        "bank", {"bank-axis-test": datetime.datetime(2026, 5, 31)}
+    )
+    assert len(txns) == 2
+    assert mock_pdf_parser_class.call_count == 0
+    assert txns[0]["description"] == "UPI/SYNTHETIC GROCERY/1234"
+    assert txns[0]["amount"] == -2000.0
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_fallback_to_pdf_parser_when_extractor_unverified(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """When StatementExtractor cannot verify, falls back to PDFParser + validator."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-axis-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="bank-axis-test-2026-06.pdf")
+    ]
+    # Remove closing balance so deterministic extractor fails verification
+    tampered = _SYNTHETIC_AXIS_NEW.replace("Closing Balance", "Some Balance")
+    mock_data_source.download_file.return_value = _generate_synthetic_pdf(tampered)
+    mock_data_source.get_processed_statements.return_value = {}
+
+    inst = mock_pdf_parser_class.return_value
+    inst.parse_pdf_with_text.return_value = (
+        [
+            {
+                "date": "2026-06-02",
+                "description": "UPI/SYNTHETIC GROCERY/1234",
+                "debit": "2000.00",
+                "credit": "",
+            }
+        ],
+        "pdf text",
+        {"closing_balance": "199000.00"},
+    )
+    mocker.patch(
+        "src.statement_validator.validate_statement",
+        return_value=mocker.MagicMock(
+            passed=[
+                {
+                    "date": "2026-06-02",
+                    "description": "UPI/SYNTHETIC GROCERY/1234",
+                    "debit": "2000.00",
+                    "credit": "",
+                }
+            ],
+            flagged=[],
+            statement_flags=[],
+        ),
+    )
+
+    txns = transaction_processor.get_new_transactions_from_statements(
+        "bank", {"bank-axis-test": datetime.datetime(2026, 5, 31)}
+    )
+    assert mock_pdf_parser_class.call_count >= 1
+    assert len(txns) == 1
+
+
+def test_settlement_lag_lookback_and_boundary_dedup(
+    transaction_processor, mock_data_source, mocker
+):
+    """Lookback preserves boundary splits (txn_date == last_txn_date) and backdated refunds
+    within 45 days, drops txns older than 45 days, and TransactionMatcher deduplicates booked txns.
+    """
+    from src.transaction_matcher import TransactionMatcher
+
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 5, 21),  # 50 days ago
+            "description": "OLD TXN",
+            "amount": -100.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 6, 20),  # 20 days ago
+            "description": "BACKDATED REFUND",
+            "amount": 250.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),  # boundary split (same day)
+            "description": "ADDON SWIPE (Ref# VT262860075035080000135)",
+            "amount": -500.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),  # new
+            "description": "NEW SWIPE",
+            "amount": -150.0,
+            "account": "cc-hdfc-test",
+        },
+    ]
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}" if t["amount"] < 0 else "",
+                    "credit": f"{t['amount']:.2f}" if t["amount"] >= 0 else "",
+                }
+                for t in statement_txns
+            ],
+            True,
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+
+    # 1 (OLD TXN) was dropped (>45d); 2, 3, 4 were kept by the 45d lookback
+    assert len(parsed_txns) == 3
+    descriptions = [t["description"] for t in parsed_txns]
+    assert "OLD TXN" not in descriptions
+    assert "BACKDATED REFUND" in descriptions
+    assert "ADDON SWIPE (Ref# VT262860075035080000135)" in descriptions
+    assert "NEW SWIPE" in descriptions
+
+    # Now deduplicate against already-booked sheet transactions:
+    old_booked_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "ADDON SWIPE (Ref#VT262860075035080000135)",
+        }
+    ]
+    new_final = TransactionMatcher.find_new_txns(old_booked_txns, parsed_txns)
+    assert len(new_final) == 2
+    final_descs = [t["description"] for t in new_final]
+    assert "BACKDATED REFUND" in final_descs
+    assert "NEW SWIPE" in final_descs
+    assert "ADDON SWIPE (Ref# VT262860075035080000135)" not in final_descs

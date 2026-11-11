@@ -197,6 +197,7 @@ def find_latest_transaction_by_account(
 
 def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
     logger.info("Running in NORMAL mode.")
+    processor.quarantined_files.clear()
     all_new_txns_added_count = 0
 
     # Fetch existing history for both account types up front and build the
@@ -468,6 +469,7 @@ def run_daily_mode(
         pipeline_error=pipeline_error,
         new_pdf_count=new_pdf_count,
         latest_txn_date=latest_txn_date,
+        quarantined_files=processor.quarantined_files,
     )
     monitor.push_daily(is_up, msg)
     logger.info(f"Daily mode finished. health={'UP' if is_up else 'DOWN'} | {msg}")
