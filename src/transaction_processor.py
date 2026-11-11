@@ -167,6 +167,12 @@ class TransactionProcessor:
             st = extract_statement_bytes(pdf_bytes, file_name, pw_list)
             if st.verified:
                 self.quarantined_files.pop(file_name, None)
+                try:
+                    self.data_source.clear_review_rows(matched_account, file_name)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to clear review rows for '{file_name}': {e}"
+                    )
                 passed_txns = [
                     {
                         "date": r.date.strftime("%Y-%m-%d"),
@@ -187,8 +193,8 @@ class TransactionProcessor:
                     f"({st.problems}); falling back to LLM parser."
                 )
         except Exception as e:
-            logger.debug(
-                f"'{file_name}': deterministic extraction failed ({e}); "
+            logger.warning(
+                f"'{file_name}': deterministic extraction errored ({type(e).__name__}: {e}); "
                 "falling back to LLM parser."
             )
 
@@ -235,6 +241,11 @@ class TransactionProcessor:
 
         if result.flagged or result.statement_flags:
             self._write_review_rows(result, matched_account, file_name)
+        else:
+            try:
+                self.data_source.clear_review_rows(matched_account, file_name)
+            except Exception as e:
+                logger.warning(f"Failed to clear review rows for '{file_name}': {e}")
 
         if result.flagged:
             self.quarantined_files[file_name] = len(result.flagged)
@@ -637,8 +648,9 @@ class TransactionProcessor:
             # are mutable, so never cache them (and re-reading a sheet is cheap).
             pdf_clean = False
 
+            is_pdf = file_name.lower().endswith(".pdf")
             try:
-                if file_name.lower().endswith(".pdf"):
+                if is_pdf:
                     logger.info(f"Processing statement PDF: '{file_name}'")
                     pdf_bytes = self.data_source.download_file(file_id)
                     passwords: list[str] = []
@@ -772,10 +784,17 @@ class TransactionProcessor:
 
                     if last_txn_date:
                         original_count = len(file_txns)
-                        cutoff = last_txn_date - datetime.timedelta(
-                            days=STATEMENT_LOOKBACK_DAYS
-                        )
-                        file_txns = [txn for txn in file_txns if txn["date"] >= cutoff]
+                        if is_pdf:
+                            cutoff = last_txn_date - datetime.timedelta(
+                                days=STATEMENT_LOOKBACK_DAYS
+                            )
+                            file_txns = [
+                                txn for txn in file_txns if txn["date"] >= cutoff
+                            ]
+                        else:
+                            file_txns = [
+                                txn for txn in file_txns if txn["date"] > last_txn_date
+                            ]
                         logger.debug(
                             f"Filtered {original_count - len(file_txns)} old txns from '{file_name}'."
                         )

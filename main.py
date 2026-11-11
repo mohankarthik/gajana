@@ -219,7 +219,9 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
 
             # TransactionMatcher.find_new_txns now returns only new_txns
             new_txns_to_add = TransactionMatcher.find_new_txns(
-                old_txns, potential_new_txns
+                old_txns,
+                potential_new_txns,
+                watermark_by_account=latest_by_account,
             )
             new_txns_to_add = apply_ignore_rules(new_txns_to_add)
 

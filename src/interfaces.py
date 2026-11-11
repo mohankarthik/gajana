@@ -134,6 +134,11 @@ class DataSourceInterface(abc.ABC):
         surface (e.g. CSV) simply skip it."""
         return None
 
+    def clear_review_rows(self, account: str, file_name: str) -> None:
+        """Clears rows from the review location for a statement that parsed cleanly.
+        Default is a no-op so backends without a review surface simply skip it."""
+        return None
+
     def get_processed_statements(self) -> Dict[str, str]:
         """Returns a cache of statement file IDs already fully parsed, mapping
         file ID -> the latest transaction date (ISO) that parse booked. Used to

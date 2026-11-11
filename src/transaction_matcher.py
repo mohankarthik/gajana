@@ -1,11 +1,12 @@
 # gajana/transaction_matcher.py
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from collections import Counter, defaultdict
 from operator import itemgetter
-from typing import Any, Hashable
+from typing import Any, Hashable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,6 @@ logger = logging.getLogger(__name__)
 # those variations away when building the dedup signature.
 _META_SUFFIX_RE = re.compile(r"\s+(?:value dt|ref)\b.*$", re.IGNORECASE)
 _REF_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")  # 12-digit UPI/IMPS/NEFT RRN
-_CC_REF_RE = re.compile(r"ref#\s*([a-z0-9]{10,})", re.IGNORECASE)
 _GST_RE = re.compile(r"\b([csi]gst)\b", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
 
@@ -49,11 +49,12 @@ class TransactionMatcher:
         - Otherwise fall back to normalized text: drop the trailing
           " Value Dt .../Ref ..." metadata, lowercase, and strip
           non-alphanumerics to absorb case and whitespace/OCR artifacts.
+          Spacing around "Ref#" is normalized so "(Ref# VT...)" and
+          "(Ref#VT...)" match while keeping the merchant/fee prefix distinct.
         """
         desc = description or ""
         rrn_refs = _REF_RE.findall(desc)
-        cc_refs = [m.group(1).lower() for m in _CC_REF_RE.finditer(desc)]
-        refs = tuple(sorted(set(rrn_refs + cc_refs)))
+        refs = tuple(sorted(set(rrn_refs)))
         if refs:
             gst = _GST_RE.search(desc)
             return ("ref", refs, gst.group(1).lower() if gst else "")
@@ -75,6 +76,7 @@ class TransactionMatcher:
     def find_new_txns(
         old_txns: list[dict[Hashable, Any]],
         all_potential_txns: list[dict[Hashable, Any]],
+        watermark_by_account: Optional[Mapping[str, datetime.datetime]] = None,
     ) -> list[dict[Hashable, Any]]:
         """
         Identifies transactions present in all_potential_txns but not in old_txns.
@@ -82,11 +84,15 @@ class TransactionMatcher:
         Args:
             old_txns: List of transactions already processed (from the sheet).
             all_potential_txns: List of transactions parsed from statements.
+            watermark_by_account: Optional mapping of account name to latest
+                transaction datetime. When provided, transactions with
+                txn["date"] <= watermark are deduplicated using multiset
+                (date, account, amount) matching (ignoring descriptions),
+                preventing description drift between parser versions from
+                duplicating rows in the lookback window.
 
         Returns:
-            A tuple containing:
-            - missing_txns: Placeholder, currently empty (logic not defined).
-            - new_txns: List of transactions deemed new.
+            List of transactions deemed new.
         """
         if not all_potential_txns:
             logger.info("No potential new transactions provided to match.")
@@ -101,6 +107,22 @@ class TransactionMatcher:
             for txn in all_potential_txns:
                 txn.pop(SOURCE_KEY, None)
             return all_potential_txns
+
+        def _in_lookback_window(txn_item: dict[Hashable, Any]) -> bool:
+            if not watermark_by_account:
+                return False
+            acc_name = str(txn_item.get("account", ""))
+            wm = watermark_by_account.get(acc_name)
+            if wm is None:
+                wm = watermark_by_account.get(acc_name.strip().lower())
+            if wm is None:
+                return False
+            t_d = txn_item.get("date")
+            if t_d is None:
+                return False
+            d_val = t_d.date() if hasattr(t_d, "date") else t_d
+            wm_val = wm.date() if hasattr(wm, "date") else wm
+            return bool(d_val <= wm_val)
 
         # Counted, not set-based: a statement can legitimately repeat the same
         # date/amount/description (three ₹10,000 ATM withdrawals at one machine
@@ -122,12 +144,33 @@ class TransactionMatcher:
             )
             old_txn_ids = Counter()
 
+        # Multiset counts by (date, account, amount) for transactions inside the
+        # lookback window (<= watermark), ignoring descriptions. Exclude
+        # synthetic plugin rows (e.g. payslip split) from old counts.
+        old_da_counts: Counter[tuple[str, str, float]] = Counter()
+        for t in old_txns:
+            if "auto-split from payslip" in str(t.get("description", "")).lower():
+                continue
+            try:
+                t_date = t["date"]
+                d_str = (
+                    t_date.strftime("%Y-%m-%d")
+                    if hasattr(t_date, "strftime")
+                    else str(t_date)[:10]
+                )
+                acc_clean = str(t.get("account", "")).strip().lower()
+                amt_val = round(float(t.get("amount", 0.0)), 2)
+                old_da_counts[(d_str, acc_clean, amt_val)] += 1
+            except Exception:
+                continue
+
         per_source: dict[Any, Counter] = defaultdict(Counter)
         for txn in all_potential_txns:
             try:
-                per_source[txn.get(SOURCE_KEY, "")][
-                    TransactionMatcher._txn_id(txn)
-                ] += 1
+                if not _in_lookback_window(txn):
+                    per_source[txn.get(SOURCE_KEY, "")][
+                        TransactionMatcher._txn_id(txn)
+                    ] += 1
             except Exception:
                 continue  # malformed rows are reported in the emit loop below
         quota: Counter = Counter()
@@ -137,17 +180,51 @@ class TransactionMatcher:
 
         new_txns = []
         emitted: Counter = Counter()
+        source_da_counts: dict[Any, Counter[tuple[str, str, float]]] = defaultdict(
+            Counter
+        )
+        seen_window_keys: set[tuple[tuple[str, str, float], int]] = set()
 
         for txn in all_potential_txns:
             try:
-                potential_id = TransactionMatcher._txn_id(txn)
-                allowance = max(quota[potential_id] - old_txn_ids[potential_id], 0)
-
-                if emitted[potential_id] < allowance:
-                    new_txns.append(txn)
-                    emitted[potential_id] += 1
+                if _in_lookback_window(txn):
+                    t_date = txn["date"]
+                    if not isinstance(t_date, (datetime.datetime, datetime.date)):
+                        raise TypeError(
+                            f"Date is not datetime/date: {type(t_date)} for {txn}"
+                        )
+                    d_str = t_date.strftime("%Y-%m-%d")
+                    acc_clean = str(txn["account"]).strip().lower()
+                    amt_val = round(float(txn["amount"]), 2)
+                    da_key = (d_str, acc_clean, amt_val)
+                    source = txn.get(SOURCE_KEY, "")
+                    source_da_counts[source][da_key] += 1
+                    occ = source_da_counts[source][da_key]
+                    window_key = (da_key, occ)
+                    if window_key not in seen_window_keys:
+                        seen_window_keys.add(window_key)
+                        if occ > old_da_counts[da_key]:
+                            new_txns.append(txn)
+                        else:
+                            logger.debug(
+                                f"Skipping already-booked lookback txn: {da_key} "
+                                f"(occ={occ} <= {old_da_counts[da_key]})"
+                            )
+                    else:
+                        logger.debug(
+                            f"Skipping duplicate feed lookback txn: {da_key} (occ={occ})"
+                        )
                 else:
-                    logger.debug(f"Skipping duplicate/old transaction: {potential_id}")
+                    potential_id = TransactionMatcher._txn_id(txn)
+                    allowance = max(quota[potential_id] - old_txn_ids[potential_id], 0)
+
+                    if emitted[potential_id] < allowance:
+                        new_txns.append(txn)
+                        emitted[potential_id] += 1
+                    else:
+                        logger.debug(
+                            f"Skipping duplicate/old transaction: {potential_id}"
+                        )
 
             except KeyError as e:
                 logger.fatal(

@@ -462,6 +462,7 @@ def test_write_review_rows_idempotent_replace(
     values.append.assert_not_called()
     update_kwargs = values.update.call_args.kwargs
     assert update_kwargs["range"].endswith("!A1")
+    assert update_kwargs["valueInputOption"] == "RAW"
     written = update_kwargs["body"]["values"]
     assert len(written) == 2
     assert written[0][0] == "acc-other" and written[0][6] == "other.pdf"
@@ -473,6 +474,79 @@ def test_write_review_rows_idempotent_replace(
     # len(written) == 2 < len(existing) == 3, so clear trailing row 3
     clear_kwargs = values.clear.call_args.kwargs
     assert clear_kwargs["range"].endswith("!A3:G")
+
+
+def test_clear_review_rows_removes_matching_and_clears_trailing(
+    mock_service_account_credentials, mock_google_services, mocker
+):
+    """clear_review_rows rewrites kept rows from !A1 with RAW and clears trailing."""
+    from src.google_data_source import GoogleDataSource
+
+    _, mock_sheets_service = mock_google_services
+    gds = GoogleDataSource()
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+
+    existing = [
+        ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf"],
+        ["acc-target", "2026-07-05", "flagged 1", "50.00", "", "why2", "target.pdf"],
+        ["acc-target", "2026-07-06", "flagged 2", "60.00", "", "why3", "target.pdf"],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+    values.update.return_value.execute.return_value = {"updatedCells": 7}
+    values.clear.return_value.execute.return_value = {}
+
+    gds.clear_review_rows("acc-target", "target.pdf")
+
+    update_kwargs = values.update.call_args.kwargs
+    assert update_kwargs["range"].endswith("!A1")
+    assert update_kwargs["valueInputOption"] == "RAW"
+    assert update_kwargs["body"]["values"] == [existing[0]]
+    clear_kwargs = values.clear.call_args.kwargs
+    assert clear_kwargs["range"].endswith("!A2:G")
+
+
+def test_clear_review_rows_no_matching_makes_zero_writes(
+    mock_service_account_credentials, mock_google_services, mocker
+):
+    """When no matching rows exist, clear_review_rows makes zero update/clear calls."""
+    from src.google_data_source import GoogleDataSource
+
+    _, mock_sheets_service = mock_google_services
+    gds = GoogleDataSource()
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+
+    existing = [
+        ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf"]
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+
+    gds.clear_review_rows("acc-target", "clean.pdf")
+
+    values.update.assert_not_called()
+    values.clear.assert_not_called()
+
+
+def test_clear_review_rows_all_matching_clears_entire_range(
+    mock_service_account_credentials, mock_google_services, mocker
+):
+    """When all existing rows match, clear_review_rows clears !A1:G without update."""
+    from src.google_data_source import GoogleDataSource
+
+    _, mock_sheets_service = mock_google_services
+    gds = GoogleDataSource()
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+
+    existing = [
+        ["acc-target", "2026-07-05", "flagged 1", "50.00", "", "why2", "target.pdf"]
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+    values.clear.return_value.execute.return_value = {}
+
+    gds.clear_review_rows("acc-target", "target.pdf")
+
+    values.update.assert_not_called()
+    clear_kwargs = values.clear.call_args.kwargs
+    assert clear_kwargs["range"].endswith("!A1:G")
 
 
 # --- Tests for update_transaction_categories ---

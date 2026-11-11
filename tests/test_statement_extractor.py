@@ -243,6 +243,25 @@ def test_axis_new_excludes_trailing_term_deposit_subtables():
     assert st.verified
 
 
+def test_bank_statement_with_closing_balance_in_narration():
+    """A dated transaction row containing 'closing balance' in its narration
+    does not prematurely terminate the statement.
+    """
+    fixture = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+    01/08/2026        TRANSFER FOR CLOSING BALANCE OF FD              0.00            5,000.00                15,000.00
+    02/08/2026        UPI-GROCERY STORE                             500.00                0.00                14,500.00
+                      Closing Balance                                                                         14,500.00
+"""
+    st = extract_bank_statement(pages(fixture))
+    assert len(st.rows) == 2
+    assert "CLOSING BALANCE" in st.rows[0].description
+    assert st.rows[1].description == "UPI-GROCERY STORE"
+    assert [r.amount for r in st.rows] == [5000.0, -500.0]
+
+
 def test_hdfc_rel_verifies_and_folds_continuation_lines():
     st = extract_bank_statement(pages(HDFC_REL))
     assert st.kind == "hdfc-rel"

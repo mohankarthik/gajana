@@ -376,7 +376,7 @@ class GoogleDataSource(DataSourceInterface):
                 .update(
                     spreadsheetId=TRANSACTIONS_SHEET_ID,
                     range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
-                    valueInputOption="USER_ENTERED",
+                    valueInputOption="RAW",
                     body={"values": data_values},
                 )
                 .execute()
@@ -398,7 +398,7 @@ class GoogleDataSource(DataSourceInterface):
                 .update(
                     spreadsheetId=TRANSACTIONS_SHEET_ID,
                     range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
-                    valueInputOption="USER_ENTERED",
+                    valueInputOption="RAW",
                     body={"values": combined},
                 )
                 .execute()
@@ -414,6 +414,71 @@ class GoogleDataSource(DataSourceInterface):
                 f"Replaced review rows: wrote {len(combined)} rows ({updated} cells) "
                 f"to Review tab (was {len(existing)})."
             )
+
+    def clear_review_rows(self, account: str, file_name: str) -> None:
+        """Removes review rows for (account, file_name) when a statement later parses cleanly.
+        Makes zero write calls if no matching rows exist."""
+        try:
+            existing: List[List[Any]] = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .get(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:G",
+                )
+                .execute()
+                .get("values", [])
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to read Review tab to clear rows for '{file_name}': {e}"
+            )
+            return
+
+        matching = [
+            r for r in existing if len(r) >= 7 and r[0] == account and r[6] == file_name
+        ]
+        if not matching:
+            return
+
+        kept = [
+            r
+            for r in existing
+            if not (len(r) >= 7 and r[0] == account and r[6] == file_name)
+        ]
+        try:
+            if kept:
+                result = (
+                    self.sheets_service.spreadsheets()
+                    .values()
+                    .update(
+                        spreadsheetId=TRANSACTIONS_SHEET_ID,
+                        range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
+                        valueInputOption="RAW",
+                        body={"values": kept},
+                    )
+                    .execute()
+                )
+                updated = result.get("updatedCells", 0)
+                clear_start = len(kept) + 1
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{clear_start}:G",
+                ).execute()
+                logger.info(
+                    f"Cleared {len(matching)} review row(s) for '{file_name}' ({account}); "
+                    f"{len(kept)} rows remaining ({updated} cells rewritten)."
+                )
+            else:
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1:G",
+                ).execute()
+                logger.info(
+                    f"Cleared all {len(matching)} review row(s) for '{file_name}' ({account})."
+                )
+        except Exception as e:
+            logger.warning(f"Failed to clear review rows for '{file_name}': {e}")
 
     # --- Processed-statements cache (local state; avoids re-parsing/paying the
     # LLM for immutable statements the account watermark already covers) --------

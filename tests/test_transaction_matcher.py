@@ -432,3 +432,150 @@ def test_matcher_ref_spacing_and_gst_distinction():
     new_txns = TransactionMatcher.find_new_txns(old_txns, potential_txns)
     assert len(new_txns) == 1
     assert "SGST" in new_txns[0]["description"]
+
+
+def test_matcher_distinct_descriptions_sharing_ref_stay_distinct():
+    """Two distinct descriptions sharing one Ref# on the same date/amount stay distinct."""
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "DCC FEE (Ref# ST1234567890)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "MERCHANTSWIPE (Ref# ST1234567890)",
+        },
+    ]
+    result = TransactionMatcher.find_new_txns([], potential)
+    assert len(result) == 2
+    descs = {t["description"] for t in result}
+    assert "DCC FEE (Ref# ST1234567890)" in descs
+    assert "MERCHANTSWIPE (Ref# ST1234567890)" in descs
+
+
+def test_matcher_lookback_window_multiset_dedup_and_description_drift():
+    """Lookback window (date <= watermark) deduplicates by (date, account, amount) multiset count,
+    ignoring description drift, while booking missing rows and backdated refunds.
+    """
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 7, 10, 0, 0)}
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -1500.0,
+            "description": "EMI ASTER STORE",  # LLM booked with EMI prefix
+        },
+        {
+            "date": datetime.datetime(2026, 7, 8),
+            "account": "cc-hdfc-test",
+            "amount": -320.0,
+            "description": "CLOUD INC",  # LLM booked without USD note
+        },
+        {
+            "date": datetime.datetime(2026, 7, 9),
+            "account": "cc-hdfc-test",
+            "amount": -50000.0,
+            "description": "SALARY (auto-split from payslip)",  # synthetic plugin row excluded
+        },
+    ]
+    potential_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -1500.0,
+            "description": "ASTER STORE",  # StatementExtractor description (drifted)
+        },
+        {
+            "date": datetime.datetime(2026, 7, 8),
+            "account": "cc-hdfc-test",
+            "amount": -320.0,
+            "description": "CLOUD INC USD 3.86",  # StatementExtractor description (drifted)
+        },
+        {
+            "date": datetime.datetime(2026, 6, 25),  # 15 days ago, backdated refund
+            "account": "cc-hdfc-test",
+            "amount": 450.0,
+            "description": "BACKDATED REFUND",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),  # on watermark date, missing CGST
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "CGST TAX LEG",
+        },
+        {
+            "date": datetime.datetime(
+                2026, 7, 10
+            ),  # on watermark date, missing SGST (same amt)
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "SGST TAX LEG",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),  # date > watermark (forward)
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "DCC FEE (Ref# ST9999)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),  # date > watermark (forward)
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "MERCHANTSWIPE (Ref# ST9999)",
+        },
+    ]
+
+    new_txns = TransactionMatcher.find_new_txns(
+        old_txns, potential_txns, watermark_by_account=watermark
+    )
+    # The 2 drifted description txns on 07-05 and 07-08 were deduped (0 duplicates).
+    # Expected booked: BACKDATED REFUND, CGST TAX LEG, SGST TAX LEG, DCC FEE, MERCHANTSWIPE.
+    assert len(new_txns) == 5
+    descs = [t["description"] for t in new_txns]
+    assert "ASTER STORE" not in descs
+    assert "CLOUD INC USD 3.86" not in descs
+    assert "BACKDATED REFUND" in descs
+    assert "CGST TAX LEG" in descs
+    assert "SGST TAX LEG" in descs
+    assert "DCC FEE (Ref# ST9999)" in descs
+    assert "MERCHANTSWIPE (Ref# ST9999)" in descs
+
+
+def test_matcher_duplicate_feeds_collapse_in_lookback_window():
+    """Duplicate feeds arriving with the same missing txn in the lookback window collapse."""
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "CGST TAX LEG",
+            SOURCE_KEY: "feed_a.pdf",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "CGST TAX LEG",
+            SOURCE_KEY: "feed_b.pdf",
+        },
+    ]
+    # No old_txns, so this row is genuinely missing. It should only be booked once!
+    result = TransactionMatcher.find_new_txns(
+        [
+            {
+                "date": datetime.datetime(2026, 7, 1),
+                "account": "cc-hdfc-test",
+                "amount": -1.0,
+                "description": "dummy",
+            }
+        ],
+        potential,
+        watermark_by_account=watermark,
+    )
+    assert len(result) == 1
+    assert result[0]["description"] == "CGST TAX LEG"

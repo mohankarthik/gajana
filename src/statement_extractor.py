@@ -488,7 +488,9 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                 continue
 
             upper = norm.upper()
-            if "CLOSING BALANCE" in upper and not norm.startswith("*"):
+            dated_start = DATE_RE.search(line)
+            is_dated = bool(dated_start and dated_start.start() <= max(6, date_x + 10))
+            if "CLOSING BALANCE" in upper and not norm.startswith("*") and not is_dated:
                 pending = []
                 can_append = False
                 stopped = True
@@ -532,7 +534,16 @@ def extract_bank_statement(pages: Sequence[str]) -> ExtractedStatement:
                 # reconcile() is what proves that assignment right.
                 candidates = [v for v in values if v[1] < columns["bal"][0] - 4]
                 if not candidates:
-                    pending.append(norm[:60])
+                    body = line[:desc_end].strip()
+                    if (
+                        can_append
+                        and st.rows
+                        and body
+                        and (len(line) - len(line.lstrip()) >= date_x + 6)
+                    ):
+                        st.rows[-1].description = _norm(
+                            f"{st.rows[-1].description} {body}"
+                        )
                     continue
                 value, start, end = candidates[0]
                 center = _center(start, end)

@@ -1240,9 +1240,78 @@ def test_settlement_lag_lookback_and_boundary_dedup(
             "description": "ADDON SWIPE (Ref#VT262860075035080000135)",
         }
     ]
-    new_final = TransactionMatcher.find_new_txns(old_booked_txns, parsed_txns)
+    new_final = TransactionMatcher.find_new_txns(
+        old_booked_txns, parsed_txns, watermark_by_account={"cc-hdfc-test": last_txn}
+    )
     assert len(new_final) == 2
     final_descs = [t["description"] for t in new_final]
     assert "BACKDATED REFUND" in final_descs
     assert "NEW SWIPE" in final_descs
     assert "ADDON SWIPE (Ref# VT262860075035080000135)" not in final_descs
+
+
+def test_non_pdf_sheet_statements_use_strict_forward_filter(
+    transaction_processor, mock_data_source, mocker
+):
+    """Mutable non-PDF Sheet statements use strict forward filter (date > last_txn_date),
+    never re-reading or re-offering rows on or before the watermark.
+    """
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    sheet_data = [
+        ["Date", "Description", "Amount"],
+        ["2026-06-20", "OLD ROW IN LOOKBACK", "-100.00"],
+        ["2026-07-10", "SAME DAY AS WATERMARK", "-200.00"],
+        ["2026-07-11", "NEW FORWARD ROW", "-300.00"],
+    ]
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_sheet1", name="cc-hdfc-test-2026-07.gsheet")
+    ]
+    mock_data_source.get_first_sheet_name_from_file.return_value = "Sheet1"
+    mock_data_source.get_sheet_data.return_value = sheet_data
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch(
+        "src.transaction_processor.PARSING_CONFIG",
+        {
+            "cc-hdfc": {
+                "header_patterns": [["Date", "Description", "Amount"]],
+                "column_map": {
+                    "Date": "date",
+                    "Description": "description",
+                    "Amount": "amount",
+                },
+                "date_formats": ["%Y-%m-%d"],
+            }
+        },
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+
+    # For .gsheet, strict > last_txn_date applies: 2026-06-20 and 2026-07-10 are dropped
+    assert len(parsed_txns) == 1
+    assert parsed_txns[0]["description"] == "NEW FORWARD ROW"
+    assert parsed_txns[0]["amount"] == -300.0
+
+
+def test_clean_pdf_clears_review_rows(transaction_processor, mock_data_source, mocker):
+    """When a PDF verifies cleanly via deterministic extractor, clear_review_rows is called."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-axis-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="bank-axis-test-2026-06.pdf")
+    ]
+    mock_data_source.download_file.return_value = _generate_synthetic_pdf(
+        _SYNTHETIC_AXIS_NEW
+    )
+    mock_data_source.get_processed_statements.return_value = {}
+
+    transaction_processor.get_new_transactions_from_statements(
+        "bank", {"bank-axis-test": datetime.datetime(2026, 5, 31)}
+    )
+
+    mock_data_source.clear_review_rows.assert_called_once_with(
+        "bank-axis-test", "bank-axis-test-2026-06.pdf"
+    )
