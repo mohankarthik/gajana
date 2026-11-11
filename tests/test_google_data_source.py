@@ -591,6 +591,198 @@ def test_get_unresolved_review_counts_filters_headers_and_ack_tokens(
     values.clear.assert_not_called()
 
 
+def test_get_unresolved_review_counts_skips_soft_statement_rows(
+    mock_service_account_credentials, mock_google_services
+):
+    """get_unresolved_review_counts skips soft STATEMENT rows and empty rows so health alert is not triggered."""
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    values = mock_sheets_service.spreadsheets.return_value.values.return_value
+
+    existing = [
+        [
+            "Account",
+            "Date",
+            "Description",
+            "Debit",
+            "Credit",
+            "Reason",
+            "File",
+            "Status",
+        ],
+        ["cc-test", "", "STATEMENT", "", "", "End date mismatch", "soft.pdf", ""],
+        ["cc-test", "", "Informational note", "", "", "No amount", "info.pdf", ""],
+        [
+            "cc-test",
+            "2026-07-15",
+            "Hard Flagged",
+            "100.00",
+            "",
+            "Quarantined",
+            "hard.pdf",
+            "",
+        ],
+        [
+            "cc-test",
+            "2026-07-16",
+            "Acked Row",
+            "200.00",
+            "",
+            "Quarantined",
+            "hard.pdf",
+            "acknowledged",
+        ],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+
+    counts = gds.get_unresolved_review_counts()
+    assert counts == {"hard.pdf": 1}
+
+
+def test_write_review_rows_matches_ack_with_formatted_amounts_and_dates(
+    mock_service_account_credentials, mock_google_services
+):
+    """write_review_rows matches acknowledged rows even when date format differs
+    or amount has no trailing decimals."""
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    sheets = mock_sheets_service.spreadsheets.return_value
+    values = sheets.values.return_value
+
+    sheets.get.return_value.execute.return_value = {
+        "sheets": [{"properties": {"title": "Review", "sheetId": 777}}]
+    }
+    sheets.batchUpdate.return_value.execute.return_value = {}
+
+    existing = [
+        [
+            "cc-test",
+            "15/07/2026",
+            "Merchant A",
+            "50",
+            "",
+            "Reason",
+            "stmt.pdf",
+            "acknowledged",
+        ],
+        [
+            "cc-test",
+            "2026-07-16",
+            "Merchant B",
+            "1,000.00",
+            "",
+            "Reason",
+            "stmt.pdf",
+            "done",
+        ],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+
+    # Incoming rows formatted with ISO date and 2-decimal amounts
+    new_rows = [
+        ["cc-test", "2026-07-15", "Merchant A", "50.00", "", "Reason", "stmt.pdf"],
+        ["cc-test", "2026-07-16", "Merchant B", "1000.00", "", "Reason", "stmt.pdf"],
+    ]
+    gds.write_review_rows(new_rows)
+
+    # Both incoming rows match the existing acked rows; nothing new appended and nothing deleted
+    values.update.assert_not_called()
+    sheets.batchUpdate.assert_not_called()
+
+
+def test_write_review_rows_fallback_when_sheet_id_none(
+    mock_service_account_credentials, mock_google_services
+):
+    """When _get_sheet_id returns None, write_review_rows uses rewrite-and-clear
+    fallback without stacking duplicates."""
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    sheets = mock_sheets_service.spreadsheets.return_value
+    values = sheets.values.return_value
+
+    # Metadata returns empty sheets so _get_sheet_id returns None
+    sheets.get.return_value.execute.return_value = {"sheets": []}
+
+    existing = [
+        ["acc-other", "2026-07-01", "other txn", "10.00", "", "why1", "other.pdf", ""],
+        [
+            "acc-target",
+            "2026-07-05",
+            "old unack",
+            "50.00",
+            "",
+            "why2",
+            "target.pdf",
+            "",
+        ],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+    values.update.return_value.execute.return_value = {"updatedCells": 7}
+    values.clear.return_value.execute.return_value = {}
+
+    new_rows = [
+        ["acc-target", "2026-07-05", "new unack", "50.00", "", "why-new", "target.pdf"],
+    ]
+    gds.write_review_rows(new_rows)
+
+    # Rewrote row 1 with [kept acc-other] + [new unack acc-target] at A1
+    values.update.assert_called_once()
+    assert values.update.call_args.kwargs["range"].endswith("!A1")
+    written = values.update.call_args.kwargs["body"]["values"]
+    assert len(written) == 2
+    assert written[0][0] == "acc-other"
+    assert written[1][2] == "new unack"
+    sheets.batchUpdate.assert_not_called()
+
+
+def test_clear_review_rows_preserves_acknowledged_rows(
+    mock_service_account_credentials, mock_google_services
+):
+    """clear_review_rows deletes only unacknowledged rows; acknowledged rows in col H are kept."""
+    gds = GoogleDataSource()
+    _, mock_sheets_service = mock_google_services
+    sheets = mock_sheets_service.spreadsheets.return_value
+    values = sheets.values.return_value
+
+    sheets.get.return_value.execute.return_value = {
+        "sheets": [{"properties": {"title": "Review", "sheetId": 888}}]
+    }
+    sheets.batchUpdate.return_value.execute.return_value = {}
+
+    existing = [
+        [
+            "acc-target",
+            "2026-07-05",
+            "flagged unack",
+            "50.00",
+            "",
+            "why1",
+            "target.pdf",
+            "",
+        ],
+        [
+            "acc-target",
+            "2026-07-06",
+            "flagged acked",
+            "60.00",
+            "",
+            "why2",
+            "target.pdf",
+            "resolved",
+        ],
+    ]
+    values.get.return_value.execute.return_value = {"values": existing}
+
+    gds.clear_review_rows("acc-target", "target.pdf")
+
+    sheets.batchUpdate.assert_called_once()
+    reqs = sheets.batchUpdate.call_args.kwargs["body"]["requests"]
+    assert len(reqs) == 1
+    del_range = reqs[0]["deleteDimension"]["range"]
+    assert del_range["startIndex"] == 0
+    assert del_range["endIndex"] == 1  # Only row 0 was deleted!
+
+
 # --- Tests for update_transaction_categories ---
 def test_update_transaction_categories_writes_column_f(
     mock_service_account_credentials, mock_google_services

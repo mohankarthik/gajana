@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from functools import wraps
 from collections import Counter, defaultdict
+import datetime
 import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
@@ -31,6 +32,42 @@ from src.utils import log_and_exit
 logger = logging.getLogger(__name__)
 
 _ACK_TOKENS = {"ack", "acknowledged", "resolved", "done", "ignore", "ignored"}
+
+
+def _normalize_date_str(date_str: str) -> str:
+    s = date_str.strip()
+    if not s:
+        return ""
+    try:
+        return datetime.date.fromisoformat(s).isoformat()
+    except ValueError:
+        pass
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%d %b %Y", "%d-%b-%Y"):
+        try:
+            return datetime.datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return s
+
+
+def _normalize_amount_str(val: Any) -> str:
+    s = str(val).strip().replace(",", "")
+    if not s:
+        return ""
+    try:
+        return f"{float(s):.2f}"
+    except ValueError:
+        return s
+
+
+def _review_row_key(r: Sequence[Any]) -> tuple[str, str, str, str, str, str]:
+    account = str(r[0]).strip() if len(r) > 0 else ""
+    date_str = _normalize_date_str(str(r[1])) if len(r) > 1 else ""
+    desc = str(r[2]).strip() if len(r) > 2 else ""
+    debit = _normalize_amount_str(r[3]) if len(r) > 3 else ""
+    credit = _normalize_amount_str(r[4]) if len(r) > 4 else ""
+    file_name = str(r[6]).strip() if len(r) > 6 else ""
+    return (account, date_str, desc, debit, credit, file_name)
 
 
 def retry_on_gcp_error(max_retries=3, initial_backoff=5):
@@ -425,21 +462,25 @@ class GoogleDataSource(DataSourceInterface):
             .get("values", [])
         )
 
-        incoming_keys = {(row[0], row[6]) for row in data_values if len(row) >= 7}
+        incoming_keys = {
+            (str(row[0]).strip(), str(row[6]).strip())
+            for row in data_values
+            if len(row) >= 7
+        }
 
         # Count acknowledged rows matching incoming keys so multiplicity is preserved
         ack_counts = Counter(
-            (r[0], r[1], r[2], r[3], r[4], r[6])
+            _review_row_key(r)
             for r in existing
             if len(r) >= 7
-            and (r[0], r[6]) in incoming_keys
+            and (str(r[0]).strip(), str(r[6]).strip()) in incoming_keys
             and (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
         )
 
         remaining_values: List[List[Any]] = []
         for v in data_values:
             if len(v) >= 7:
-                key = (v[0], v[1], v[2], v[3], v[4], v[6])
+                key = _review_row_key(v)
                 if ack_counts[key] > 0:
                     ack_counts[key] -= 1
                     continue
@@ -450,7 +491,7 @@ class GoogleDataSource(DataSourceInterface):
             i
             for i, r in enumerate(existing)
             if len(r) >= 7
-            and (r[0], r[6]) in incoming_keys
+            and (str(r[0]).strip(), str(r[6]).strip()) in incoming_keys
             and not (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
         ]
 
@@ -473,6 +514,26 @@ class GoogleDataSource(DataSourceInterface):
                     logger.info(
                         f"Deleted {deleted_count} prior unacknowledged review row(s) via deleteDimension."
                     )
+                else:
+                    kept = [r for i, r in enumerate(existing) if i not in unack_indices]
+                    all_to_write = kept + remaining_values
+                    if all_to_write:
+                        self.sheets_service.spreadsheets().values().update(
+                            spreadsheetId=TRANSACTIONS_SHEET_ID,
+                            range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
+                            valueInputOption="RAW",
+                            body={"values": all_to_write},
+                        ).execute()
+                    if len(all_to_write) < len(existing):
+                        self.sheets_service.spreadsheets().values().clear(
+                            spreadsheetId=TRANSACTIONS_SHEET_ID,
+                            range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{len(all_to_write) + 1}:H",
+                        ).execute()
+                    logger.info(
+                        f"Rewrote Review tab without {len(unack_indices)} unack row(s) "
+                        f"and appended {len(remaining_values)} new row(s)."
+                    )
+                    return
 
         if remaining_values:
             start = (len(existing) - deleted_count) + 1
@@ -516,7 +577,10 @@ class GoogleDataSource(DataSourceInterface):
         indices = [
             i
             for i, r in enumerate(existing)
-            if len(r) >= 7 and r[0] == account and r[6] == file_name
+            if len(r) >= 7
+            and str(r[0]).strip() == account.strip()
+            and str(r[6]).strip() == file_name.strip()
+            and not (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
         ]
         if not indices:
             return
@@ -572,14 +636,24 @@ class GoogleDataSource(DataSourceInterface):
 
         counts: dict[str, int] = defaultdict(int)
         for r in existing:
-            if not r or (len(r) > 0 and str(r[0]).strip().lower() == "account"):
+            if not r or len(r) < 7:
                 continue
-            if len(r) >= 7:
-                col_h = str(r[7]).strip().lower() if len(r) >= 8 else ""
-                if col_h not in _ACK_TOKENS:
-                    file_name = str(r[6]).strip()
-                    if file_name:
-                        counts[file_name] += 1
+            if (len(r) > 0 and str(r[0]).strip().lower() == "account") or (
+                len(r) > 1 and str(r[1]).strip().lower() == "date"
+            ):
+                continue
+            if str(r[2]).strip().upper() == "STATEMENT" and not str(r[1]).strip():
+                continue
+            debit = str(r[3]).strip() if len(r) > 3 else ""
+            credit = str(r[4]).strip() if len(r) > 4 else ""
+            if not str(r[1]).strip() and not debit and not credit:
+                continue
+
+            col_h = str(r[7]).strip().lower() if len(r) >= 8 else ""
+            if col_h not in _ACK_TOKENS:
+                file_name = str(r[6]).strip()
+                if file_name:
+                    counts[file_name] += 1
         return dict(counts)
 
     # --- Processed-statements cache (local state; avoids re-parsing/paying the
@@ -588,7 +662,7 @@ class GoogleDataSource(DataSourceInterface):
         "data", "state", "processed_statements.json"
     )
 
-    def get_processed_statements(self) -> Dict[str, str]:
+    def get_processed_statements(self) -> Dict[str, Any]:
         path = self._PROCESSED_STATEMENTS_PATH
         if not os.path.exists(path):
             return {}
@@ -600,7 +674,7 @@ class GoogleDataSource(DataSourceInterface):
             logger.warning(f"Could not read processed-statements cache: {e}")
             return {}
 
-    def save_processed_statements(self, cache: Dict[str, str]) -> None:
+    def save_processed_statements(self, cache: Dict[str, Any]) -> None:
         path = self._PROCESSED_STATEMENTS_PATH
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)

@@ -286,6 +286,18 @@ class TransactionMatcher:
 
         for i, cand in enumerate(lookback_candidates):
             if not matched[i]:
+                c_date = (
+                    cand["date"].date()
+                    if hasattr(cand["date"], "date")
+                    else cand["date"]
+                )
+                acc_clean = str(cand["account"]).strip().lower()
+                amt_val = round(float(cand["amount"]), 2)
+                desc_snip = cand.get("description", "")[:60]
+                logger.info(
+                    f"Booking unmatched lookback txn (<= watermark): "
+                    f"{c_date} {acc_clean} {amt_val} {desc_snip}"
+                )
                 new_txns.append(cand)
 
         new_txns.sort(key=itemgetter("date", "account", "amount", "description"))

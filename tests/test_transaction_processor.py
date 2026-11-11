@@ -1324,20 +1324,29 @@ def test_first_deploy_uncached_legacy_pdf_uses_strict_filter(
 def test_daily_retry_of_partially_quarantined_pdf(
     transaction_processor, mock_data_source, mocker
 ):
-    """On Day 2 of a partially-quarantined PDF, 'partial:...' does NOT skip re-parsing,
-    does NOT re-open the lookback window (strict > filter applied), and rescues rows > last_txn_date.
+    """On Day 2 of a partially-quarantined PDF:
+    - Cached 'partial' dict preserves Day 1's base_watermark and emitted multiset.
+    - Rescues rows dated on or before Day 2's watermark (which advanced after Day 1).
+    - Does NOT re-book rows deleted from the ledger on Day 1 evening.
+    - Overwrites cache with clean ISO max date and calls clear_review_rows only after rescue.
     """
-    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    # On Day 2 morning, ledger watermark has advanced to Day 1's latest booked txn (2026-07-31)
+    last_txn = datetime.datetime(2026, 7, 31, 0, 0, 0)
     statement_txns = [
         {
-            "date": datetime.datetime(2026, 7, 9),
-            "description": "DAY 1 PASSED ROW",
-            "amount": -300.0,
+            "date": datetime.datetime(2026, 7, 11),
+            "description": "DAY 1 PASSED ROW (DELETED FROM LEDGER ON DAY 1 EVENING)",
+            "amount": -100.0,
         },
         {
-            "date": datetime.datetime(2026, 7, 12),
-            "description": "RESCUED ROW AFTER RETRY",
-            "amount": -400.0,
+            "date": datetime.datetime(2026, 7, 15),
+            "description": "DAY 1 FLAGGED ROW (RESCUED ON DAY 2 <= WATERMARK)",
+            "amount": -200.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 31),
+            "description": "DAY 1 PASSED ROW (BOOKED ON DAY 1)",
+            "amount": -300.0,
         },
     ]
     mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
@@ -1345,9 +1354,17 @@ def test_daily_retry_of_partially_quarantined_pdf(
         DataSourceFile(id="f_partial", name="cc-hdfc-test-2026-07.pdf")
     ]
     mock_data_source.download_file.return_value = b"dummy"
-    # Present in processed_cache as "partial:..."
+    # Present in processed_cache as partial dict recording Day 1 state
     mock_data_source.get_processed_statements.return_value = {
-        "f_partial": "partial:2026-07-12"
+        "f_partial": {
+            "status": "partial",
+            "base_watermark": "2026-07-01",
+            "opened_lookback": True,
+            "emitted": [
+                ["2026-07-11", -100.0],
+                ["2026-07-31", -300.0],
+            ],
+        }
     }
 
     mocker.patch.object(
@@ -1363,20 +1380,68 @@ def test_daily_retry_of_partially_quarantined_pdf(
                 }
                 for t in statement_txns
             ],
-            True,  # Now verified clean on retry!
+            True,  # Now verified clean on Day 2 retry!
         ),
     )
 
     parsed_txns = transaction_processor.get_new_transactions_from_statements(
         "cc", {"cc-hdfc-test": last_txn}
     )
-    # Because f_partial is in processed_cache, lookback window did NOT open: strict > last_txn_date
+
+    # Rescued row dated 2026-07-15 (<= Day 2 watermark 2026-07-31) was emitted!
+    # Deleted 2026-07-11 row was NOT re-booked (subtracted 1-for-1 from emitted)!
+    # Already-booked 2026-07-31 row was NOT re-booked!
     assert len(parsed_txns) == 1
-    assert parsed_txns[0]["description"] == "RESCUED ROW AFTER RETRY"
-    assert parsed_txns[0]["amount"] == -400.0
-    # Overwrites "partial:..." with clean date
+    assert (
+        parsed_txns[0]["description"]
+        == "DAY 1 FLAGGED ROW (RESCUED ON DAY 2 <= WATERMARK)"
+    )
+    assert parsed_txns[0]["amount"] == -200.0
+    assert parsed_txns[0]["date"] == datetime.datetime(2026, 7, 15)
+
+    # clear_review_rows was called for the rescued statement
+    mock_data_source.clear_review_rows.assert_called_once_with(
+        "cc-hdfc-test", "cc-hdfc-test-2026-07.pdf"
+    )
+
+    # Cache overwritten with clean ISO date
     mock_data_source.save_processed_statements.assert_called_once_with(
-        {"f_partial": "2026-07-12"}
+        {"f_partial": "2026-07-31"}
+    )
+
+
+def test_day1_100pct_flagged_pdf_records_partial_cache(
+    transaction_processor, mock_data_source, mocker
+):
+    """When 100% of rows in a PDF are flagged on Day 1, df is empty/None but partial cache entry is saved."""
+    last_txn = datetime.datetime(2026, 7, 1, 0, 0, 0)
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_flagged", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=([], False),  # 100% flagged
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    assert len(parsed_txns) == 0
+    mock_data_source.clear_review_rows.assert_not_called()
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {
+            "f_flagged": {
+                "status": "partial",
+                "base_watermark": "2026-07-01T00:00:00",
+                "opened_lookback": True,
+                "emitted": [],
+            }
+        }
     )
 
 

@@ -1,6 +1,7 @@
 # gajana/transaction_processor.py
 from __future__ import annotations
 
+from collections import Counter
 import datetime
 import logging
 import math
@@ -39,6 +40,7 @@ class TransactionProcessor:
     def __init__(self, data_source: DataSourceInterface):
         self.data_source = data_source
         self.quarantined_files: dict[str, int] = {}
+        self._soft_flagged_files: set[str] = set()
 
     @staticmethod
     def _parse_amount(value: Any) -> float:
@@ -167,12 +169,7 @@ class TransactionProcessor:
             st = extract_statement_bytes(pdf_bytes, file_name, pw_list)
             if st.verified:
                 self.quarantined_files.pop(file_name, None)
-                try:
-                    self.data_source.clear_review_rows(matched_account, file_name)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to clear review rows for '{file_name}': {e}"
-                    )
+                self._soft_flagged_files.discard(file_name)
                 passed_txns = [
                     {
                         "date": r.date.strftime("%Y-%m-%d"),
@@ -241,11 +238,11 @@ class TransactionProcessor:
 
         if result.flagged or result.statement_flags:
             self._write_review_rows(result, matched_account, file_name)
+
+        if result.statement_flags:
+            self._soft_flagged_files.add(file_name)
         else:
-            try:
-                self.data_source.clear_review_rows(matched_account, file_name)
-            except Exception as e:
-                logger.warning(f"Failed to clear review rows for '{file_name}': {e}")
+            self._soft_flagged_files.discard(file_name)
 
         if result.flagged:
             self.quarantined_files[file_name] = len(result.flagged)
@@ -256,7 +253,7 @@ class TransactionProcessor:
             f"'{file_name}': {len(result.passed)} txn(s) passed validation, "
             f"{len(result.flagged)} flagged for review."
         )
-        return result.passed, not result.flagged
+        return result.passed, not bool(result.flagged)
 
     def _write_review_rows(self, result: Any, account: str, file_name: str) -> None:
         """Append flagged rows and statement-level warnings to the review surface
@@ -573,7 +570,7 @@ class TransactionProcessor:
         # re-parsing (and re-paying the LLM). Self-healing: if rows are later
         # deleted the watermark drops below the cached date and it re-parses.
         processed_cache = self.data_source.get_processed_statements()
-        newly_processed: dict[str, str] = {}
+        newly_processed: dict[str, Any] = {}
 
         seen_account_dates: set[tuple[str, Any]] = set()
         for file_info in statement_files:
@@ -623,18 +620,23 @@ class TransactionProcessor:
             # Skip statements we've already fully parsed whose latest txn the
             # account watermark still covers — no re-download, no LLM call.
             # A "partial:..." entry must NOT skip re-parsing so daily retries continue.
-            cached_max = processed_cache.get(file_id)
+            cached_entry = processed_cache.get(file_id)
             if (
-                cached_max
-                and not str(cached_max).startswith("partial:")
+                isinstance(cached_entry, str)
+                and not cached_entry.startswith("partial:")
                 and last_txn_date
-                and last_txn_date.date() >= datetime.date.fromisoformat(cached_max)
+                and last_txn_date.date() >= datetime.date.fromisoformat(cached_entry)
             ):
                 logger.info(
                     f"Skipping already-processed statement '{file_name}' "
                     "(cached; watermark covers it)."
                 )
                 continue
+
+            is_partial_retry = (
+                isinstance(cached_entry, dict)
+                and cached_entry.get("status") == "partial"
+            ) or (isinstance(cached_entry, str) and cached_entry.startswith("partial:"))
 
             logger.info(
                 f"Processing statement Sheet: '{file_name}' (ID: {file_id}) for '{matched_account}'"
@@ -748,7 +750,9 @@ class TransactionProcessor:
                     if std_df is None or std_df.empty:
                         logger.warning(f"Standardization empty for '{file_name}'.")
                         continue
+
                     file_txns = std_df.to_dict("records")
+                    raw_std_count = len(file_txns)
                     for txn in file_txns:
                         if isinstance(txn["date"], pd.Timestamp):
                             txn["date"] = txn["date"].to_pydatetime()
@@ -759,6 +763,7 @@ class TransactionProcessor:
                         for txn in file_txns
                         if isinstance(txn["date"], datetime.datetime)
                     ]
+                    unparseable_count = raw_std_count - len(file_txns)
 
                     # Universal future-date guard: a real transaction cannot be
                     # dated after today. Catches parser hallucinations on every
@@ -774,42 +779,160 @@ class TransactionProcessor:
                         )
                         file_txns = [t for t in file_txns if t["date"] <= now]
 
-                    # Cache a clean PDF by its latest booked txn date (computed
-                    # before the incremental filter, so it reflects the whole
-                    # statement). When rows are flagged, record "partial:<date>"
-                    # so daily retries do not re-open the lookback window.
                     stmt_max_date = (
                         max(t["date"] for t in file_txns) if file_txns else None
                     )
-                    if file_txns and stmt_max_date:
-                        if pdf_clean:
-                            newly_processed[file_id] = stmt_max_date.date().isoformat()
-                        elif is_pdf:
-                            newly_processed[file_id] = (
-                                f"partial:{stmt_max_date.date().isoformat()}"
-                            )
+                    original_count = len(file_txns)
+                    rescued_dropped = False
 
-                    if last_txn_date:
-                        original_count = len(file_txns)
-                        if (
-                            is_pdf
-                            and file_id not in processed_cache
-                            and stmt_max_date
-                            and stmt_max_date.date() > last_txn_date.date()
-                        ):
-                            cutoff = last_txn_date - datetime.timedelta(
-                                days=STATEMENT_LOOKBACK_DAYS
+                    if is_pdf:
+                        if is_partial_retry:
+                            prev_emitted_list: list[list[Any]] = (
+                                [
+                                    [str(item[0]), round(float(item[1]), 2)]
+                                    for item in cached_entry.get("emitted", [])
+                                    if isinstance(item, (list, tuple))
+                                    and len(item) == 2
+                                ]
+                                if isinstance(cached_entry, dict)
+                                else []
                             )
-                            file_txns = [
-                                txn for txn in file_txns if txn["date"] >= cutoff
-                            ]
+                            prev_counts = Counter((d, a) for d, a in prev_emitted_list)
+                            rescued_raw: list[dict[Hashable, Any]] = []
+                            for txn in file_txns:
+                                ms_key = (
+                                    txn["date"].strftime("%Y-%m-%d"),
+                                    round(float(txn["amount"]), 2),
+                                )
+                                if prev_counts[ms_key] > 0:
+                                    prev_counts[ms_key] -= 1
+                                else:
+                                    rescued_raw.append(txn)
+
+                            base_wm: Optional[datetime.datetime] = None
+                            if isinstance(cached_entry, dict) and cached_entry.get(
+                                "base_watermark"
+                            ):
+                                try:
+                                    base_wm = datetime.datetime.fromisoformat(
+                                        cached_entry["base_watermark"]
+                                    )
+                                except Exception:
+                                    base_wm = None
+
+                            rescued = rescued_raw
+                            if base_wm is not None:
+                                opened_lookback_flag = (
+                                    cached_entry.get("opened_lookback", False)
+                                    if isinstance(cached_entry, dict)
+                                    else True
+                                )
+                                if opened_lookback_flag or (
+                                    stmt_max_date
+                                    and stmt_max_date.date() > base_wm.date()
+                                ):
+                                    cutoff = base_wm - datetime.timedelta(
+                                        days=STATEMENT_LOOKBACK_DAYS
+                                    )
+                                    rescued = [
+                                        t for t in rescued_raw if t["date"] >= cutoff
+                                    ]
+                                else:
+                                    rescued = [
+                                        t for t in rescued_raw if t["date"] > base_wm
+                                    ]
+
+                            rescued_dropped = bool(
+                                unparseable_count
+                                or future
+                                or len(rescued) < len(rescued_raw)
+                            )
+                            file_txns = rescued
+
+                            if pdf_clean and stmt_max_date and not rescued_dropped:
+                                newly_processed[file_id] = (
+                                    stmt_max_date.date().isoformat()
+                                )
+                            else:
+                                newly_processed[file_id] = {
+                                    "status": "partial",
+                                    "base_watermark": (
+                                        cached_entry.get("base_watermark")
+                                        if isinstance(cached_entry, dict)
+                                        else (base_wm.isoformat() if base_wm else None)
+                                    ),
+                                    "opened_lookback": (
+                                        cached_entry.get("opened_lookback", False)
+                                        if isinstance(cached_entry, dict)
+                                        else True
+                                    ),
+                                    "emitted": prev_emitted_list
+                                    + [
+                                        [
+                                            t["date"].strftime("%Y-%m-%d"),
+                                            round(float(t["amount"]), 2),
+                                        ]
+                                        for t in file_txns
+                                    ],
+                                }
                         else:
+                            opened_lookback = bool(
+                                file_id not in processed_cache
+                                and last_txn_date
+                                and stmt_max_date
+                                and stmt_max_date.date() > last_txn_date.date()
+                            )
+                            if last_txn_date:
+                                if opened_lookback:
+                                    cutoff = last_txn_date - datetime.timedelta(
+                                        days=STATEMENT_LOOKBACK_DAYS
+                                    )
+                                    file_txns = [
+                                        txn
+                                        for txn in file_txns
+                                        if txn["date"] >= cutoff
+                                    ]
+                                else:
+                                    file_txns = [
+                                        txn
+                                        for txn in file_txns
+                                        if txn["date"] > last_txn_date
+                                    ]
+
+                            if (
+                                pdf_clean
+                                and stmt_max_date
+                                and not unparseable_count
+                                and not future
+                            ):
+                                newly_processed[file_id] = (
+                                    stmt_max_date.date().isoformat()
+                                )
+                            elif not pdf_clean:
+                                newly_processed[file_id] = {
+                                    "status": "partial",
+                                    "base_watermark": (
+                                        last_txn_date.isoformat()
+                                        if last_txn_date
+                                        else None
+                                    ),
+                                    "opened_lookback": opened_lookback,
+                                    "emitted": [
+                                        [
+                                            t["date"].strftime("%Y-%m-%d"),
+                                            round(float(t["amount"]), 2),
+                                        ]
+                                        for t in file_txns
+                                    ],
+                                }
+                    else:
+                        if last_txn_date:
                             file_txns = [
                                 txn for txn in file_txns if txn["date"] > last_txn_date
                             ]
-                        logger.debug(
-                            f"Filtered {original_count - len(file_txns)} old txns from '{file_name}'."
-                        )
+                    logger.debug(
+                        f"Filtered {original_count - len(file_txns)} old txns from '{file_name}'."
+                    )
                     if file_txns:
                         logger.info(
                             f"Parsed {len(file_txns)} new txns from '{file_name}'."
@@ -822,7 +945,43 @@ class TransactionProcessor:
                         all_parsed_txns.extend(file_txns)
                     else:
                         logger.info(f"No new txns in '{file_name}' after filter.")
+
+                    if (
+                        is_pdf
+                        and pdf_clean
+                        and not rescued_dropped
+                        and not unparseable_count
+                        and not future
+                        and file_name not in self._soft_flagged_files
+                    ):
+                        try:
+                            self.data_source.clear_review_rows(
+                                matched_account, file_name
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to clear review rows for '{file_name}': {e}"
+                            )
                 else:
+                    if is_pdf and not passed_txns:
+                        if pdf_clean and file_name not in self._soft_flagged_files:
+                            try:
+                                self.data_source.clear_review_rows(
+                                    matched_account, file_name
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to clear review rows for '{file_name}': {e}"
+                                )
+                        elif not pdf_clean and file_id not in processed_cache:
+                            newly_processed[file_id] = {
+                                "status": "partial",
+                                "base_watermark": (
+                                    last_txn_date.isoformat() if last_txn_date else None
+                                ),
+                                "opened_lookback": True,
+                                "emitted": [],
+                            }
                     logger.info(f"0 txns or empty DataFrame from '{file_name}'.")
             except Exception as e:
                 logger.error(f"Failed to process sheet '{file_name}': {e}", exc_info=e)
