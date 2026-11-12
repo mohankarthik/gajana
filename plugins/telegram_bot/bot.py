@@ -23,7 +23,7 @@ from typing import Any, Hashable, Optional
 import requests
 
 from src.categorizer import Categorizer
-from src.constants import DEFAULT_CATEGORY, TRANSACTIONS_SHEET_ID
+from src.constants import ADDON_CARDS, DEFAULT_CATEGORY, TRANSACTIONS_SHEET_ID
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +112,10 @@ class TelegramCashBot:
         settings: dict[str, Any],
         token: str,
         state_path: str,
+        addon_cards: Optional[dict[str, Any]] = None,
     ) -> None:
         self.ds = data_source
-        self.sheets = data_source.sheets_service
+        self.sheets = getattr(data_source, "sheets_service", None)
         self.token = token
         self.state_path = state_path
         self.allowed_chat_id = settings.get("allowed_chat_id")
@@ -122,6 +123,11 @@ class TelegramCashBot:
         self.allowed_users = {
             int(k): v for k, v in settings.get("allowed_users", {}).items()
         }
+        self.addon_cards = (
+            addon_cards
+            if addon_cards is not None
+            else settings.get("addon_cards") or ADDON_CARDS
+        )
         self.state = self._load_state()
 
     # --- Telegram transport --------------------------------------------------
@@ -201,6 +207,8 @@ class TelegramCashBot:
 
     # --- Cash ledger writes --------------------------------------------------
     def append_cash_row(self, entry: ParsedEntry, category: str, remarks: str) -> int:
+        if not self.sheets:
+            return -1
         debit = "" if entry.is_credit else round(entry.amount, 2)
         credit = round(entry.amount, 2) if entry.is_credit else ""
         values = [
@@ -230,6 +238,8 @@ class TelegramCashBot:
         return int(m.group(1)) if m else -1
 
     def _cash_gid(self) -> Optional[int]:
+        if not self.sheets:
+            return None
         meta = (
             self.sheets.spreadsheets()
             .get(spreadsheetId=TRANSACTIONS_SHEET_ID)
@@ -241,6 +251,8 @@ class TelegramCashBot:
         return None
 
     def delete_row(self, row: int) -> bool:
+        if not self.sheets:
+            return False
         gid = self._cash_gid()
         if gid is None or row < 1:
             return False
@@ -275,6 +287,69 @@ class TelegramCashBot:
         else:
             self.send_message(chat_id, "Could not undo (row not found).")
 
+    def _handle_addon(self, chat_id: int, arg: str = "") -> None:
+        from src.addon_tracker import (
+            compute_addon_report,
+            format_all_addons_overview,
+            format_non_reimbursable_user_message,
+            format_reimbursable_user_message,
+            format_unconfigured_user_message,
+        )
+        from src.transaction_processor import TransactionProcessor
+
+        processor = TransactionProcessor(self.ds, addon_cards=self.addon_cards)
+        cc_txns = processor.get_old_transactions("cc")
+        bank_txns = processor.get_old_transactions("bank")
+        report = compute_addon_report(cc_txns, bank_txns, self.addon_cards)
+
+        arg_clean = arg.strip().lower()
+
+        if arg_clean == "all":
+            self.send_message(chat_id, format_all_addons_overview(report))
+            return
+
+        reimbursable_users = [u for u in report.users if u.user.reimburse]
+
+        if not arg_clean:
+            if not reimbursable_users:
+                self.send_message(chat_id, format_all_addons_overview(report))
+                return
+            for u_rep in reimbursable_users:
+                self.send_message(chat_id, format_reimbursable_user_message(u_rep))
+            return
+
+        # Specific user requested
+        for u_rep in report.users:
+            u = u_rep.user
+            candidates = [
+                u.id.lower(),
+                u.label.lower(),
+                u.greeting_name.lower(),
+            ] + [p.lower() for p in u.cardholder_patterns]
+            if arg_clean in candidates:
+                if u.reimburse:
+                    self.send_message(chat_id, format_reimbursable_user_message(u_rep))
+                else:
+                    self.send_message(
+                        chat_id, format_non_reimbursable_user_message(u_rep)
+                    )
+                return
+
+        for unconf in report.unconfigured_users:
+            if arg_clean == unconf.label.lower():
+                self.send_message(chat_id, format_unconfigured_user_message(unconf))
+                return
+
+        available = [u.user.label for u in report.users] + [
+            u.label for u in report.unconfigured_users
+        ]
+        names_str = ", ".join(available) if available else "none"
+        self.send_message(
+            chat_id,
+            f"Unknown add-on user '{arg.strip()}'. Available add-on users: {names_str}. "
+            "Use `/addon all` for full overview.",
+        )
+
     def _handle_entry(
         self, chat_id: int, user_id: int, text: str, categorizer: Categorizer
     ) -> bool:
@@ -308,25 +383,34 @@ class TelegramCashBot:
         return True
 
     def process_message(
-        self, message: dict[str, Any], categorizer: Categorizer
+        self, message: dict[str, Any], categorizer: Optional[Categorizer] = None
     ) -> bool:
         """Handle one message. Returns True if a cash entry was recorded."""
         text = str(message.get("text", "")).strip()
         chat_id = message["chat"]["id"]
         user_id = message["from"]["id"]
-        low = text.lower().split("@")[0]  # strip @botname from group commands
-        if low in ("/undo",):
+        parts = text.split(None, 1)
+        first_token = parts[0] if parts else ""
+        cmd = first_token.split("@")[0].lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in ("/undo",):
             self._handle_undo(chat_id)
-        elif low in ("/start", "/help"):
+        elif cmd in ("/addon",):
+            self._handle_addon(chat_id, args)
+        elif cmd in ("/start", "/help"):
             self.send_message(
                 chat_id,
                 "Log cash: e.g. `Coffee 250` (spend) or `+2000 ATM` (cash in). "
                 "Add `yesterday` or `YYYY-MM-DD` for a past date. /undo removes "
-                "the last entry.",
+                "the last entry. /addon shows add-on card spend and settlement; "
+                "/addon all for full overview.",
             )
         elif text.startswith("/"):
             return False  # unknown command -> ignore
         else:
+            if categorizer is None:
+                categorizer = self._build_categorizer()
             return self._handle_entry(chat_id, user_id, text, categorizer)
         return False
 

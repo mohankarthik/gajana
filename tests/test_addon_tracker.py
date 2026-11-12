@@ -1,0 +1,569 @@
+"""Unit and regression tests for add-on card spend tracking and settlement."""
+
+from __future__ import annotations
+
+import datetime
+
+from src.addon_tracker import (
+    compute_addon_report,
+    format_all_addons_overview,
+    format_non_reimbursable_user_message,
+    format_reimbursable_user_message,
+    format_unconfigured_user_message,
+    is_reimbursable_addon_row,
+    match_addon_repayment,
+    parse_addon_config,
+    parse_addon_repay_tag,
+    parse_addon_tag,
+    resolve_cardholder_tag,
+    send_telegram_addon_notification,
+)
+from src.categorizer import Categorizer
+from src.category_index import CategoryIndex
+from src.constants import DEFAULT_CATEGORY
+
+# ---------------------------------------------------------------------------
+# Synthetic Test Configurations (strictly zero real personal data)
+# ---------------------------------------------------------------------------
+
+SYNTHETIC_ADDON_CONFIG = {
+    "primary_cardholders": ["ALEX MORGAN"],
+    "users": [
+        {
+            "id": "mom",
+            "label": "Mom",
+            "greeting_name": "Amma",
+            "cardholder_patterns": ["PATRICIA M", "PATRICIA MORGAN"],
+            "reimburse": True,
+            "reimburse_category": "Transfer",
+            "repayment_since": "2026-08-01",
+            "repayment_patterns": ["patricia", "patricia@okbank"],
+        },
+        {
+            "id": "partner",
+            "label": "Partner",
+            "cardholder_patterns": ["SAMIRA K"],
+            "reimburse": False,
+        },
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Config Parsing & Cardholder Resolution
+# ---------------------------------------------------------------------------
+
+
+def test_parse_addon_config_empty_and_valid():
+    primaries, users = parse_addon_config({})
+    assert primaries == []
+    assert users == []
+
+    primaries, users = parse_addon_config(SYNTHETIC_ADDON_CONFIG)
+    assert primaries == ["ALEX MORGAN"]
+    assert len(users) == 2
+    u_mom = users[0]
+    assert u_mom.id == "mom"
+    assert u_mom.label == "Mom"
+    assert u_mom.greeting_name == "Amma"
+    assert u_mom.reimburse is True
+    assert u_mom.reimburse_category == "Transfer"
+    assert u_mom.repayment_since == datetime.date(2026, 8, 1)
+    assert u_mom.repayment_patterns == ["patricia", "patricia@okbank"]
+
+    u_partner = users[1]
+    assert u_partner.id == "partner"
+    assert u_partner.reimburse is False
+
+
+def test_resolve_cardholder_tag():
+    cfg = SYNTHETIC_ADDON_CONFIG
+
+    # None or empty
+    assert resolve_cardholder_tag(None, cfg) is None
+    assert resolve_cardholder_tag("", cfg) is None
+    assert resolve_cardholder_tag("   ", cfg) is None
+
+    # Primary cardholder -> None
+    assert resolve_cardholder_tag("ALEX MORGAN", cfg) is None
+    assert resolve_cardholder_tag("Alex Morgan", cfg) is None
+    assert resolve_cardholder_tag("ALEX M", cfg) is None
+
+    # Configured reimbursable add-on user
+    assert resolve_cardholder_tag("PATRICIA MORGAN", cfg) == "addon:Mom"
+    assert resolve_cardholder_tag("patricia m", cfg) == "addon:Mom"
+
+    # Configured non-reimbursable add-on user
+    assert resolve_cardholder_tag("SAMIRA K", cfg) == "addon:Partner"
+
+    # Unconfigured non-primary name -> title-cased fallback
+    assert resolve_cardholder_tag("RANDOM COUSIN", cfg) == "addon:Random Cousin"
+
+
+# ---------------------------------------------------------------------------
+# Tag Parsing & Reimbursable Row Check
+# ---------------------------------------------------------------------------
+
+
+def test_parse_addon_tag_and_repay_tag():
+    assert parse_addon_tag("addon:Mom") == "Mom"
+    assert parse_addon_tag("addon: Partner") == "Partner"
+    assert parse_addon_tag("addon:Mom; REVIEW: check") == "Mom"
+    assert parse_addon_tag("other remark; addon:Mom") == "Mom"
+    assert parse_addon_tag("no addon tag here") is None
+    assert parse_addon_tag(None) is None
+    assert parse_addon_tag(float("nan")) is None
+
+    assert parse_addon_repay_tag("addon-repay:Mom") == "Mom"
+    assert parse_addon_repay_tag("addon-repay: Partner") == "Partner"
+    assert parse_addon_repay_tag("review: note; addon-repay:Mom") == "Mom"
+    assert parse_addon_repay_tag("addon:Mom") is None
+
+
+def test_is_reimbursable_addon_row():
+    cfg = SYNTHETIC_ADDON_CONFIG
+
+    # CC swipe tagged addon:Mom with Transfer category -> True
+    row1 = {
+        "description": "PHARMACY",
+        "amount": -500.0,
+        "category": "Transfer",
+        "remarks": "addon:Mom",
+    }
+    assert is_reimbursable_addon_row(row1, cfg) is True
+
+    # Bank repayment tagged addon-repay:Mom with Transfer category -> True
+    row2 = {
+        "description": "UPI/CR/123/PATRICIA@OKBANK",
+        "amount": 500.0,
+        "category": "Transfer",
+        "remarks": "addon-repay:Mom",
+    }
+    assert is_reimbursable_addon_row(row2, cfg) is True
+
+    # Non-reimbursable add-on swipe (addon:Partner) -> False
+    row3 = {
+        "description": "CLOTHING STORE",
+        "amount": -2000.0,
+        "category": "Expense:Clothing",
+        "remarks": "addon:Partner",
+    }
+    assert is_reimbursable_addon_row(row3, cfg) is False
+
+    # Standard primary row -> False
+    row4 = {
+        "description": "GROCERY",
+        "amount": -1000.0,
+        "category": "Expense:Groceries",
+        "remarks": "",
+    }
+    assert is_reimbursable_addon_row(row4, cfg) is False
+
+
+# ---------------------------------------------------------------------------
+# Bank UPI Repayment Auto-Matching
+# ---------------------------------------------------------------------------
+
+
+def test_match_addon_repayment():
+    _, users = parse_addon_config(SYNTHETIC_ADDON_CONFIG)
+
+    # Valid incoming credit on or after repayment_since matching pattern
+    txn_match = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "remarks": "",
+    }
+    matched = match_addon_repayment(txn_match, users)
+    assert matched is not None
+    assert matched.id == "mom"
+
+    # Handles space around @ in UPI handle
+    txn_space_at = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 5000.0,
+        "description": "UPI/CR/123456789012/PATRICIA @ OKBANK/PAYMENT",
+        "remarks": "",
+    }
+    assert match_addon_repayment(txn_space_at, users) is not None
+
+    # Date before repayment_since -> ignored
+    txn_old = {
+        "date": datetime.date(2026, 7, 20),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "remarks": "",
+    }
+    assert match_addon_repayment(txn_old, users) is None
+
+    # Debit (amount <= 0) -> ignored
+    txn_debit = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": -15000.0,
+        "description": "UPI/DR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "remarks": "",
+    }
+    assert match_addon_repayment(txn_debit, users) is None
+
+    # Human remarks opt-out (e.g. 'gift' or 'travel') -> blocked
+    txn_opt_out = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "remarks": "birthday gift",
+    }
+    assert match_addon_repayment(txn_opt_out, users) is None
+
+    # Review remarks allowed
+    txn_review_rem = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "remarks": "REVIEW: check account",
+    }
+    assert match_addon_repayment(txn_review_rem, users) is not None
+
+    # Explicit addon-repay tag matches directly
+    txn_explicit_tag = {
+        "date": datetime.date(2026, 5, 1),
+        "amount": 5000.0,
+        "description": "NEFT TRANSFER FROM MOTHER",
+        "remarks": "addon-repay:Mom",
+    }
+    matched_explicit = match_addon_repayment(txn_explicit_tag, users)
+    assert matched_explicit is not None
+    assert matched_explicit.id == "mom"
+
+
+# ---------------------------------------------------------------------------
+# Categorizer Layer 0 Override
+# ---------------------------------------------------------------------------
+
+
+def test_categorizer_layer0_override_and_preservation(tmp_path):
+    matchers_file = tmp_path / "matchers.json"
+    matchers_file.write_text(
+        '[{"category": "Expense:Groceries", "description": ["SUPERMARKET"]}]'
+    )
+
+    categorizer = Categorizer(
+        matchers_file=str(matchers_file),
+        addon_cards=SYNTHETIC_ADDON_CONFIG,
+    )
+
+    # Rule 0a: Reimbursable CC swipe overrides exact matcher rule -> Transfer
+    txn_reimb = {
+        "date": "2026-08-10",
+        "description": "SUPERMARKET CITY CENTER",
+        "amount": -3000.0,
+        "account": "cc-hdfc",
+        "category": DEFAULT_CATEGORY,
+        "remarks": "addon:Mom",
+    }
+    categorizer.categorize([txn_reimb])
+    assert txn_reimb["category"] == "Transfer"
+    assert txn_reimb["remarks"] == "addon:Mom"
+
+    # Rule 0b: Bank credit repayment auto-matches -> Transfer, remarks tagged
+    txn_bank = {
+        "date": "2026-08-12",
+        "description": "UPI/CR/998877665544/PATRICIA@OKBANK",
+        "amount": 3000.0,
+        "account": "bank-axis",
+        "category": DEFAULT_CATEGORY,
+        "remarks": "",
+    }
+    categorizer.categorize([txn_bank])
+    assert txn_bank["category"] == "Transfer"
+    assert "addon-repay:Mom" in txn_bank["remarks"]
+
+    # Non-reimbursable user CC swipe: does NOT get Transfer; normal rules apply
+    txn_non_reimb = {
+        "date": "2026-08-10",
+        "description": "SUPERMARKET CITY CENTER",
+        "amount": -1500.0,
+        "account": "cc-hdfc",
+        "category": DEFAULT_CATEGORY,
+        "remarks": "addon:Partner",
+    }
+    categorizer.categorize([txn_non_reimb])
+    assert txn_non_reimb["category"] == "Expense:Groceries"
+    assert txn_non_reimb["remarks"] == "addon:Partner"
+
+
+# ---------------------------------------------------------------------------
+# CategoryIndex Isolation
+# ---------------------------------------------------------------------------
+
+
+def test_category_index_isolation():
+    # Historical training rows:
+    # 1. Mom's purchase tagged addon:Mom with Transfer
+    # 2. Partner's purchase tagged addon:Partner with Expense:Clothing
+    # 3. Primary's purchase at PHARMACY with Expense:Medical
+    history = [
+        {
+            "description": "CITY PHARMACY BENGALURU",
+            "amount": -500.0,
+            "category": "Transfer",
+            "remarks": "addon:Mom",
+        },
+        {
+            "description": "TRENDS CLOTHING STORE",
+            "amount": -2000.0,
+            "category": "Expense:Clothing",
+            "remarks": "addon:Partner",
+        },
+        {
+            "description": "CITY PHARMACY BENGALURU",
+            "amount": -500.0,
+            "category": "Expense:Medical",
+            "remarks": "",
+        },
+    ]
+
+    index = CategoryIndex().build(history, addon_cards=SYNTHETIC_ADDON_CONFIG)
+
+    # City pharmacy exact lookup should be Expense:Medical (Transfer row was skipped!)
+    exact_hit, conf, method = index.lookup("CITY PHARMACY BENGALURU", -500.0)
+    assert exact_hit == "Expense:Medical"
+    assert method == "exact"
+
+    # Partner's clothing store should be indexed
+    partner_hit, conf, method = index.lookup("TRENDS CLOTHING STORE", -2000.0)
+    assert partner_hit == "Expense:Clothing"
+    assert method == "exact"
+
+
+# ---------------------------------------------------------------------------
+# FIFO Settlement Math & Formatting
+# ---------------------------------------------------------------------------
+
+
+def test_compute_addon_report_fifo_settlement():
+    cc_txns = [
+        # Mom purchases
+        {
+            "date": datetime.date(2026, 8, 2),
+            "description": "GROCERIES",
+            "amount": -4000.0,
+            "remarks": "addon:Mom",
+        },
+        {
+            "date": datetime.date(2026, 8, 5),
+            "description": "MEDICINES",
+            "amount": -2000.0,
+            "remarks": "addon:Mom",
+        },
+        {
+            "date": datetime.date(2026, 8, 10),
+            "description": "UTILITY BILL",
+            "amount": -3000.0,
+            "remarks": "addon:Mom",
+        },
+        # Partner purchase
+        {
+            "date": datetime.date(2026, 8, 12),
+            "description": "BOOK STORE",
+            "amount": -1500.0,
+            "remarks": "addon:Partner",
+        },
+    ]
+
+    # Scenario 1: Zero repayments
+    rep1 = compute_addon_report(cc_txns, [], SYNTHETIC_ADDON_CONFIG)
+    mom_rep1 = next(u for u in rep1.users if u.user.id == "mom")
+    assert mom_rep1.total_spend == 9000.0
+    assert mom_rep1.total_repaid == 0.0
+    assert mom_rep1.net_due == 9000.0
+    assert len(mom_rep1.open_items) == 3
+    assert [i.unsettled_amount for i in mom_rep1.open_items] == [
+        4000.0,
+        2000.0,
+        3000.0,
+    ]
+
+    # Scenario 2: Partial repayment of ₹5,000 via UPI
+    # Covers GROCERIES (4,000) fully, leaves MEDICINES (2,000 - 1,000 = 1,000 open), UTILITY BILL (3,000 open)
+    bank_partial = [
+        {
+            "date": datetime.date(2026, 8, 8),
+            "amount": 5000.0,
+            "description": "UPI/CR/123/PATRICIA@OKBANK",
+            "remarks": "addon-repay:Mom",
+        }
+    ]
+    rep2 = compute_addon_report(cc_txns, bank_partial, SYNTHETIC_ADDON_CONFIG)
+    mom_rep2 = next(u for u in rep2.users if u.user.id == "mom")
+    assert mom_rep2.total_spend == 9000.0
+    assert mom_rep2.total_repaid == 5000.0
+    assert mom_rep2.net_due == 4000.0
+    assert len(mom_rep2.open_items) == 2
+    assert mom_rep2.open_items[0].description == "MEDICINES"
+    assert mom_rep2.open_items[0].gross_amount == 2000.0
+    assert mom_rep2.open_items[0].unsettled_amount == 1000.0
+    assert mom_rep2.open_items[1].description == "UTILITY BILL"
+    assert mom_rep2.open_items[1].gross_amount == 3000.0
+    assert mom_rep2.open_items[1].unsettled_amount == 3000.0
+
+    # Strict on-screen arithmetic invariant
+    msg2 = format_reimbursable_user_message(mom_rep2)
+    assert "Items total: ₹5,000" in msg2
+    assert "Already received via UPI: -₹1,000" in msg2
+    assert "Amount due: ₹4,000" in msg2
+
+    # Scenario 3: Exact full repayment of ₹9,000
+    bank_full = [
+        {
+            "date": datetime.date(2026, 8, 15),
+            "amount": 9000.0,
+            "description": "UPI/CR/123/PATRICIA@OKBANK",
+            "remarks": "addon-repay:Mom",
+        }
+    ]
+    rep3 = compute_addon_report(cc_txns, bank_full, SYNTHETIC_ADDON_CONFIG)
+    mom_rep3 = next(u for u in rep3.users if u.user.id == "mom")
+    assert mom_rep3.net_due == 0.0
+    assert len(mom_rep3.open_items) == 0
+    msg3 = format_reimbursable_user_message(mom_rep3)
+    assert "credit card spend is all settled up (₹0 due)" in msg3
+
+    # Scenario 4: Overpayment of ₹10,000 (₹1,000 credit balance)
+    bank_over = [
+        {
+            "date": datetime.date(2026, 8, 15),
+            "amount": 10000.0,
+            "description": "UPI/CR/123/PATRICIA@OKBANK",
+            "remarks": "addon-repay:Mom",
+        }
+    ]
+    rep4 = compute_addon_report(cc_txns, bank_over, SYNTHETIC_ADDON_CONFIG)
+    mom_rep4 = next(u for u in rep4.users if u.user.id == "mom")
+    assert mom_rep4.net_due == -1000.0
+    msg4 = format_reimbursable_user_message(mom_rep4)
+    assert "credit balance" in msg4
+    assert "₹1,000" in msg4
+
+    # Scenario 5: CC merchant refund (amount > 0 in CC)
+    cc_with_refund = cc_txns + [
+        {
+            "date": datetime.date(2026, 8, 11),
+            "description": "MEDICINES RETURN",
+            "amount": 1000.0,  # +1000 credit refund on card
+            "remarks": "addon:Mom",
+        }
+    ]
+    rep5 = compute_addon_report(cc_with_refund, [], SYNTHETIC_ADDON_CONFIG)
+    mom_rep5 = next(u for u in rep5.users if u.user.id == "mom")
+    assert mom_rep5.total_spend == 8000.0  # 9000 - 1000
+    assert mom_rep5.net_due == 8000.0
+
+
+def test_format_non_reimbursable_and_overview():
+    cc_txns = [
+        {
+            "date": datetime.date(2026, 8, 5),
+            "description": "CLOTHING STORE",
+            "amount": -4500.0,
+            "remarks": "addon:Partner",
+        }
+    ]
+    rep = compute_addon_report(cc_txns, [], SYNTHETIC_ADDON_CONFIG)
+    partner_rep = next(u for u in rep.users if u.user.id == "partner")
+    msg = format_non_reimbursable_user_message(partner_rep)
+    assert "Partner Spend Summary:" in msg
+    assert "Total spend: ₹4,500" in msg
+    assert "CLOTHING STORE" in msg
+
+    overview = format_all_addons_overview(rep)
+    assert "Add-on Cards Overview:" in overview
+    assert "Mom (reimbursable):" in overview
+    assert "Partner:" in overview
+
+
+def test_format_unconfigured_user():
+    cc_txns = [
+        {
+            "date": datetime.date(2026, 8, 10),
+            "description": "CAFE",
+            "amount": -650.0,
+            "remarks": "addon:Friend",
+        }
+    ]
+    rep = compute_addon_report(cc_txns, [], SYNTHETIC_ADDON_CONFIG)
+    assert len(rep.unconfigured_users) == 1
+    unconf = rep.unconfigured_users[0]
+    assert unconf.label == "Friend"
+    assert unconf.total_spend == 650.0
+    msg = format_unconfigured_user_message(unconf)
+    assert "Friend Spend Summary:" in msg
+    assert "Total spend: ₹650" in msg
+
+
+# ---------------------------------------------------------------------------
+# Telegram Notification Helper
+# ---------------------------------------------------------------------------
+
+
+def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
+    outbox = []
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None):
+        outbox.append(json)
+        return _FakeResp()
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text('{"allowed_chat_id": 12345}')
+    token_file = tmp_path / "telegram.json"
+    token_file.write_text('{"token": "BOT_TOKEN"}')
+
+    # Case 1: No add-on swipes -> False, no messages
+    res1 = send_telegram_addon_notification(
+        all_cc=[],
+        all_bank=[],
+        newly_added_cc=[
+            {
+                "description": "GROCERIES",
+                "amount": -1000.0,
+                "remarks": "",
+            }
+        ],
+        addon_config=SYNTHETIC_ADDON_CONFIG,
+        settings_path=str(settings_file),
+        token_path=str(token_file),
+    )
+    assert res1 is False
+    assert len(outbox) == 0
+
+    # Case 2: New add-on swipe for Mom -> header + separate forwardable message
+    new_cc = [
+        {
+            "date": datetime.date(2026, 8, 10),
+            "description": "PHARMACY",
+            "amount": -2500.0,
+            "remarks": "addon:Mom",
+        }
+    ]
+    res2 = send_telegram_addon_notification(
+        all_cc=new_cc,
+        all_bank=[],
+        newly_added_cc=new_cc,
+        addon_config=SYNTHETIC_ADDON_CONFIG,
+        settings_path=str(settings_file),
+        token_path=str(token_file),
+    )
+    assert res2 is True
+    # Two messages sent: 1 header summary, 1 forwardable message for Mom
+    assert len(outbox) == 2
+    assert (
+        "New CC statement add-on spend booked: Mom ₹2,500 (1 txn)." in outbox[0]["text"]
+    )
+    assert "Hi Amma, credit card spend summary:" in outbox[1]["text"]
+    assert "• 10 Aug – PHARMACY: ₹2,500" in outbox[1]["text"]

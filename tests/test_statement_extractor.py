@@ -738,6 +738,94 @@ def test_statement_passwords_tolerates_a_missing_or_broken_file(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Multi-page & Add-on Cardholder Tests
+# --------------------------------------------------------------------------
+
+HDFC_CARD_MULTIPAGE_P1 = """
+ BENGALURU 560049 KAR                                Billing Period               13 Jul, 2026 - 12 Aug, 2026
+       PREVIOUS STATEMENT DUES        PAYMENTS/CREDITS            PURCHASES/DEBIT              FINANCE CHARGES
+                   C-9,585.00             C10,000.00                   C30,000.00                    C0.00
+   Domestic Transactions
+                                                    ALEX MORGAN
+14/07/2026| 10:00            ONLINE GROCER                                                                 C 10,000.00     l
+                                                    PATRICIA MORGAN      [CKYC ID : XXXXXXXXXX1234 ]
+15/07/2026| 11:00            PHARMACY STORE                                                                C 5,000.00      l
+"""
+
+HDFC_CARD_MULTIPAGE_P2 = """
+16/07/2026| 12:00            PHARMEASY VIA SMARTBUYMUMBAI                                                  C 5,000.00      l
+   International Transactions
+                                                    SAMIRA KHAN
+17/07/2026| 13:00            AIRLINE TICKET                                                                C 10,000.00     l
+20/07/2026| 00:00            PAYMENT RECEIVED                                                           +  C 10,000.00     l
+   Reward Points Summary
+   Opening Balance: 1000
+   GST Summary
+"""
+
+AXIS_CARD_ADDON = """
+        Total Payment Due                Minimum Payment Due                Statement Period               Payment Due Date
+             12,000.00   Dr                    400.00   Dr                 20/07/2024 - 18/08/2024               07/09/2024
+        Previous Balance - Payments - Credits + Purchase + Cash Advance + Other Debit&Charges =Total Payment Due
+        10,000.00  Dr        10,000.00           0.00          12,000.00           0.00           0.00             12,000.00   Dr
+        Card No: 4111XXXXXXXX1234    Name ALEX MORGAN
+        DATE                     TRANSACTION DETAILS                       MERCHANT CATEGORY               AMOUNT (Rs.)
+  03/08/2024             ANNUAL FEE                                                                          10,000.00 Dr
+  07/08/2024             PAYMENT RECEIVED                                                                    10,000.00 Cr
+        Card No: 4111XXXXXXXX5678    Name PATRICIA MORGAN
+  04/08/2024             GROCERY STORE                                                                        2,000.00 Dr
+"""
+
+
+def test_hdfc_card_multipage_continuation_and_smartbuy_and_addons():
+    pages_list = [
+        HDFC_CARD_MULTIPAGE_P1.lstrip("\n"),
+        HDFC_CARD_MULTIPAGE_P2.lstrip("\n"),
+    ]
+    st = extract_from_pages(pages_list, "cc-hdfc-infiniametal-2026-08.pdf")
+    assert st.kind == "hdfc-cc"
+    assert st.period == ("13 Jul, 2026", "12 Aug, 2026")
+    assert (st.payments, st.purchases, st.charges) == (10000.0, 30000.0, 0.0)
+    assert len(st.rows) == 5
+    assert [r.amount for r in st.rows] == [
+        -10000.0,
+        -5000.0,
+        -5000.0,
+        -10000.0,
+        10000.0,
+    ]
+    assert [r.description for r in st.rows] == [
+        "ONLINE GROCER",
+        "PHARMACY STORE",
+        "PHARMEASY VIA SMARTBUYMUMBAI",
+        "AIRLINE TICKET",
+        "PAYMENT RECEIVED",
+    ]
+    # Cardholders tracked across page breaks and unaffected by SMARTBUY in description:
+    assert [r.cardholder for r in st.rows] == [
+        "ALEX MORGAN",
+        "PATRICIA MORGAN",
+        "PATRICIA MORGAN",
+        "SAMIRA KHAN",
+        "SAMIRA KHAN",
+    ]
+    assert st.verified
+
+
+def test_axis_card_captures_cardholder_names():
+    st = extract_from_pages(pages(AXIS_CARD_ADDON), "cc-axis-magnus-2024-08.pdf")
+    assert st.kind == "axis-cc"
+    assert len(st.rows) == 3
+    assert [r.amount for r in st.rows] == [-10000.0, 10000.0, -2000.0]
+    assert [r.cardholder for r in st.rows] == [
+        "ALEX MORGAN",
+        "ALEX MORGAN",
+        "PATRICIA MORGAN",
+    ]
+    assert st.verified
+
+
+# --------------------------------------------------------------------------
 # Opt-in regression against the real corpus
 # --------------------------------------------------------------------------
 

@@ -125,12 +125,21 @@ class FakeSheets:
 
 
 class FakeDataSource:
-    def __init__(self, cash_history):
+    def __init__(self, cash_history, cc_history=None, bank_history=None):
         self.sheets_service = FakeSheets()
         self._history = cash_history
+        self._cc_history = cc_history or []
+        self._bank_history = bank_history or []
 
     def get_sheet_data(self, sheet_id, sheet_name, rng):
         return self._history
+
+    def get_transaction_log_data(self, account_type):
+        if account_type == "cc":
+            return self._cc_history
+        if account_type == "bank":
+            return self._bank_history
+        return []
 
 
 CASH_HISTORY = [
@@ -169,10 +178,39 @@ def sent(monkeypatch):
     return outbox, self_updates
 
 
-def make_bot(tmp_path, cash_history=CASH_HISTORY):
-    ds = FakeDataSource(cash_history)
+SYNTHETIC_ADDON_CONFIG = {
+    "primary_cardholders": ["ALEX MORGAN"],
+    "users": [
+        {
+            "id": "mom",
+            "label": "Mom",
+            "greeting_name": "Amma",
+            "cardholder_patterns": ["PATRICIA M", "PATRICIA MORGAN"],
+            "reimburse": True,
+            "reimburse_category": "Transfer",
+            "repayment_since": "2026-08-01",
+            "repayment_patterns": ["patricia", "patricia@okbank"],
+        },
+        {
+            "id": "partner",
+            "label": "Partner",
+            "cardholder_patterns": ["SAMIRA K"],
+            "reimburse": False,
+        },
+    ],
+}
+
+
+def make_bot(
+    tmp_path,
+    cash_history=CASH_HISTORY,
+    cc_history=None,
+    bank_history=None,
+    addon_cards=SYNTHETIC_ADDON_CONFIG,
+):
+    ds = FakeDataSource(cash_history, cc_history=cc_history, bank_history=bank_history)
     state = str(tmp_path / "state.json")
-    return TelegramCashBot(ds, SETTINGS, "TOKEN", state), ds
+    return TelegramCashBot(ds, SETTINGS, "TOKEN", state, addon_cards=addon_cards), ds
 
 
 # --- authorization -------------------------------------------------------------
@@ -298,3 +336,102 @@ def test_run_once_advances_offset_and_filters(tmp_path, sent):
     assert handled == 2  # unauthorized chat ignored
     assert bot.state["offset"] == 13  # max(update_id)+1
     assert len(ds.sheets_service.appended) == 2
+
+
+# --- addon commands ------------------------------------------------------------
+
+
+SAMPLE_CC_LOG = [
+    ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+    ["2026-08-05", "SUPERMARKET", "3500.00", "", "Transfer", "addon:Mom", "cc-hdfc"],
+    [
+        "2026-08-10",
+        "BOUTIQUE",
+        "4000.00",
+        "",
+        "Expense:Clothing",
+        "addon:Partner",
+        "cc-hdfc",
+    ],
+]
+
+SAMPLE_BANK_LOG = [
+    ["Date", "Description", "Debit", "Credit", "Category", "Remarks", "Account"],
+    [
+        "2026-08-08",
+        "UPI/CR/123/PATRICIA@OKBANK",
+        "",
+        "1500.00",
+        "Transfer",
+        "addon-repay:Mom",
+        "bank-axis",
+    ],
+]
+
+
+def test_addon_command_reimbursable_forwardable_reply(tmp_path, sent):
+    outbox, _ = sent
+    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
+    bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon"}
+    )
+    assert len(outbox) == 1
+    reply = outbox[-1]["text"]
+    assert "Hi Amma, credit card spend summary:" in reply
+    assert "Items total: ₹3,500" in reply
+    assert "Already received via UPI: -₹1,500" in reply
+    assert "Amount due: ₹2,000" in reply
+
+
+def test_addon_all_command_overview_reply(tmp_path, sent):
+    outbox, _ = sent
+    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
+    bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon all"}
+    )
+    assert len(outbox) == 1
+    reply = outbox[-1]["text"]
+    assert "Add-on Cards Overview:" in reply
+    assert "Mom (reimbursable):" in reply
+    assert "Net due: ₹2,000" in reply
+    assert "Partner:" in reply
+    assert "Total spend: ₹4,000" in reply
+
+
+def test_addon_specific_user_reimbursable_and_non_reimbursable(tmp_path, sent):
+    outbox, _ = sent
+    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
+
+    # Specific reimbursable user
+    bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon mom"}
+    )
+    assert "Hi Amma, credit card spend summary:" in outbox[-1]["text"]
+
+    # Specific non-reimbursable user
+    bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon partner"}
+    )
+    assert "Partner Spend Summary:" in outbox[-1]["text"]
+    assert "Total spend: ₹4,000" in outbox[-1]["text"]
+
+
+def test_addon_unknown_user_suggests_available(tmp_path, sent):
+    outbox, _ = sent
+    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
+    bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon nonexistent"}
+    )
+    reply = outbox[-1]["text"]
+    assert "Unknown add-on user 'nonexistent'" in reply
+    assert "Available add-on users: Mom, Partner" in reply
+    assert "/addon all" in reply
+
+
+def test_help_mentions_addon(tmp_path, sent):
+    outbox, _ = sent
+    bot, _ = make_bot(tmp_path)
+    bot.process_message({"chat": {"id": -100123}, "from": {"id": 111}, "text": "/help"})
+    reply = outbox[-1]["text"]
+    assert "/addon" in reply
+    assert "/addon all" in reply

@@ -1863,3 +1863,124 @@ def test_partial_retry_through_matcher_preserves_repeated_identical_rows(
         assert "_pre_consumed" not in booked_day2[0]
         assert "_source" not in booked_day2[0]
         assert cache["f_atm"] == "2026-07-31"
+
+
+def test_run_normal_mode_triggers_telegram_notification_on_addon_swipes(
+    transaction_processor, mock_data_source, mocker
+):
+    """When newly added CC transactions contain add-on swipes, send_telegram_addon_notification
+    is invoked with the combined history."""
+    import main as gajana_main
+    from src.categorizer import Categorizer
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", [])
+    mock_data_source.get_transaction_log_data.return_value = []
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_addon", name="cc-hdfc-test-2026-08.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-08-15",
+                    "description": "PHARMACY",
+                    "debit": "1500.00",
+                    "credit": "",
+                    "cardholder": "PATRICIA MORGAN",
+                }
+            ],
+            True,
+        ),
+    )
+    transaction_processor.addon_cards = {
+        "primary_cardholders": ["ALEX MORGAN"],
+        "users": [
+            {
+                "id": "mom",
+                "label": "Mom",
+                "greeting_name": "Amma",
+                "cardholder_patterns": ["PATRICIA MORGAN"],
+                "reimburse": True,
+            }
+        ],
+    }
+
+    mock_notify = mocker.patch("src.addon_tracker.send_telegram_addon_notification")
+    categorizer = Categorizer(
+        matchers_file="data/matchers.example.json",
+        llm=None,
+        addon_cards=transaction_processor.addon_cards,
+    )
+
+    errors = gajana_main.run_normal_mode(transaction_processor, categorizer)
+    assert errors == []
+    assert mock_notify.call_count == 1
+    call_kwargs = mock_notify.call_args.kwargs
+    assert len(call_kwargs["newly_added_cc"]) == 1
+    assert "addon:Mom" in call_kwargs["newly_added_cc"][0]["remarks"]
+
+
+def test_run_normal_mode_does_not_fail_if_telegram_notification_raises(
+    transaction_processor, mock_data_source, mocker
+):
+    """If send_telegram_addon_notification raises (e.g. Telegram 500 or network timeout),
+    run_normal_mode catches it, logs a warning, and finishes cleanly."""
+    import main as gajana_main
+    from src.categorizer import Categorizer
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", [])
+    mock_data_source.get_transaction_log_data.return_value = []
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_addon_err", name="cc-hdfc-test-2026-08.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-08-15",
+                    "description": "PHARMACY",
+                    "debit": "1500.00",
+                    "credit": "",
+                    "cardholder": "PATRICIA MORGAN",
+                }
+            ],
+            True,
+        ),
+    )
+    transaction_processor.addon_cards = {
+        "primary_cardholders": ["ALEX MORGAN"],
+        "users": [
+            {
+                "id": "mom",
+                "label": "Mom",
+                "cardholder_patterns": ["PATRICIA MORGAN"],
+                "reimburse": True,
+            }
+        ],
+    }
+
+    mocker.patch(
+        "src.addon_tracker.send_telegram_addon_notification",
+        side_effect=RuntimeError("Telegram 500 Outage"),
+    )
+    categorizer = Categorizer(
+        matchers_file="data/matchers.example.json",
+        llm=None,
+        addon_cards=transaction_processor.addon_cards,
+    )
+
+    errors = gajana_main.run_normal_mode(transaction_processor, categorizer)
+    # The statement booking succeeded cleanly; telegram error was logged as warning and did not fail run_normal_mode!
+    assert errors == []

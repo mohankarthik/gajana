@@ -10,7 +10,9 @@ from typing import Any, Hashable, List, Optional, Tuple
 
 import pandas as pd
 
+from src.addon_tracker import resolve_cardholder_tag
 from src.constants import (
+    ADDON_CARDS,
     BANK_ACCOUNTS,
     CC_ACCOUNTS,
     DEFAULT_CATEGORY,
@@ -42,8 +44,13 @@ class TransactionProcessor:
     interpreting filenames, and preparing data for storage.
     """
 
-    def __init__(self, data_source: DataSourceInterface):
+    def __init__(
+        self,
+        data_source: DataSourceInterface,
+        addon_cards: Optional[dict[str, Any]] = None,
+    ):
         self.data_source = data_source
+        self.addon_cards = addon_cards if addon_cards is not None else ADDON_CARDS
         self.quarantined_files: dict[str, int] = {}
         self.review_write_failed_files: dict[str, int] = {}
         self._soft_flagged_files: set[str] = set()
@@ -207,6 +214,7 @@ class TransactionProcessor:
                         "description": r.description,
                         "debit": f"{-r.amount:.2f}" if r.amount < 0 else "",
                         "credit": f"{r.amount:.2f}" if r.amount >= 0 else "",
+                        "cardholder": r.cardholder or "",
                     }
                     for r in st.rows
                 ]
@@ -741,6 +749,25 @@ class TransactionProcessor:
                     )
                     if passed_txns:
                         df = pd.DataFrame(passed_txns)
+                        if "cardholder" in df.columns:
+
+                            def _apply_cardholder_tag(row: pd.Series) -> str:
+                                ch = row.get("cardholder")
+                                tag = resolve_cardholder_tag(ch, self.addon_cards)
+                                existing_rem = row.get("remarks")
+                                if (
+                                    existing_rem is not None
+                                    and not pd.isna(existing_rem)
+                                    and str(existing_rem).strip()
+                                ):
+                                    cur = str(existing_rem).strip()
+                                    if tag and tag not in cur:
+                                        return f"{cur}; {tag}"
+                                    return cur
+                                return tag or ""
+
+                            df["remarks"] = df.apply(_apply_cardholder_tag, axis=1)
+
                         df.replace("", pd.NA, inplace=True)
                         # Parse the verbatim date tokens deterministically with
                         # the account's own formats (LLM no longer reformats).
@@ -757,6 +784,7 @@ class TransactionProcessor:
                                 "description": "description",
                                 "debit": "debit",
                                 "credit": "credit",
+                                "remarks": "remarks",
                             },
                             "date_formats": pdf_date_formats,
                         }

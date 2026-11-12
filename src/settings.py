@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -44,3 +45,4 @@ BANK_ACCOUNTS: list[str] = _s["bank_accounts"]
 
 BANK_TRANSACTIONS_FULL_RANGE = f"{BANK_TRANSACTIONS_SHEET_NAME}!{_BANK_DATA_RANGE}"
 CC_TRANSACTIONS_FULL_RANGE = f"{CC_TRANSACTIONS_SHEET_NAME}!{_CC_DATA_RANGE}"
+ADDON_CARDS: dict[str, Any] = _s.get("addon_cards", {})

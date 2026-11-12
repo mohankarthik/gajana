@@ -23,6 +23,14 @@ from typing import Any, Hashable, Optional
 from src.category_index import CategoryIndex
 from src.constants import DEFAULT_CATEGORY, MATCHERS_FILE_PATH
 from src.llm_categorizer import LLMCategorizer
+from src.settings import ADDON_CARDS
+from src.addon_tracker import (
+    is_reimbursable_addon_row,
+    match_addon_repayment,
+    parse_addon_repay_tag,
+    parse_addon_tag,
+    parse_addon_config,
+)
 from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
@@ -32,7 +40,7 @@ LOWCONF_REMARK = "REVIEW: low-confidence auto-category"
 
 
 def _flag_remark(txn: dict[Hashable, Any], remark: str) -> None:
-    """Set a review remark only if the txn has no existing remark.
+    """Set a review remark only if the txn has no existing remark (preserving addon tags).
 
     Empty sheet cells arrive as float('nan'); treat those (and None) as empty so
     the tag is not silently suppressed by a NaN remark.
@@ -40,8 +48,16 @@ def _flag_remark(txn: dict[Hashable, Any], remark: str) -> None:
     cur = txn.get("remarks", "")
     if cur is None or (isinstance(cur, float) and math.isnan(cur)):
         cur = ""
-    if not str(cur).strip():
+    cur_str = str(cur).strip()
+    if not cur_str:
         txn["remarks"] = remark
+        return
+    if remark in cur_str:
+        return
+    if cur_str.lower().startswith("addon:") or cur_str.lower().startswith(
+        "addon-repay:"
+    ):
+        txn["remarks"] = f"{cur_str}; {remark}"
 
 
 class Categorizer:
@@ -61,6 +77,7 @@ class Categorizer:
         matchers_file: str = MATCHERS_FILE_PATH,
         index: Optional[CategoryIndex] = None,
         llm: Optional[LLMCategorizer] = None,
+        addon_cards: Optional[dict[str, Any]] = None,
     ) -> None:
         """Constructor.
 
@@ -68,10 +85,13 @@ class Categorizer:
             matchers_file: Path to the matchers JSON. Defaults to MATCHERS_FILE_PATH.
             index: Pre-built CategoryIndex (lookup + fuzzy). None disables those layers.
             llm: LLMCategorizer for novel-merchant fallback. None disables that layer.
+            addon_cards: Add-on cards configuration. Defaults to ADDON_CARDS.
         """
         self.matchers: list[dict[str, Any]] = []
         self.index = index
         self.llm = llm
+        self.addon_cards = addon_cards if addon_cards is not None else ADDON_CARDS
+        self.addon_primaries, self.addon_users = parse_addon_config(self.addon_cards)
         self.allowed_categories: list[str] = []
         self.examples: dict[str, list[str]] = {}
         try:
@@ -107,10 +127,15 @@ class Categorizer:
         precomputes few-shot examples so the LLM layer is constrained to known
         categories.
         """
-        self.index = CategoryIndex().build(historical_txns)
+        filtered_txns = [
+            t
+            for t in historical_txns
+            if not is_reimbursable_addon_row(t, self.addon_cards)
+        ]
+        self.index = CategoryIndex().build(filtered_txns)
 
         cats: set[str] = set()
-        for txn in historical_txns:
+        for txn in filtered_txns:
             c = txn.get("category")
             if c and c != DEFAULT_CATEGORY:
                 cats.add(str(c))
@@ -120,7 +145,7 @@ class Categorizer:
                 cats.add(str(c))
         self.allowed_categories = sorted(cats)
         self.examples = LLMCategorizer.build_examples(
-            historical_txns, self.allowed_categories
+            filtered_txns, self.allowed_categories
         )
 
         if enable_llm and self.llm is None:
@@ -222,6 +247,48 @@ class Categorizer:
                 log_and_exit(
                     logger, f"Could not determine debit/credit for txn index {i}."
                 )
+
+            # Layer 0: Addon card reimbursable swipes and auto-matched bank UPI repayments.
+            addon_handled = False
+            is_cc = str(txn.get("account", "")).startswith("cc-")
+            is_bank = str(txn.get("account", "")).startswith("bank-")
+
+            # Rule 0a: Reimbursable CC add-on swipes/refunds
+            if is_cc:
+                tag = parse_addon_tag(txn.get("remarks"))
+                if tag:
+                    matched_user = None
+                    for u in self.addon_users:
+                        if (
+                            u.label.lower() == tag.lower()
+                            or u.id.lower() == tag.lower()
+                        ):
+                            matched_user = u
+                            break
+                    if matched_user and matched_user.reimburse:
+                        txn["category"] = matched_user.reimburse_category
+                        sources["addon"] = sources.get("addon", 0) + 1
+                        addon_handled = True
+
+            # Rule 0b: Auto-matched Bank UPI repayments
+            elif is_bank and not is_debit:
+                matched_user = match_addon_repayment(txn, self.addon_users)
+                if matched_user:
+                    txn["category"] = matched_user.reimburse_category
+                    cur_repay = parse_addon_repay_tag(txn.get("remarks"))
+                    if not cur_repay:
+                        cur_rem = str(txn.get("remarks", "")).strip()
+                        if cur_rem and not cur_rem.startswith("addon-repay:"):
+                            txn["remarks"] = (
+                                f"addon-repay:{matched_user.label}; {cur_rem}"
+                            )
+                        else:
+                            txn["remarks"] = f"addon-repay:{matched_user.label}"
+                    sources["addon_repay"] = sources.get("addon_repay", 0) + 1
+                    addon_handled = True
+
+            if addon_handled:
+                continue
 
             # Layer 1+3: lookup (exact + consensus fuzzy) computed together.
             lk_cat, _conf, lk_src = (None, 0.0, None)

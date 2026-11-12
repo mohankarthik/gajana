@@ -79,6 +79,9 @@ Return a JSON object with two keys: "transactions" and "summary".
   string if no debit occurred. No currency symbols or commas.
 - "credit": The incoming amount (deposit/credit) copied verbatim. Use an empty
   string if no credit occurred. No currency symbols or commas.
+- "cardholder": Optional cardholder name. If a credit card statement groups
+  transactions under a cardholder / add-on cardholder name subheader, copy that
+  cardholder name verbatim; otherwise empty string "".
 
 "summary": the statement's OWN printed totals, READ from its summary/total
 section — do NOT compute or sum the transactions yourself; copy the figures the

@@ -7,6 +7,7 @@ import os
 import re
 
 from src.settings import (  # re-exported for backward compat
+    ADDON_CARDS,
     BANK_ACCOUNTS,
     BANK_TRANSACTIONS_FULL_RANGE,
     BANK_TRANSACTIONS_SHEET_NAME,
@@ -20,6 +21,7 @@ from src.settings import (  # re-exported for backward compat
 from src.utils import log_and_exit
 
 __all__ = [
+    "ADDON_CARDS",
     "BANK_ACCOUNTS",
     "BANK_TRANSACTIONS_FULL_RANGE",
     "BANK_TRANSACTIONS_SHEET_NAME",

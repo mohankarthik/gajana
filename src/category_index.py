@@ -81,13 +81,20 @@ class CategoryIndex:
         """Number of distinct (description, sign) keys in the exact table."""
         return len(self._exact)
 
-    def build(self, historical_txns: list[dict[Hashable, Any]]) -> "CategoryIndex":
+    def build(
+        self,
+        historical_txns: list[dict[Hashable, Any]],
+        addon_cards: Optional[dict[str, Any]] = None,
+    ) -> "CategoryIndex":
         """Populate the index from labeled history.
 
         Only transactions with a usable category and parseable amount are kept.
         Rows whose category is falsy or ``Uncategorized`` are skipped so the
-        table never learns the default label.
+        table never learns the default label. Reimbursable add-on card purchases
+        and repayments are also skipped so household merchants are not learned
+        as Transfer.
         """
+        from src.addon_tracker import is_reimbursable_addon_row
         from src.constants import DEFAULT_CATEGORY
 
         self._reset()
@@ -95,6 +102,8 @@ class CategoryIndex:
         for txn in historical_txns:
             cat = txn.get("category")
             if not cat or cat == DEFAULT_CATEGORY:
+                continue
+            if is_reimbursable_addon_row(txn, addon_cards):
                 continue
             desc = txn.get("description")
             s = _sign(txn.get("amount"))

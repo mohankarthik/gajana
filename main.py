@@ -202,6 +202,10 @@ def run_normal_mode(
     processor.quarantined_files.clear()
     processor.review_write_failed_files.clear()
     all_new_txns_added_count = 0
+    added_by_type: dict[str, list[dict[Hashable, Any]]] = {
+        "bank": [],
+        "cc": [],
+    }
     errors: list[str] = []
 
     # Fetch existing history for both account types up front and build the
@@ -237,6 +241,7 @@ def run_normal_mode(
                 processor.add_new_transactions_to_log(categorized_txns, acc_type)
                 processor.commit_statement_progress(acc_type)
                 all_new_txns_added_count += len(categorized_txns)
+                added_by_type[acc_type].extend(categorized_txns)
                 # Bank cash movements (ATM withdrawals, cash deposits) mirror
                 # into the shared Cash Transactions ledger. No-op for cc.
                 if acc_type == "bank":
@@ -250,6 +255,25 @@ def run_normal_mode(
                 f"Error processing {acc_type} transactions in normal mode: {e}",
                 exc_info=e,
             )
+
+    # Send Telegram notification if new CC add-on transactions were booked
+    if any(
+        "addon:" in str(t.get("remarks", "")).lower()
+        for t in added_by_type.get("cc", [])
+    ):
+        try:
+            from src.addon_tracker import send_telegram_addon_notification
+
+            all_cc = old_by_type.get("cc", []) + added_by_type.get("cc", [])
+            all_bank = old_by_type.get("bank", []) + added_by_type.get("bank", [])
+            send_telegram_addon_notification(
+                all_cc=all_cc,
+                all_bank=all_bank,
+                newly_added_cc=added_by_type.get("cc", []),
+                addon_config=getattr(processor, "addon_cards", None),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send add-on Telegram notification: {e}")
 
     logger.info(
         f"Normal mode finished. Added {all_new_txns_added_count} new transactions."

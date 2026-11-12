@@ -151,6 +151,7 @@ class StatementRow:
     balance: Optional[float] = None
     stated: Optional[float] = None
     page: int = 0
+    cardholder: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -604,10 +605,16 @@ def extract_axis_card(pages: Sequence[str]) -> ExtractedStatement:
     """Axis credit card: every amount is followed by an explicit Dr/Cr marker."""
     st = ExtractedStatement(kind="axis-cc", family="card")
     amount_x: Optional[int] = None
+    current_cardholder: Optional[str] = None
     for text in pages:
         lines = text.split("\n")
         for i, line in enumerate(lines):
             norm = _norm(line)
+            cardholder_match = re.search(
+                r"Card No:\s*\S+\s+Name\s+([A-Z][A-Z .]+)", norm, re.I
+            )
+            if cardholder_match:
+                current_cardholder = _norm(cardholder_match.group(1))
             if "AMOUNT (Rs.)" in line:
                 amount_x = line.find("AMOUNT (Rs.)")
                 continue
@@ -655,6 +662,7 @@ def extract_axis_card(pages: Sequence[str]) -> ExtractedStatement:
                     date=_to_date(date_match),
                     description=_norm(line[date_match.end() : amount.start()]),
                     amount=-value if amount.group(2) == "Dr" else value,
+                    cardholder=current_cardholder,
                 )
             )
     _apply_card_summary(st)
@@ -674,16 +682,104 @@ def _hdfc_card_period_from_statement_date(norm: str) -> Optional[Tuple[str, str]
     )
 
 
+_HEADER_EXCLUDE_WORDS = {
+    "DATE",
+    "DOMESTIC",
+    "INTERNATIONAL",
+    "STATEMENT",
+    "SUMMARY",
+    "PREVIOUS",
+    "PAYMENTS",
+    "PURCHASES",
+    "FINANCE",
+    "OPENING",
+    "CLOSING",
+    "TOTAL",
+    "MINIMUM",
+    "REWARD",
+    "IMPORTANT",
+    "ELIGIBLE",
+    "TRANSACTIONS",
+    "DETAILS",
+    "DUE DATE",
+    "COMPANIES",
+}
+
+_HDFC_CARD_DATE_RE = re.compile(
+    r"^\s*(?:null\s+)?(\d{2})/(\d{2})/(\d{4})\s*\|?\s*(\d{2}:\d{2}(?::\d{2})?)?"
+)
+
+
+def _find_next_content_line(
+    pages: Sequence[str], page_idx: int, line_idx: int
+) -> Optional[str]:
+    cur_lines = pages[page_idx].split("\n")
+    for j in range(line_idx, len(cur_lines)):
+        line = cur_lines[j].strip()
+        if not line:
+            continue
+        norm_l = _norm(line)
+        words = set(re.findall(r"[A-Z]+", norm_l.upper()))
+        if words.issubset(_HEADER_EXCLUDE_WORDS):
+            continue
+        return line
+    for p in range(page_idx + 1, len(pages)):
+        p_lines = pages[p].split("\n")
+        for line in p_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            norm_l = _norm(stripped)
+            words = set(re.findall(r"[A-Z]+", norm_l.upper()))
+            if words.issubset(_HEADER_EXCLUDE_WORDS):
+                continue
+            return stripped
+    return None
+
+
 def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
     """HDFC credit card, both generations: credits carry a bare ``Cr``."""
     st = ExtractedStatement(kind="hdfc-cc", family="card")
     stopped = False
-    for text in pages:
+    in_txns = False
+    current_cardholder: Optional[str] = None
+
+    for page_idx, text in enumerate(pages):
         if stopped:
             break
         lines = text.split("\n")
         for i, line in enumerate(lines):
             norm = _norm(line)
+
+            # Check transaction date lines BEFORE section-stop headers so
+            # descriptions containing "SMARTBUY" never prematurely stop extraction.
+            date_match = _HDFC_CARD_DATE_RE.match(line)
+            if date_match:
+                tail = line[date_match.end() :]
+                found = list(HDFC_CARD_AMOUNT_RE.finditer(tail))
+                if not found:
+                    st.warnings.append(f"{line[:40]} no amount")
+                    continue
+                amount = found[-1]
+                value = _num(amount.group(2))
+                is_credit = bool(amount.group(1) or amount.group(3))
+                raw_desc = tail[: amount.start()]
+                raw_desc = re.sub(r"^\s*EMI\s{2,}", "", raw_desc)
+                raw_desc = re.sub(r"\s{2,}[+-]\s*\d+\s*$", "", raw_desc)
+                st.rows.append(
+                    StatementRow(
+                        date=datetime.datetime(
+                            int(date_match.group(3)),
+                            int(date_match.group(2)),
+                            int(date_match.group(1)),
+                        ),
+                        description=_norm(raw_desc),
+                        amount=value if is_credit else -value,
+                        cardholder=current_cardholder,
+                    )
+                )
+                continue
+
             if re.search(
                 r"Rewards Program Points Summary|GST Summary|Cash Back Summary",
                 norm,
@@ -722,33 +818,39 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                         st.charges = _num(values[3])
                         break
                 continue
-            date_match = re.match(
-                r"\s*(\d{2})/(\d{2})/(\d{4})\s*\|?\s*(\d{2}:\d{2})?", line
-            )
-            if not date_match:
+
+            if re.match(
+                r"^(?:Reward Points Summary|SmartBuy\s*/|Important Information|"
+                r"Terms and Conditions|Your Card Control Setting|GST Summary)\b",
+                norm,
+                re.I,
+            ):
+                in_txns = False
+                current_cardholder = None
                 continue
-            tail = line[date_match.end() :]
-            found = list(HDFC_CARD_AMOUNT_RE.finditer(tail))
-            if not found:
-                st.warnings.append(f"{line[:40]} no amount")
+
+            if re.search(r"\b(?:Domestic|International)\s+Transactions\b", norm, re.I):
+                in_txns = True
+                current_cardholder = None
                 continue
-            amount = found[-1]
-            value = _num(amount.group(2))
-            is_credit = bool(amount.group(1) or amount.group(3))
-            raw_desc = tail[: amount.start()]
-            raw_desc = re.sub(r"^\s*EMI\s{2,}", "", raw_desc)
-            raw_desc = re.sub(r"\s{2,}[+-]\s*\d+\s*$", "", raw_desc)
-            st.rows.append(
-                StatementRow(
-                    date=datetime.datetime(
-                        int(date_match.group(3)),
-                        int(date_match.group(2)),
-                        int(date_match.group(1)),
-                    ),
-                    description=_norm(raw_desc),
-                    amount=value if is_credit else -value,
+
+            if in_txns:
+                ckyc_match = re.match(
+                    r"^([A-Z][A-Z .]+?)\s*\[CKYC ID\s*:\s*[^\]]+\]$", norm
                 )
-            )
+                if ckyc_match:
+                    current_cardholder = _norm(ckyc_match.group(1))
+                    continue
+                bare_match = re.match(r"^([A-Z]+(?:\s+(?:[A-Z]\.?|[A-Z]{2,}))+)$", norm)
+                if bare_match:
+                    words = set(re.findall(r"[A-Z]+", norm.upper()))
+                    if not words.intersection(_HEADER_EXCLUDE_WORDS):
+                        found_next = _find_next_content_line(pages, page_idx, i + 1)
+                        if found_next and re.search(
+                            r"^\s*(?:null\s+)?\d{2}/\d{2}/\d{4}\b", found_next
+                        ):
+                            current_cardholder = _norm(bare_match.group(1))
+                            continue
     _apply_card_summary(st)
     return st
 
