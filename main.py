@@ -262,7 +262,10 @@ def run_normal_mode(
         for t in added_by_type.get("cc", [])
     ):
         try:
-            from src.addon_tracker import send_telegram_addon_notification
+            from src.addon_tracker import (
+                redact_telegram_token,
+                send_telegram_addon_notification,
+            )
 
             all_cc = old_by_type.get("cc", []) + added_by_type.get("cc", [])
             all_bank = old_by_type.get("bank", []) + added_by_type.get("bank", [])
@@ -273,7 +276,9 @@ def run_normal_mode(
                 addon_config=getattr(processor, "addon_cards", None),
             )
         except Exception as e:
-            logger.warning(f"Failed to send add-on Telegram notification: {e}")
+            logger.warning(
+                f"Failed to send add-on Telegram notification: {redact_telegram_token(e)}"
+            )
 
     logger.info(
         f"Normal mode finished. Added {all_new_txns_added_count} new transactions."

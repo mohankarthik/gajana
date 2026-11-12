@@ -4,13 +4,12 @@ from __future__ import annotations
 from collections import Counter
 import datetime
 import logging
-import math
 from operator import itemgetter
 from typing import Any, Hashable, List, Optional, Tuple
 
 import pandas as pd
 
-from src.addon_tracker import resolve_cardholder_tag
+from src.addon_tracker import _clean_remark_str, resolve_cardholder_tag
 from src.constants import (
     ADDON_CARDS,
     BANK_ACCOUNTS,
@@ -523,6 +522,8 @@ class TransactionProcessor:
         final_df = pd.DataFrame(final_cols_data)
         # Ensure correct column order and select only these columns
         final_df = final_df[INTERNAL_TXN_KEYS]
+        if "remarks" in final_df.columns:
+            final_df["remarks"] = final_df["remarks"].apply(_clean_remark_str)
 
         logger.debug(f"Standardized DataFrame shape: {final_df.shape}")
         return final_df if not final_df.empty else None
@@ -749,26 +750,22 @@ class TransactionProcessor:
                     )
                     if passed_txns:
                         df = pd.DataFrame(passed_txns)
+                        df.replace("", pd.NA, inplace=True)
                         if "cardholder" in df.columns:
 
                             def _apply_cardholder_tag(row: pd.Series) -> str:
                                 ch = row.get("cardholder")
                                 tag = resolve_cardholder_tag(ch, self.addon_cards)
-                                existing_rem = row.get("remarks")
-                                if (
-                                    existing_rem is not None
-                                    and not pd.isna(existing_rem)
-                                    and str(existing_rem).strip()
-                                ):
-                                    cur = str(existing_rem).strip()
-                                    if tag and tag not in cur:
-                                        return f"{cur}; {tag}"
-                                    return cur
+                                existing_rem = _clean_remark_str(row.get("remarks"))
+                                if existing_rem:
+                                    if tag and tag not in existing_rem:
+                                        return f"{existing_rem}; {tag}"
+                                    return existing_rem
                                 return tag or ""
 
                             df["remarks"] = df.apply(_apply_cardholder_tag, axis=1)
-
-                        df.replace("", pd.NA, inplace=True)
+                        else:
+                            df["remarks"] = ""
                         # Parse the verbatim date tokens deterministically with
                         # the account's own formats (LLM no longer reformats).
                         # Always allow ISO as a fallback: it is unambiguous, so
@@ -1153,14 +1150,19 @@ class TransactionProcessor:
 
     @staticmethod
     def _clean_cell(value: Any, default: Any = "") -> Any:
-        """Coerce None / NaN to a JSON-safe default.
+        """Coerce None / NaN / pd.NA to a JSON-safe default.
 
-        Empty sheet cells come back from pandas as float('nan'); left as-is they
-        serialize to a literal ``NaN`` token and the Sheets API rejects the
-        whole payload ("Invalid JSON payload ... Unexpected token").
+        Empty sheet cells come back from pandas as float('nan') or pd.NA; left as-is they
+        serialize to a literal ``NaN`` token or raise TypeError on pd.NA, and the Sheets
+        API rejects the whole payload.
         """
-        if value is None or (isinstance(value, float) and math.isnan(value)):
+        if value is None:
             return default
+        try:
+            if bool(pd.isna(value)):
+                return default
+        except (TypeError, ValueError):
+            pass
         return value
 
     def _format_txns_for_storage(self, txns: list[dict]) -> List[List[Any]]:

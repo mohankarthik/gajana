@@ -5,16 +5,19 @@ from __future__ import annotations
 import datetime
 
 from src.addon_tracker import (
+    _clean_remark_str,
     compute_addon_report,
     format_all_addons_overview,
     format_non_reimbursable_user_message,
     format_reimbursable_user_message,
     format_unconfigured_user_message,
+    is_card_bill_payment_or_cashback,
     is_reimbursable_addon_row,
     match_addon_repayment,
     parse_addon_config,
     parse_addon_repay_tag,
     parse_addon_tag,
+    redact_telegram_token,
     resolve_cardholder_tag,
     send_telegram_addon_notification,
 )
@@ -567,3 +570,144 @@ def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
     )
     assert "Hi Amma, credit card spend summary:" in outbox[1]["text"]
     assert "• 10 Aug – PHARMACY: ₹2,500" in outbox[1]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Card-level Bill Payment vs Merchant Refund Tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_card_bill_payment_or_cashback():
+    # True for bill payment / card cashback credit descriptions (amount > 0)
+    assert is_card_bill_payment_or_cashback("PAYMENT RECEIVED", 5000.0) is True
+    assert (
+        is_card_bill_payment_or_cashback("CC PAYMENT VIA NETBANKING", 12000.0) is True
+    )
+    assert is_card_bill_payment_or_cashback("AUTOPAY DEBIT", 2000.0) is True
+    assert is_card_bill_payment_or_cashback("BBPS PAYMENT RECEIVED", 1000.0) is True
+    assert is_card_bill_payment_or_cashback("NEFT CREDIT-AXIS", 15000.0) is True
+    assert is_card_bill_payment_or_cashback("GLOBAL VALUE_CASH BACK", 500.0) is True
+    assert is_card_bill_payment_or_cashback("MONTHLY CASHBACK", 250.0) is True
+
+    # False for merchant refunds / reversals (amount > 0)
+    assert is_card_bill_payment_or_cashback("AMAZON REFUND", 1200.0) is False
+    assert is_card_bill_payment_or_cashback("IRCTC REVERSAL", 450.0) is False
+    assert is_card_bill_payment_or_cashback("ACME STORE REFUND", 300.0) is False
+    assert is_card_bill_payment_or_cashback("PHARMACY RETURN", 150.0) is False
+
+    # False for debits (amount <= 0) even if description mentions payment
+    assert is_card_bill_payment_or_cashback("PAYMENT TO VENDOR", -500.0) is False
+
+
+def test_bill_payment_does_not_wipe_out_addon_dues_in_report_or_categorizer(tmp_path):
+    # A statement with Mom purchases + a card-level bill payment tagged addon:Mom
+    # and a merchant refund tagged addon:Mom
+    cc_txns = [
+        {
+            "date": datetime.date(2026, 8, 5),
+            "description": "PHARMACY STORE",
+            "amount": -5000.0,
+            "remarks": "addon:Mom",
+            "account": "cc-hdfc",
+        },
+        {
+            "date": datetime.date(2026, 8, 10),
+            "description": "PAYMENT RECEIVED",
+            "amount": 5000.0,  # Card bill payment
+            "remarks": "addon:Mom",
+            "account": "cc-hdfc",
+        },
+        {
+            "date": datetime.date(2026, 8, 12),
+            "description": "STORE REFUND",
+            "amount": 500.0,  # Legitimate merchant refund
+            "remarks": "addon:Mom",
+            "account": "cc-hdfc",
+        },
+    ]
+
+    # Report check:
+    # 5,000 spend - 500 merchant refund = 4,500 net due (the 5,000 bill payment is EXCLUDED)
+    rep = compute_addon_report(cc_txns, [], SYNTHETIC_ADDON_CONFIG)
+    mom_rep = next(u for u in rep.users if u.user.id == "mom")
+    assert mom_rep.total_spend == 4500.0
+    assert mom_rep.net_due == 4500.0
+    assert len(mom_rep.open_items) == 1
+    assert mom_rep.open_items[0].description == "PHARMACY STORE"
+
+    # Categorizer check:
+    matchers_file = tmp_path / "matchers.json"
+    matchers_file.write_text(
+        '[{"category": "Expense:Medical", "description": ["PHARMACY"]}]'
+    )
+    categorizer = Categorizer(
+        matchers_file=str(matchers_file),
+        addon_cards=SYNTHETIC_ADDON_CONFIG,
+    )
+    txns_copy = [dict(t) for t in cc_txns]
+    categorizer.categorize(txns_copy)
+    # PHARMACY gets Transfer
+    assert txns_copy[0]["category"] == "Transfer"
+    # PAYMENT RECEIVED does NOT get Transfer via Rule 0a
+    assert txns_copy[1]["category"] == DEFAULT_CATEGORY
+    # STORE REFUND does get Transfer (merchant refund reduces dues)
+    assert txns_copy[2]["category"] == "Transfer"
+
+
+# ---------------------------------------------------------------------------
+# Word-Boundary & Token Redaction Tests
+# ---------------------------------------------------------------------------
+
+
+def test_repayment_word_boundary_matching():
+    _, users = parse_addon_config(SYNTHETIC_ADDON_CONFIG)
+
+    # Word-boundary check for name pattern "patricia"
+    txn_exact = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 1000.0,
+        "description": "UPI/CR/123/PATRICIA/PAYMENT",
+    }
+    assert match_addon_repayment(txn_exact, users) is not None
+
+    # Substring in longer word "patrician" MUST NOT match
+    txn_subword = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 1000.0,
+        "description": "UPI/CR/123/PATRICIAN/PAYMENT",
+    }
+    assert match_addon_repayment(txn_subword, users) is None
+
+    # Handle pattern "patricia@okbank" matches
+    txn_handle = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 1000.0,
+        "description": "UPI/CR/123/PATRICIA@OKBANK/PAYMENT",
+    }
+    assert match_addon_repayment(txn_handle, users) is not None
+
+
+def test_redact_telegram_token():
+    raw_url = "https://api.telegram.org/bot123456:SECRET_ABC_xyz-99/sendMessage"
+    redacted = redact_telegram_token(raw_url)
+    assert "SECRET_ABC" not in redacted
+    assert "https://api.telegram.org/bot<REDACTED>/sendMessage" == redacted
+
+    # Safe on non-string / exceptions
+    exc = Exception(f"Failed to post to {raw_url}")
+    redacted_exc = redact_telegram_token(exc)
+    assert "SECRET_ABC" not in redacted_exc
+    assert "bot<REDACTED>" in redacted_exc
+
+
+def test_clean_remark_str():
+    import pandas as pd
+
+    assert _clean_remark_str(None) == ""
+    assert _clean_remark_str("") == ""
+    assert _clean_remark_str("   ") == ""
+    assert _clean_remark_str(pd.NA) == ""
+    assert _clean_remark_str(float("nan")) == ""
+    assert _clean_remark_str("<NA>") == ""
+    assert _clean_remark_str("nan") == ""
+    assert _clean_remark_str("addon:Mom") == "addon:Mom"

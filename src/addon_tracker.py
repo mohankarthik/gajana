@@ -9,12 +9,12 @@ from dataclasses import dataclass, field
 import datetime
 import json
 import logging
-import math
 import os
 import re
 from typing import Any, Hashable, Optional, Sequence
 
 import requests
+import pandas as pd
 
 from src.settings import ADDON_CARDS
 
@@ -29,6 +29,50 @@ _DEFAULT_SETTINGS_PATH = os.path.join(
 _DEFAULT_TOKEN_PATH = os.path.join(
     os.path.dirname(__file__), "..", "secrets", "telegram.json"
 )
+
+_CARD_BILL_PAY_OR_CASHBACK_RE = re.compile(
+    r"\b(?:"
+    r"payment\s+received|cc\s+payment|credit\s*card\s+payment|"
+    r"autopay|auto\s+debit|bbps|billdesk\s+payment|"
+    r"neft\s+credit|imps\s+credit|upi\s+credit|infinity\s+payment|"
+    r"netbanking\s+payment|cash\s*back|cashback"
+    r")\b",
+    re.I,
+)
+
+
+def redact_telegram_token(msg: Any) -> str:
+    """Redacts bot token patterns like bot123456:ABC-DEF from strings or exceptions."""
+    return re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<REDACTED>", str(msg))
+
+
+def _clean_remark_str(val: Any) -> str:
+    """Normalizes a remarks cell value to a clean string, converting None/pd.NA/NaN to ''."""
+    if val is None:
+        return ""
+    try:
+        if bool(pd.isna(val)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    if s.lower() in ("<na>", "nan"):
+        return ""
+    return s
+
+
+def is_card_bill_payment_or_cashback(description: Any, amount: Any) -> bool:
+    """True if an incoming credit (amount > 0) is a card-level bill payment or cashback,
+    not a merchant reversal/refund like AMAZON REFUND or IRCTC REVERSAL.
+    """
+    try:
+        amt = float(amount)
+    except (TypeError, ValueError):
+        return False
+    if amt <= 0:
+        return False
+    desc_clean = re.sub(r"[_\s]+", " ", str(description or ""))
+    return bool(_CARD_BILL_PAY_OR_CASHBACK_RE.search(desc_clean))
 
 
 @dataclass(frozen=True)
@@ -137,12 +181,20 @@ def parse_addon_config(
 
 
 def resolve_cardholder_tag(
-    cardholder: Optional[str], addon_config: Optional[dict[str, Any]] = None
+    cardholder: Any, addon_config: Optional[dict[str, Any]] = None
 ) -> Optional[str]:
     """Resolves raw statement cardholder string to 'addon:<Label>' or None for primary."""
-    if not cardholder:
+    if cardholder is None:
         return None
-    ch = " ".join(str(cardholder).split()).strip()
+    try:
+        if bool(pd.isna(cardholder)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(cardholder).strip()
+    if not s or s.lower() in ("<na>", "nan", "none"):
+        return None
+    ch = " ".join(s.split()).strip()
     if not ch:
         return None
 
@@ -192,23 +244,25 @@ def resolve_cardholder_tag(
     return None
 
 
-def parse_addon_tag(remarks: Optional[str]) -> Optional[str]:
+def parse_addon_tag(remarks: Any) -> Optional[str]:
     """Extracts label from 'addon:<Label>' in remarks (e.g. 'addon:Mom' -> 'Mom').
     Handles combined suffixes like 'addon:Partner; REVIEW: low-confidence'."""
-    if not remarks or (isinstance(remarks, float) and math.isnan(remarks)):
+    rem_str = _clean_remark_str(remarks)
+    if not rem_str:
         return None
-    for part in str(remarks).split(";"):
+    for part in rem_str.split(";"):
         m = re.match(r"^\s*addon:(.+)$", part.strip(), re.I)
         if m:
             return m.group(1).strip()
     return None
 
 
-def parse_addon_repay_tag(remarks: Optional[str]) -> Optional[str]:
+def parse_addon_repay_tag(remarks: Any) -> Optional[str]:
     """Extracts label from 'addon-repay:<Label>' in remarks (e.g. 'addon-repay:Mom' -> 'Mom')."""
-    if not remarks or (isinstance(remarks, float) and math.isnan(remarks)):
+    rem_str = _clean_remark_str(remarks)
+    if not rem_str:
         return None
-    for part in str(remarks).split(";"):
+    for part in rem_str.split(";"):
         m = re.match(r"^\s*addon-repay:(.+)$", part.strip(), re.I)
         if m:
             return m.group(1).strip()
@@ -227,11 +281,7 @@ def match_addon_repayment(
         return None
 
     raw_remarks = txn.get("remarks")
-    rem_str = ""
-    if raw_remarks is not None and not (
-        isinstance(raw_remarks, float) and math.isnan(raw_remarks)
-    ):
-        rem_str = str(raw_remarks).strip()
+    rem_str = _clean_remark_str(raw_remarks)
 
     repay_tag = parse_addon_repay_tag(rem_str)
     desc = str(txn.get("description", "")).lower()
@@ -283,11 +333,19 @@ def match_addon_repayment(
             if not allowed_rem:
                 continue
 
-        # c) description check
+        # c) description check (handles exact handle vs word boundaries for names)
         for pat in user.repayment_patterns:
             p_clean = re.sub(r"\s*@\s*", "@", pat.lower().strip())
-            if p_clean and p_clean in norm_desc:
-                return user
+            if not p_clean:
+                continue
+            if "@" in p_clean:
+                if p_clean in norm_desc:
+                    return user
+            else:
+                if re.search(
+                    rf"(?<![a-z0-9]){re.escape(p_clean)}(?![a-z0-9])", norm_desc
+                ):
+                    return user
 
     return None
 
@@ -296,13 +354,15 @@ def is_reimbursable_addon_row(
     txn: dict[Hashable, Any], addon_config: Optional[dict[str, Any]] = None
 ) -> bool:
     """True if transaction is an add-on swipe or repayment tagged with Transfer/reimburse_category."""
-    rem = txn.get("remarks")
-    if not rem or (isinstance(rem, float) and math.isnan(rem)):
-        return False
-    rem_str = str(rem).strip()
+    rem_str = _clean_remark_str(txn.get("remarks"))
     addon_tag = parse_addon_tag(rem_str)
     repay_tag = parse_addon_repay_tag(rem_str)
     if not addon_tag and not repay_tag:
+        return False
+
+    desc = txn.get("description", "")
+    amt = txn.get("amount", 0.0)
+    if is_card_bill_payment_or_cashback(desc, amt):
         return False
 
     cat = str(txn.get("category", "")).strip()
@@ -357,6 +417,12 @@ def compute_addon_report(
     for txn in cc_txns:
         tag = parse_addon_tag(txn.get("remarks"))
         if not tag:
+            continue
+        try:
+            amt = float(txn.get("amount", 0.0) or 0.0)
+        except (ValueError, TypeError):
+            amt = 0.0
+        if amt > 0 and is_card_bill_payment_or_cashback(txn.get("description"), amt):
             continue
         matched_user = user_by_label.get(tag.lower())
         if matched_user:
@@ -739,7 +805,9 @@ def send_telegram_addon_notification(
     try:
         _send(header_msg)
     except Exception as e:
-        logger.warning(f"Failed to send Telegram header notification: {e}")
+        logger.warning(
+            f"Failed to send Telegram header notification: {redact_telegram_token(e)}"
+        )
         return False
 
     # 5. Send separate clean message for each reimbursable user with new rows
@@ -756,7 +824,7 @@ def send_telegram_addon_notification(
                 _send(msg)
             except Exception as e:
                 logger.warning(
-                    f"Failed to send forwardable add-on message for {tag}: {e}"
+                    f"Failed to send forwardable add-on message for {tag}: {redact_telegram_token(e)}"
                 )
 
     return True

@@ -435,3 +435,22 @@ def test_help_mentions_addon(tmp_path, sent):
     reply = outbox[-1]["text"]
     assert "/addon" in reply
     assert "/addon all" in reply
+
+
+def test_addon_command_handles_data_source_error_gracefully(
+    tmp_path, sent, monkeypatch
+):
+    outbox, _ = sent
+    bot, ds = make_bot(tmp_path)
+
+    def _err(acc):
+        raise RuntimeError("Google Sheets 503 Service Unavailable")
+
+    monkeypatch.setattr(ds, "get_transaction_log_data", _err)
+
+    bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon"}
+    )
+    assert len(outbox) == 1
+    reply = outbox[-1]["text"]
+    assert "Could not fetch add-on spend right now; please try again shortly." in reply

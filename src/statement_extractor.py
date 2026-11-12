@@ -43,6 +43,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pypdf import PdfReader
 
+from src.addon_tracker import is_card_bill_payment_or_cashback
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_PASSWORDS_PATH = os.path.join("secrets", "passwords.json")
@@ -609,12 +611,12 @@ def extract_axis_card(pages: Sequence[str]) -> ExtractedStatement:
     for text in pages:
         lines = text.split("\n")
         for i, line in enumerate(lines):
-            norm = _norm(line)
             cardholder_match = re.search(
-                r"Card No:\s*\S+\s+Name\s+([A-Z][A-Z .]+)", norm, re.I
+                r"Card No:\s*\S+\s+Name\s+([A-Z][A-Z .]+?)(?:\s{2,}|$)", line
             )
             if cardholder_match:
                 current_cardholder = _norm(cardholder_match.group(1))
+            norm = _norm(line)
             if "AMOUNT (Rs.)" in line:
                 amount_x = line.find("AMOUNT (Rs.)")
                 continue
@@ -657,12 +659,18 @@ def extract_axis_card(pages: Sequence[str]) -> ExtractedStatement:
                 continue
             amount = candidates[-1]
             value = _num(amount.group(1))
+            is_credit = amount.group(2) != "Dr"
+            signed_amount = value if is_credit else -value
+            desc_norm = _norm(line[date_match.end() : amount.start()])
+            row_cardholder = current_cardholder
+            if is_credit and is_card_bill_payment_or_cashback(desc_norm, value):
+                row_cardholder = None
             st.rows.append(
                 StatementRow(
                     date=_to_date(date_match),
-                    description=_norm(line[date_match.end() : amount.start()]),
-                    amount=-value if amount.group(2) == "Dr" else value,
-                    cardholder=current_cardholder,
+                    description=desc_norm,
+                    amount=signed_amount,
+                    cardholder=row_cardholder,
                 )
             )
     _apply_card_summary(st)
@@ -701,7 +709,7 @@ _HEADER_EXCLUDE_WORDS = {
     "ELIGIBLE",
     "TRANSACTIONS",
     "DETAILS",
-    "DUE DATE",
+    "DUE",
     "COMPANIES",
 }
 
@@ -766,6 +774,10 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                 raw_desc = tail[: amount.start()]
                 raw_desc = re.sub(r"^\s*EMI\s{2,}", "", raw_desc)
                 raw_desc = re.sub(r"\s{2,}[+-]\s*\d+\s*$", "", raw_desc)
+                desc_norm = _norm(raw_desc)
+                row_cardholder = current_cardholder
+                if is_credit and is_card_bill_payment_or_cashback(desc_norm, value):
+                    row_cardholder = None
                 st.rows.append(
                     StatementRow(
                         date=datetime.datetime(
@@ -773,9 +785,9 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                             int(date_match.group(2)),
                             int(date_match.group(1)),
                         ),
-                        description=_norm(raw_desc),
+                        description=desc_norm,
                         amount=value if is_credit else -value,
-                        cardholder=current_cardholder,
+                        cardholder=row_cardholder,
                     )
                 )
                 continue
@@ -843,6 +855,12 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                     continue
                 bare_match = re.match(r"^([A-Z]+(?:\s+(?:[A-Z]\.?|[A-Z]{2,}))+)$", norm)
                 if bare_match:
+                    # Guard against wrapped description continuation lines:
+                    # If the line immediately above was a dated transaction row,
+                    # this line is a continuation line, not a cardholder subheader.
+                    prev_line = lines[i - 1].strip() if i > 0 else ""
+                    if prev_line and _HDFC_CARD_DATE_RE.search(prev_line):
+                        continue
                     words = set(re.findall(r"[A-Z]+", norm.upper()))
                     if not words.intersection(_HEADER_EXCLUDE_WORDS):
                         found_next = _find_next_content_line(pages, page_idx, i + 1)

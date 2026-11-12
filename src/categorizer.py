@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 from typing import Any, Hashable, Optional
 
@@ -25,6 +24,8 @@ from src.constants import DEFAULT_CATEGORY, MATCHERS_FILE_PATH
 from src.llm_categorizer import LLMCategorizer
 from src.settings import ADDON_CARDS
 from src.addon_tracker import (
+    _clean_remark_str,
+    is_card_bill_payment_or_cashback,
     is_reimbursable_addon_row,
     match_addon_repayment,
     parse_addon_repay_tag,
@@ -42,13 +43,10 @@ LOWCONF_REMARK = "REVIEW: low-confidence auto-category"
 def _flag_remark(txn: dict[Hashable, Any], remark: str) -> None:
     """Set a review remark only if the txn has no existing remark (preserving addon tags).
 
-    Empty sheet cells arrive as float('nan'); treat those (and None) as empty so
-    the tag is not silently suppressed by a NaN remark.
+    Empty sheet cells arrive as float('nan') or pd.NA; treat those (and None) as empty so
+    the tag is not silently suppressed by a NaN/NA remark.
     """
-    cur = txn.get("remarks", "")
-    if cur is None or (isinstance(cur, float) and math.isnan(cur)):
-        cur = ""
-    cur_str = str(cur).strip()
+    cur_str = _clean_remark_str(txn.get("remarks"))
     if not cur_str:
         txn["remarks"] = remark
         return
@@ -256,7 +254,11 @@ class Categorizer:
             # Rule 0a: Reimbursable CC add-on swipes/refunds
             if is_cc:
                 tag = parse_addon_tag(txn.get("remarks"))
-                if tag:
+                amt = float(txn.get("amount", 0.0) or 0.0)
+                desc = txn.get("description", "")
+                if tag and not (
+                    amt > 0 and is_card_bill_payment_or_cashback(desc, amt)
+                ):
                     matched_user = None
                     for u in self.addon_users:
                         if (
@@ -277,7 +279,7 @@ class Categorizer:
                     txn["category"] = matched_user.reimburse_category
                     cur_repay = parse_addon_repay_tag(txn.get("remarks"))
                     if not cur_repay:
-                        cur_rem = str(txn.get("remarks", "")).strip()
+                        cur_rem = _clean_remark_str(txn.get("remarks"))
                         if cur_rem and not cur_rem.startswith("addon-repay:"):
                             txn["remarks"] = (
                                 f"addon-repay:{matched_user.label}; {cur_rem}"

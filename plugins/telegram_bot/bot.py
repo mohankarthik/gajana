@@ -22,6 +22,7 @@ from typing import Any, Hashable, Optional
 
 import requests
 
+from src.addon_tracker import redact_telegram_token
 from src.categorizer import Categorizer
 from src.constants import ADDON_CARDS, DEFAULT_CATEGORY, TRANSACTIONS_SHEET_ID
 
@@ -155,7 +156,7 @@ class TelegramCashBot:
                 timeout=HTTP_TIMEOUT,
             )
         except requests.RequestException as e:
-            logger.warning(f"Failed to send Telegram reply: {e}")
+            logger.warning(f"Failed to send Telegram reply: {redact_telegram_token(e)}")
 
     # --- State ---------------------------------------------------------------
     def _load_state(self) -> dict[str, Any]:
@@ -288,67 +289,76 @@ class TelegramCashBot:
             self.send_message(chat_id, "Could not undo (row not found).")
 
     def _handle_addon(self, chat_id: int, arg: str = "") -> None:
-        from src.addon_tracker import (
-            compute_addon_report,
-            format_all_addons_overview,
-            format_non_reimbursable_user_message,
-            format_reimbursable_user_message,
-            format_unconfigured_user_message,
-        )
-        from src.transaction_processor import TransactionProcessor
+        try:
+            from src.addon_tracker import (
+                compute_addon_report,
+                format_all_addons_overview,
+                format_non_reimbursable_user_message,
+                format_reimbursable_user_message,
+                format_unconfigured_user_message,
+            )
+            from src.transaction_processor import TransactionProcessor
 
-        processor = TransactionProcessor(self.ds, addon_cards=self.addon_cards)
-        cc_txns = processor.get_old_transactions("cc")
-        bank_txns = processor.get_old_transactions("bank")
-        report = compute_addon_report(cc_txns, bank_txns, self.addon_cards)
+            processor = TransactionProcessor(self.ds, addon_cards=self.addon_cards)
+            cc_txns = processor.get_old_transactions("cc")
+            bank_txns = processor.get_old_transactions("bank")
+            report = compute_addon_report(cc_txns, bank_txns, self.addon_cards)
 
-        arg_clean = arg.strip().lower()
+            arg_clean = arg.strip().lower()
 
-        if arg_clean == "all":
-            self.send_message(chat_id, format_all_addons_overview(report))
-            return
-
-        reimbursable_users = [u for u in report.users if u.user.reimburse]
-
-        if not arg_clean:
-            if not reimbursable_users:
+            if arg_clean == "all":
                 self.send_message(chat_id, format_all_addons_overview(report))
                 return
-            for u_rep in reimbursable_users:
-                self.send_message(chat_id, format_reimbursable_user_message(u_rep))
-            return
 
-        # Specific user requested
-        for u_rep in report.users:
-            u = u_rep.user
-            candidates = [
-                u.id.lower(),
-                u.label.lower(),
-                u.greeting_name.lower(),
-            ] + [p.lower() for p in u.cardholder_patterns]
-            if arg_clean in candidates:
-                if u.reimburse:
+            reimbursable_users = [u for u in report.users if u.user.reimburse]
+
+            if not arg_clean:
+                if not reimbursable_users:
+                    self.send_message(chat_id, format_all_addons_overview(report))
+                    return
+                for u_rep in reimbursable_users:
                     self.send_message(chat_id, format_reimbursable_user_message(u_rep))
-                else:
-                    self.send_message(
-                        chat_id, format_non_reimbursable_user_message(u_rep)
-                    )
                 return
 
-        for unconf in report.unconfigured_users:
-            if arg_clean == unconf.label.lower():
-                self.send_message(chat_id, format_unconfigured_user_message(unconf))
-                return
+            # Specific user requested
+            for u_rep in report.users:
+                u = u_rep.user
+                candidates = [
+                    u.id.lower(),
+                    u.label.lower(),
+                    u.greeting_name.lower(),
+                ] + [p.lower() for p in u.cardholder_patterns]
+                if arg_clean in candidates:
+                    if u.reimburse:
+                        self.send_message(
+                            chat_id, format_reimbursable_user_message(u_rep)
+                        )
+                    else:
+                        self.send_message(
+                            chat_id, format_non_reimbursable_user_message(u_rep)
+                        )
+                    return
 
-        available = [u.user.label for u in report.users] + [
-            u.label for u in report.unconfigured_users
-        ]
-        names_str = ", ".join(available) if available else "none"
-        self.send_message(
-            chat_id,
-            f"Unknown add-on user '{arg.strip()}'. Available add-on users: {names_str}. "
-            "Use `/addon all` for full overview.",
-        )
+            for unconf in report.unconfigured_users:
+                if arg_clean == unconf.label.lower():
+                    self.send_message(chat_id, format_unconfigured_user_message(unconf))
+                    return
+
+            available = [u.user.label for u in report.users] + [
+                u.label for u in report.unconfigured_users
+            ]
+            names_str = ", ".join(available) if available else "none"
+            self.send_message(
+                chat_id,
+                f"Unknown add-on user '{arg.strip()}'. Available add-on users: {names_str}. "
+                "Use `/addon all` for full overview.",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to handle /addon: {redact_telegram_token(e)}")
+            self.send_message(
+                chat_id,
+                "Could not fetch add-on spend right now; please try again shortly.",
+            )
 
     def _handle_entry(
         self, chat_id: int, user_id: int, text: str, categorizer: Categorizer

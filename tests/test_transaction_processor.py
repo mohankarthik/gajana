@@ -1984,3 +1984,93 @@ def test_run_normal_mode_does_not_fail_if_telegram_notification_raises(
     errors = gajana_main.run_normal_mode(transaction_processor, categorizer)
     # The statement booking succeeded cleanly; telegram error was logged as warning and did not fail run_normal_mode!
     assert errors == []
+
+
+def test_primary_and_addon_rows_produce_json_serializable_remarks_without_pd_na(
+    transaction_processor, mock_data_source, mocker
+):
+    """Primary rows (empty remarks) and add-on rows produce clean str remarks,
+    never pd.NA, so json.dumps succeeds and Review remarks are not suppressed."""
+    import json
+    from src.categorizer import Categorizer
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.get_transaction_log_data.return_value = []
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_pdf", name="cc-hdfc-test-2026-08.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-08-10",
+                    "description": "PRIMARY GROCERY ROW",
+                    "debit": "1000.00",
+                    "credit": "",
+                    "cardholder": "ALEX MORGAN",
+                },
+                {
+                    "date": "2026-08-12",
+                    "description": "ADDON MOM ROW",
+                    "debit": "2000.00",
+                    "credit": "",
+                    "cardholder": "PATRICIA MORGAN",
+                },
+                {
+                    "date": "2026-08-14",
+                    "description": "UNKNOWN NO MATCH MERCHANT",
+                    "debit": "500.00",
+                    "credit": "",
+                    "cardholder": "",
+                },
+            ],
+            True,
+        ),
+    )
+    transaction_processor.addon_cards = {
+        "primary_cardholders": ["ALEX MORGAN"],
+        "users": [
+            {
+                "id": "mom",
+                "label": "Mom",
+                "cardholder_patterns": ["PATRICIA MORGAN"],
+                "reimburse": True,
+            }
+        ],
+    }
+
+    categorizer = Categorizer(
+        matchers_file="data/matchers.example.json",
+        llm=None,
+        addon_cards=transaction_processor.addon_cards,
+    )
+
+    new_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", latest_txn_by_account={"cc-hdfc-test": None}
+    )
+    assert len(new_txns) == 3
+
+    # Primary row remarks must be "" (not pd.NA)
+    assert new_txns[0]["remarks"] == ""
+    # Addon row remarks must be "addon:Mom"
+    assert new_txns[1]["remarks"] == "addon:Mom"
+    # Unspecified cardholder remarks must be "" (not pd.NA)
+    assert new_txns[2]["remarks"] == ""
+
+    # Categorize
+    cat_txns = categorizer.categorize(new_txns)
+    assert cat_txns[1]["category"] == "Transfer"
+    assert cat_txns[1]["remarks"] == "addon:Mom"
+
+    # Format for storage
+    storage_values = transaction_processor._format_txns_for_storage(cat_txns)
+    # json.dumps MUST serialize without TypeError
+    dumped = json.dumps(storage_values)
+    assert dumped is not None
+    assert "<NA>" not in dumped
+    assert "NaN" not in dumped
