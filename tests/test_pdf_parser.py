@@ -1,9 +1,13 @@
+import base64
 import io
 import json
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from pypdf import PdfWriter
-from src.pdf_parser import PDFParser
+
+from src.llm_client import LLMGatewayError, LLMUnavailableError
+from src.pdf_parser import PDFParser, _model_to_family
 
 
 def get_minimal_pdf_bytes(encrypted=False, password=""):
@@ -16,30 +20,41 @@ def get_minimal_pdf_bytes(encrypted=False, password=""):
     return buf.getvalue()
 
 
-def make_llm_response(transactions: list) -> MagicMock:
-    mock = MagicMock()
-    mock.choices[0].message.content = json.dumps({"transactions": transactions})
-    return mock
+def make_llm_response(transactions: list, summary: dict | None = None) -> dict:
+    payload: dict = {"transactions": transactions}
+    if summary is not None:
+        payload["summary"] = summary
+    return {"ok": True, "data": payload, "text": json.dumps(payload)}
 
 
 @pytest.fixture(autouse=True)
-def mock_configure_api_keys(monkeypatch):
+def mock_gateway_available(monkeypatch):
     from src import pdf_parser
 
-    monkeypatch.setattr(pdf_parser, "configure_api_keys", lambda: None)
+    monkeypatch.setattr(pdf_parser.llm_client, "is_available", lambda *a, **kw: True)
+
+
+def test_model_to_family_mapping():
+    assert _model_to_family("gemini") == "gemini"
+    assert _model_to_family("gemini/gemini-2.5-flash") == "gemini"
+    assert _model_to_family("claude") == "claude"
+    assert _model_to_family("claude-sonnet-4-6") == "claude"
+    assert _model_to_family("anthropic/claude-sonnet-4-6") == "claude"
+    assert _model_to_family("unknown-model") is None
+    assert _model_to_family("") is None
 
 
 def test_pdf_parser_no_api_key(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from src import pdf_parser
+
+    monkeypatch.setattr(pdf_parser.llm_client, "is_available", lambda *a, **kw: False)
     parser = PDFParser()
     assert parser.parse_pdf(b"dummy pdf bytes") == []
 
 
-@patch("litellm.completion")
-def test_pdf_parser_success(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    mock_completion.return_value = make_llm_response(
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_success(mock_complete):
+    mock_complete.return_value = make_llm_response(
         [
             {
                 "date": "2026-05-02",
@@ -62,13 +77,38 @@ def test_pdf_parser_success(mock_completion, monkeypatch):
     assert txns[0]["description"] == "uber ride"
     assert txns[0]["debit"] == "200.00"
     assert txns[1]["credit"] == "50000.00"
-    mock_completion.assert_called_once()
+    mock_complete.assert_called_once()
+    assert mock_complete.call_args.kwargs["family"] == "gemini"
+    assert mock_complete.call_args.kwargs["title"] == "gajana_pdf"
 
 
-@patch("litellm.completion")
-def test_pdf_parser_encrypted_success(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    mock_completion.return_value = make_llm_response(
+@patch("src.pdf_parser.llm_client.complete")
+def test_call_llm_with_pdf_accepts_base64_str(mock_complete):
+    mock_complete.return_value = {
+        "ok": True,
+        "data": {
+            "transactions": [
+                {
+                    "date": "2026-05-02",
+                    "description": "b64 caller",
+                    "debit": "10.00",
+                    "credit": "",
+                }
+            ]
+        },
+    }
+    raw = get_minimal_pdf_bytes()
+    b64_str = base64.b64encode(raw).decode("ascii")
+    txns, _summary = PDFParser()._call_llm_with_pdf("gemini", b64_str)
+    assert len(txns) == 1
+    assert txns[0]["description"] == "b64 caller"
+    att = mock_complete.call_args.kwargs["attachments"][0]
+    assert att["data"] == raw
+
+
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_encrypted_success(mock_complete):
+    mock_complete.return_value = make_llm_response(
         [
             {
                 "date": "2026-05-02",
@@ -88,23 +128,21 @@ def test_pdf_parser_encrypted_success(mock_completion, monkeypatch):
     assert txns[0]["description"] == "uber ride"
 
 
-@patch("litellm.completion")
-def test_pdf_parser_encrypted_wrong_password(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_encrypted_wrong_password(mock_complete):
     txns = PDFParser().parse_pdf(
         get_minimal_pdf_bytes(encrypted=True, password="correctpassword"),
         password="wrongpassword",
     )
     assert txns == []
-    mock_completion.assert_not_called()
+    mock_complete.assert_not_called()
 
 
-@patch("litellm.completion")
-def test_pdf_parser_encrypted_backup_password(mock_completion, monkeypatch):
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_encrypted_backup_password(mock_complete):
     """A rotated password: the current one is listed first, the statement is
     still locked with the old one, and the backup opens it."""
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    mock_completion.return_value = make_llm_response(
+    mock_complete.return_value = make_llm_response(
         [
             {
                 "date": "2026-05-02",
@@ -124,15 +162,14 @@ def test_pdf_parser_encrypted_backup_password(mock_completion, monkeypatch):
     assert txns[0]["description"] == "uber ride"
 
 
-@patch("litellm.completion")
-def test_pdf_parser_encrypted_all_passwords_wrong(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_encrypted_all_passwords_wrong(mock_complete):
     txns = PDFParser().parse_pdf(
         get_minimal_pdf_bytes(encrypted=True, password="correctpassword"),
         password=["wrong1", "wrong2"],
     )
     assert txns == []
-    mock_completion.assert_not_called()
+    mock_complete.assert_not_called()
 
 
 def test_password_candidates_normalizes():
@@ -145,22 +182,18 @@ def test_password_candidates_normalizes():
     assert password_candidates([]) == []
 
 
-@patch("litellm.completion")
-def test_pdf_parser_encrypted_no_password(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_encrypted_no_password(mock_complete):
     txns = PDFParser().parse_pdf(
         get_minimal_pdf_bytes(encrypted=True, password="somepassword"),
         password="",
     )
     assert txns == []
-    mock_completion.assert_not_called()
+    mock_complete.assert_not_called()
 
 
-@patch("litellm.completion")
-def test_pdf_parser_primary_fails_fallback_succeeds(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake_anthropic_key")
-
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_primary_fails_fallback_succeeds(mock_complete):
     fallback_response = make_llm_response(
         [
             {
@@ -171,23 +204,25 @@ def test_pdf_parser_primary_fails_fallback_succeeds(mock_completion, monkeypatch
             }
         ]
     )
-    mock_completion.side_effect = [Exception("Primary unavailable"), fallback_response]
+    mock_complete.side_effect = [
+        LLMUnavailableError("Primary unavailable"),
+        fallback_response,
+    ]
 
     txns = PDFParser().parse_pdf(get_minimal_pdf_bytes())
 
     assert len(txns) == 1
     assert txns[0]["description"] == "fallback txn"
-    assert mock_completion.call_count == 2
+    assert mock_complete.call_count == 2
+    families = [c.kwargs["family"] for c in mock_complete.call_args_list]
+    assert families == ["gemini", "claude"]
 
 
 @patch("src.pdf_parser.PdfReader")
-@patch("litellm.completion")
+@patch("src.pdf_parser.llm_client.complete")
 def test_pdf_parser_both_models_fail_text_extraction_succeeds(
-    mock_completion, mock_reader_class, monkeypatch
+    mock_complete, mock_reader_class
 ):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake_anthropic_key")
-
     mock_reader = MagicMock()
     mock_reader_class.return_value = mock_reader
     mock_reader.is_encrypted = False
@@ -205,9 +240,9 @@ def test_pdf_parser_both_models_fail_text_extraction_succeeds(
             }
         ]
     )
-    mock_completion.side_effect = [
-        Exception("Primary PDF failed"),
-        Exception("Fallback PDF failed"),
+    mock_complete.side_effect = [
+        LLMGatewayError("Primary PDF failed"),
+        LLMGatewayError("Fallback PDF failed"),
         text_response,
     ]
 
@@ -215,16 +250,13 @@ def test_pdf_parser_both_models_fail_text_extraction_succeeds(
 
     assert len(txns) == 1
     assert txns[0]["description"] == "text txn"
-    assert mock_completion.call_count == 3
+    assert mock_complete.call_count == 3
+    assert mock_complete.call_args_list[2].kwargs["title"] == "gajana_pdf_text"
 
 
 @patch("src.pdf_parser.PdfReader")
-@patch("litellm.completion")
-def test_pdf_parser_all_fail_empty_text(
-    mock_completion, mock_reader_class, monkeypatch
-):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_all_fail_empty_text(mock_complete, mock_reader_class):
     mock_reader = MagicMock()
     mock_reader_class.return_value = mock_reader
     mock_reader.is_encrypted = False
@@ -232,63 +264,54 @@ def test_pdf_parser_all_fail_empty_text(
     mock_page.extract_text.return_value = ""
     mock_reader.pages = [mock_page]
 
-    mock_completion.side_effect = [
-        Exception("Primary failed"),
-        Exception("Fallback failed"),
+    mock_complete.side_effect = [
+        LLMGatewayError("Primary failed"),
+        LLMGatewayError("Fallback failed"),
     ]
 
     txns = PDFParser().parse_pdf(b"pdf_bytes")
     assert txns == []
 
 
-@patch("litellm.completion")
-def test_pdf_parser_json_decode_error(mock_completion, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    bad_response = MagicMock()
-    bad_response.choices[0].message.content = "not valid json"
-    mock_completion.return_value = bad_response
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_json_decode_error(mock_complete):
+    mock_complete.return_value = {"ok": True, "text": "not valid json"}
 
     txns = PDFParser().parse_pdf(get_minimal_pdf_bytes())
     assert txns == []
 
 
 @patch("src.pdf_parser.PdfReader")
-def test_pdf_parser_general_exception(mock_reader_class, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
+def test_pdf_parser_general_exception(mock_reader_class):
     mock_reader_class.side_effect = Exception("Unexpected corrupt PDF")
 
     txns = PDFParser().parse_pdf(b"dummy pdf bytes")
     assert txns == []
 
 
-@patch("litellm.completion")
-def test_pdf_parser_response_as_bare_array(mock_completion, monkeypatch):
+@patch("src.pdf_parser.llm_client.complete")
+def test_pdf_parser_response_as_bare_array(mock_complete):
     """_parse_response handles bare JSON arrays (not wrapped in object)."""
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    bare_response = MagicMock()
-    bare_response.choices[0].message.content = json.dumps(
-        [
-            {
-                "date": "2026-05-01",
-                "description": "bare array txn",
-                "debit": "10",
-                "credit": "",
-            }
-        ]
-    )
-    mock_completion.return_value = bare_response
+    bare = [
+        {
+            "date": "2026-05-01",
+            "description": "bare array txn",
+            "debit": "10",
+            "credit": "",
+        }
+    ]
+    mock_complete.return_value = {"ok": True, "data": bare, "text": json.dumps(bare)}
 
     txns = PDFParser().parse_pdf(get_minimal_pdf_bytes())
     assert len(txns) == 1
     assert txns[0]["description"] == "bare array txn"
 
 
-@patch("litellm.completion")
-def test_parse_pdf_with_text_returns_oracle_text(mock_completion, monkeypatch):
+@patch("src.pdf_parser.llm_client.complete")
+def test_parse_pdf_with_text_returns_oracle_text(mock_complete):
     """parse_pdf_with_text returns (txns, extracted_text, summary); text is the
     validation oracle and must come back even on a successful vision parse."""
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    mock_completion.return_value = make_llm_response(
+    mock_complete.return_value = make_llm_response(
         [{"date": "06/06/2026", "description": "shop", "debit": "80", "credit": ""}]
     )
 
@@ -300,20 +323,13 @@ def test_parse_pdf_with_text_returns_oracle_text(mock_completion, monkeypatch):
     assert isinstance(summary, dict)
 
 
-@patch("litellm.completion")
-def test_parse_pdf_with_text_extracts_summary(mock_completion, monkeypatch):
+@patch("src.pdf_parser.llm_client.complete")
+def test_parse_pdf_with_text_extracts_summary(mock_complete):
     """The statement's printed totals are surfaced as the summary cross-check."""
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    resp = MagicMock()
-    resp.choices[0].message.content = json.dumps(
-        {
-            "transactions": [
-                {"date": "06/06/2026", "description": "shop", "debit": "80"}
-            ],
-            "summary": {"total_debit": "80", "total_credit": "0"},
-        }
+    mock_complete.return_value = make_llm_response(
+        [{"date": "06/06/2026", "description": "shop", "debit": "80"}],
+        summary={"total_debit": "80", "total_credit": "0"},
     )
-    mock_completion.return_value = resp
 
     txns, _text, summary = PDFParser().parse_pdf_with_text(get_minimal_pdf_bytes())
 
@@ -321,79 +337,14 @@ def test_parse_pdf_with_text_extracts_summary(mock_completion, monkeypatch):
     assert summary == {"total_debit": "80", "total_credit": "0"}
 
 
-@patch("litellm.completion")
-def test_parse_pdf_with_text_model_override(mock_completion, monkeypatch):
+@patch("src.pdf_parser.llm_client.complete")
+def test_parse_pdf_with_text_model_override(mock_complete):
     """Passing models=[...] drives the retry path (fallback model first)."""
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake_key")
-    mock_completion.return_value = make_llm_response(
+    mock_complete.return_value = make_llm_response(
         [{"date": "06/06/2026", "description": "shop", "debit": "80", "credit": ""}]
     )
 
     parser = PDFParser()
     parser.parse_pdf_with_text(get_minimal_pdf_bytes(), models=[parser.fallback_model])
 
-    called_model = mock_completion.call_args.kwargs["model"]
-    assert called_model == parser.fallback_model
-
-
-@patch("src.pdf_parser.time.sleep")  # don't actually wait out the backoff
-@patch("src.pdf_parser.litellm.completion")
-def test_rate_limited_primary_is_retried_not_abandoned(
-    mock_completion, mock_sleep, monkeypatch
-):
-    """A 429 on the free model must not send the whole run to the paid one.
-
-    The quota window is per-minute, so a rate limit means "wait", not "give up".
-    This used to mark the model exhausted for the rest of the process: one 429 on
-    the first statement and every remaining statement went to paid Claude.
-    """
-    import litellm
-
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    rate_limited = litellm.RateLimitError(
-        "quota exceeded", llm_provider="gemini", model="gemini/gemini-2.5-flash"
-    )
-    # Rate limited once, then the window passes and the free model answers.
-    mock_completion.side_effect = [
-        rate_limited,
-        make_llm_response([{"date": "01/01/2026", "description": "X", "debit": "10"}]),
-    ]
-
-    parser = PDFParser()
-    txns, _text, _summary = parser.parse_pdf_with_text(get_minimal_pdf_bytes())
-
-    assert len(txns) == 1, "the retry should have succeeded on the free model"
-    assert mock_sleep.called, "it must back off rather than fail through instantly"
-    models_called = [c.kwargs["model"] for c in mock_completion.call_args_list]
-    assert all(
-        "claude" not in m for m in models_called
-    ), f"a transient 429 fell through to the paid model: {models_called}"
-
-
-@patch("src.pdf_parser.time.sleep")
-@patch("src.pdf_parser.litellm.completion")
-def test_persistently_rate_limited_primary_falls_back(
-    mock_completion, mock_sleep, monkeypatch
-):
-    """Once the free model has genuinely stopped answering, the paid one runs."""
-    import litellm
-
-    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake_key")
-    rate_limited = litellm.RateLimitError(
-        "quota exceeded", llm_provider="gemini", model="gemini/gemini-2.5-flash"
-    )
-    mock_completion.side_effect = [
-        rate_limited,
-        rate_limited,
-        rate_limited,  # primary exhausts its retries
-        make_llm_response([{"date": "01/01/2026", "description": "X", "debit": "10"}]),
-    ]
-
-    parser = PDFParser()
-    txns, _text, _summary = parser.parse_pdf_with_text(get_minimal_pdf_bytes())
-
-    assert len(txns) == 1
-    models_called = [c.kwargs["model"] for c in mock_completion.call_args_list]
-    assert any("claude" in m for m in models_called), "should reach the fallback"
+    assert mock_complete.call_args.kwargs["family"] == "claude"

@@ -31,5 +31,4 @@ pytest-mock
 pytest-cov
 mypy
 pypdf
-litellm
 reportlab

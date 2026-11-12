@@ -1,31 +1,31 @@
-import os
+import base64
+import io
 import json
 import logging
-import io
-import time
-import base64
-from typing import Any
 from pypdf import PdfReader, PdfWriter
-import litellm
+
+from src import llm_client
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_MODEL = "gemini/gemini-2.5-flash"
-FALLBACK_MODEL = "anthropic/claude-sonnet-4-6"
+PRIMARY_MODEL = "gemini"
+FALLBACK_MODEL = "claude"
 
-# The free-tier Gemini quota is per-minute (~15-20 requests). Space out primary
-# (Gemini) calls so batch runs stay under it and don't fall back to the paid
-# Claude model. Override via GAJANA_GEMINI_MIN_INTERVAL (seconds; 0 disables).
-_DEFAULT_PRIMARY_INTERVAL = 4.0
-_last_primary_call = 0.0
 
-# A rate limit is TRANSIENT -- the quota window is per-minute, so a 429 means
-# "wait", not "give up". This used to mark the model exhausted for the whole
-# process, so a single 429 sent every remaining statement in the run to the paid
-# fallback. Back off and retry instead; only fall through once the free model has
-# genuinely stopped answering.
-_RATE_LIMIT_RETRIES = 3
-_RATE_LIMIT_BACKOFF = 65.0
+def _model_to_family(model: str) -> str | None:
+    """Map a model or family identifier to a gateway family ('gemini' or 'claude')."""
+    m = (model or "").strip().lower()
+    if m == "gemini" or m.startswith("gemini/") or "gemini" in m:
+        return "gemini"
+    if (
+        m == "claude"
+        or m.startswith("claude")
+        or m.startswith("anthropic/")
+        or "claude" in m
+        or "anthropic" in m
+    ):
+        return "claude"
+    return None
 
 
 def password_candidates(password: "str | list[str] | None") -> list[str]:
@@ -57,26 +57,6 @@ def _try_decrypt(reader: PdfReader, candidates: list[str]) -> bool:
         except Exception as e:
             logger.warning(f"Decrypt attempt #{idx} errored: {e}")
     return False
-
-
-def _is_primary_model(model: str) -> bool:
-    return not ("anthropic" in model or "claude" in model)
-
-
-def _throttle_primary() -> None:
-    """Sleep so consecutive primary-model calls are spaced out, avoiding the
-    free-tier per-minute rate limit."""
-    global _last_primary_call
-    interval = float(
-        os.environ.get("GAJANA_GEMINI_MIN_INTERVAL", _DEFAULT_PRIMARY_INTERVAL)
-    )
-    if interval <= 0:
-        return
-    wait = interval - (time.monotonic() - _last_primary_call)
-    if wait > 0:
-        logger.info(f"Throttling {wait:.1f}s before primary call (rate limit).")
-        time.sleep(wait)
-    _last_primary_call = time.monotonic()
 
 
 _EXTRACTION_PROMPT = """
@@ -116,42 +96,14 @@ statement prints. This is an independent cross-check of the transactions above.
 """
 
 
-def _load_secret_key(filename: str, env_var: str) -> str:
-    import re
-
-    json_path = os.path.join(os.getcwd(), "secrets", filename)
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if not content.startswith("{"):
-                content = "{" + content + "}"
-            try:
-                data = json.loads(content)
-                if "api_key" in data:
-                    return str(data["api_key"]).strip()
-            except Exception:
-                match = re.search(r'"api_key"\s*:\s*"([^"]+)"', content)
-                if match:
-                    return match.group(1).strip()
-        except Exception:
-            pass
-    return os.environ.get(env_var, "")
-
-
 def configure_api_keys() -> None:
-    """Load API keys from secrets files into env vars for LiteLLM."""
-    gemini_key = _load_secret_key("gemini.json", "GEMINI_API_KEY")
-    if gemini_key:
-        os.environ.setdefault("GEMINI_API_KEY", gemini_key)
-
-    anthropic_key = _load_secret_key("anthropic.json", "ANTHROPIC_API_KEY")
-    if anthropic_key:
-        os.environ.setdefault("ANTHROPIC_API_KEY", anthropic_key)
+    """Backward-compatible no-op; the host LLM gateway manages credentials."""
+    return None
 
 
 def has_any_api_key() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
+    """Return True when the host LLM gateway Unix socket is reachable."""
+    return llm_client.is_available()
 
 
 class PDFParser:
@@ -164,7 +116,7 @@ class PDFParser:
         self.primary_model = primary_model
         self.fallback_model = fallback_model
         if not has_any_api_key():
-            logger.warning("No LLM API keys configured. PDF parsing will fail.")
+            logger.warning("LLM gateway unavailable. PDF parsing will fail.")
         else:
             logger.info(
                 f"PDFParser ready. Primary: {primary_model}, Fallback: {fallback_model}"
@@ -204,81 +156,41 @@ class PDFParser:
             return data["summary"]
         return {}
 
-    def _completion(self, model: str, messages: list[dict]) -> Any:
-        """litellm.completion, riding out the primary model's rate-limit window.
-
-        Retries the free model through a 429 rather than abandoning it. Only the
-        primary is retried: a rate limit on the paid fallback has nowhere to
-        fall through to, so it propagates immediately.
-        """
-        attempts = _RATE_LIMIT_RETRIES if _is_primary_model(model) else 1
-        for attempt in range(1, attempts + 1):
-            if _is_primary_model(model):
-                _throttle_primary()
-            try:
-                return litellm.completion(
-                    model=model,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                )
-            except litellm.RateLimitError:
-                if attempt == attempts:
-                    logger.warning(
-                        f"{model}: still rate limited after {attempts} attempts; "
-                        "falling through to the next model."
-                    )
-                    raise
-                logger.warning(
-                    f"{model}: rate limited; waiting {_RATE_LIMIT_BACKOFF:.0f}s "
-                    f"(attempt {attempt}/{attempts}) rather than falling back to "
-                    "the paid model."
-                )
-                time.sleep(_RATE_LIMIT_BACKOFF)
-        raise AssertionError("unreachable: the loop either returns or raises")
-
-    def _call_llm_with_pdf(self, model: str, pdf_b64: str) -> tuple[list[dict], dict]:
-        # Anthropic requires "document" content block; others use image_url
-        if "anthropic" in model or "claude" in model:
-            pdf_content: dict = {
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": "application/pdf",
-                    "data": pdf_b64,
-                },
-            }
-        else:
-            pdf_content = {
-                "type": "image_url",
-                "image_url": {"url": f"data:application/pdf;base64,{pdf_b64}"},
-            }
-        response = self._completion(
-            model,
-            [
+    def _call_llm_with_pdf(
+        self, model: str, pdf_payload: bytes | str
+    ) -> tuple[list[dict], dict]:
+        raw_bytes = (
+            base64.b64decode(pdf_payload)
+            if isinstance(pdf_payload, str)
+            else pdf_payload
+        )
+        resp = llm_client.complete(
+            prompt=_EXTRACTION_PROMPT,
+            attachments=[
                 {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": _EXTRACTION_PROMPT},
-                        pdf_content,
-                    ],
+                    "filename": "statement.pdf",
+                    "data": raw_bytes,
+                    "media_type": "application/pdf",
                 }
             ],
+            response_format="json",
+            tier="fast",
+            family=_model_to_family(model),
+            title="gajana_pdf",
         )
-        msg = response.choices[0].message
-        return self._parse_response(msg.content or "", msg.tool_calls)
+        raw_text = resp.get("text") or json.dumps(resp["data"])
+        return self._parse_response(raw_text, None)
 
     def _call_llm_with_text(self, model: str, text: str) -> tuple[list[dict], dict]:
-        response = self._completion(
-            model,
-            [
-                {
-                    "role": "user",
-                    "content": f"{_EXTRACTION_PROMPT}\n\nStatement Text:\n{text}",
-                }
-            ],
+        resp = llm_client.complete(
+            prompt=f"{_EXTRACTION_PROMPT}\n\nStatement Text:\n{text}",
+            response_format="json",
+            tier="fast",
+            family=_model_to_family(model),
+            title="gajana_pdf_text",
         )
-        msg = response.choices[0].message
-        return self._parse_response(msg.content or "", msg.tool_calls)
+        raw_text = resp.get("text") or json.dumps(resp["data"])
+        return self._parse_response(raw_text, None)
 
     def parse_pdf(
         self, pdf_bytes: bytes, password: "str | list[str]" = ""
@@ -304,7 +216,7 @@ class PDFParser:
         when unavailable.
         """
         if not has_any_api_key():
-            logger.error("No LLM API keys configured. Cannot parse PDF.")
+            logger.error("LLM gateway unavailable. Cannot parse PDF.")
             return [], "", {}
 
         model_order = models or [self.primary_model, self.fallback_model]
@@ -334,13 +246,11 @@ class PDFParser:
             # Always extract the text layer up front — the validation oracle.
             text = "".join(page.extract_text() or "" for page in reader.pages)
 
-            pdf_b64 = base64.b64encode(pdf_payload_bytes).decode("utf-8")
-
             # 1. Vision extraction (keeps table/column structure). Try each model.
             for model in model_order:
                 try:
                     logger.info(f"Parsing PDF (vision) with model: {model}")
-                    txns, summary = self._call_llm_with_pdf(model, pdf_b64)
+                    txns, summary = self._call_llm_with_pdf(model, pdf_payload_bytes)
                     logger.info(f"Parsed {len(txns)} transactions via {model}.")
                     return txns, text, summary
                 except Exception as e:

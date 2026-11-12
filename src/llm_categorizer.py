@@ -5,8 +5,8 @@ consensus fuzzy). Classifications are constrained to the known category
 vocabulary and persisted to ``data/llm_category_cache.json`` keyed by
 (normalized-description, sign) so a given merchant is paid for once.
 
-Reuses the pipeline's existing LiteLLM wiring (``configure_api_keys`` /
-throttle) from ``src.pdf_parser``. Default model: Haiku 4.5.
+Routes requests through the host LLM gateway Unix socket via ``src.llm_client``
+and ``src.pdf_parser``. Default model family: ``claude``.
 """
 
 from __future__ import annotations
@@ -18,12 +18,13 @@ import re
 from collections import defaultdict
 from typing import Any, Hashable, Optional
 
+from src import llm_client
 from src.category_index import norm
-from src.pdf_parser import configure_api_keys, has_any_api_key
+from src.pdf_parser import _model_to_family, configure_api_keys, has_any_api_key
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
+DEFAULT_MODEL = "claude"
 CACHE_FILE_PATH = "data/llm_category_cache.json"
 BATCH_SIZE = 25
 MAX_FEWSHOT_PER_CAT = 3
@@ -59,7 +60,7 @@ class LLMCategorizer:
             self._client_ready = has_any_api_key()
             if not self._client_ready:
                 logger.warning(
-                    "LLMCategorizer enabled but no API key configured; "
+                    "LLMCategorizer enabled but LLM gateway unavailable; "
                     "falling back to cache-only."
                 )
 
@@ -111,18 +112,13 @@ class LLMCategorizer:
         )
 
     def _call_llm(self, system: str, user: str) -> dict[int, str]:
-        import litellm
-
-        litellm.suppress_debug_info = True
-        r = litellm.completion(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=2000,
+        txt, _meta = llm_client.complete_text(
+            prompt=user,
+            system=system,
+            tier="fast",
+            family=_model_to_family(self.model),
+            title="gajana_categorize",
         )
-        txt = r.choices[0].message.content
         m = re.search(r"\[.*\]", txt, re.DOTALL)
         if not m:
             return {}

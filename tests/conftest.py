@@ -12,8 +12,14 @@ os.environ.setdefault(
 
 
 @pytest.fixture(autouse=True)
-def _disable_gemini_throttle():
-    """Disable the PDF parser's primary-model rate-limit throttle in tests so
-    multi-call paths don't sleep."""
-    os.environ["GAJANA_GEMINI_MIN_INTERVAL"] = "0"
+def _isolate_llm_gateway_socket(monkeypatch, tmp_path_factory):
+    """Point LLM_GATEWAY_SOCKET / AGENTIC_LLM_SOCKET at a non-existent path inside
+    tmp_path_factory unless explicitly overridden so offline pytest never touches
+    /run/agentic/llm.sock or ~/.local/state/agentic/gateway/llm.sock."""
+    sock_dir = tmp_path_factory.mktemp("llm_gateway")
+    dead_sock = str(sock_dir / "llm.sock")
+    if not os.environ.get("GAJANA_LIVE_LLM_SOCKET"):
+        monkeypatch.setenv("LLM_GATEWAY_SOCKET", dead_sock)
+        monkeypatch.setenv("AGENTIC_LLM_SOCKET", dead_sock)
+        monkeypatch.setenv("AGENTIC_STATE_DIR", str(sock_dir / "state"))
     yield

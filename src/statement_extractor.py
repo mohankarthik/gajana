@@ -233,8 +233,8 @@ def statement_passwords(
     (``axis``), and either value may be a list because banks rotate statement
     passwords while already-downloaded statements keep the old one.
     """
-    # Imported lazily: src.pdf_parser pulls in litellm, which this module and
-    # its callers otherwise never need.
+    # Imported lazily to avoid pulling in src.pdf_parser when callers only
+    # need deterministic layout extraction.
     from src.pdf_parser import password_candidates
 
     parts = os.path.basename(filename).split("-")

@@ -2,9 +2,9 @@
 
 import os
 import shutil
-import unittest
 import subprocess
 import sys
+import unittest
 from typing import List
 
 from src.constants import BANK_TRANSACTIONS_SHEET_NAME, CC_TRANSACTIONS_SHEET_NAME
@@ -13,7 +13,8 @@ from src.constants import BANK_TRANSACTIONS_SHEET_NAME, CC_TRANSACTIONS_SHEET_NA
 class TestGajanaE2E(unittest.TestCase):
     def setUp(self):
         """Set up a temporary working directory."""
-        self.fixtures_dir = "/root/gajana/tests/fixtures/e2e"
+        self.repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.fixtures_dir = os.path.join(self.repo_dir, "tests", "fixtures", "e2e")
         self.working_dir = "/tmp/gajana_e2e_work"
         if os.path.exists(self.working_dir):
             shutil.rmtree(self.working_dir)
@@ -31,7 +32,7 @@ class TestGajanaE2E(unittest.TestCase):
     def _run_main(self, args: List[str]):
         """Runs main.py with the provided arguments."""
         cmd = [sys.executable, "main.py", "--csv-db-path", self.working_dir] + args
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd="/root/gajana")
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.repo_dir)
         return result
 
     def _compare_csv_files(self, actual_path, expected_path):
@@ -101,7 +102,7 @@ class TestGajanaE2E(unittest.TestCase):
         configure_api_keys()
         if not has_any_api_key():
             raise unittest.SkipTest(
-                "No LLM API keys configured (GEMINI_API_KEY or ANTHROPIC_API_KEY). Skipping live LLM E2E test."
+                "LLM gateway socket unavailable. Skipping live LLM E2E test."
             )
 
         # 1. Setup initial state by copying fixtures

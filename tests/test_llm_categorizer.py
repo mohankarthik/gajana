@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 
-from src.llm_categorizer import LLMCategorizer, _cache_key
+from src.llm_categorizer import DEFAULT_MODEL, LLMCategorizer, _cache_key
 
 
 def _llm(tmp_path, enabled=False):
     return LLMCategorizer(cache_file=str(tmp_path / "cache.json"), enabled=enabled)
+
+
+def test_default_model_is_claude():
+    assert DEFAULT_MODEL == "claude"
 
 
 def test_cache_key_normalizes_desc_and_sign():
@@ -59,3 +63,23 @@ def test_corrupt_cache_file_is_ignored(tmp_path):
     cache_path.write_text("not json{{")
     llm = LLMCategorizer(cache_file=str(cache_path), enabled=False)
     assert llm.cache == {}
+
+
+def test_call_llm_parses_fenced_json_and_handles_missing_brackets(tmp_path, mocker):
+    mocker.patch("src.llm_categorizer.has_any_api_key", return_value=True)
+    mock_complete = mocker.patch(
+        "src.llm_categorizer.llm_client.complete_text",
+        return_value=(
+            '```json\n[{"i": 0, "category": "Expense:Dining"}, {"bad": 1}]\n```',
+            {},
+        ),
+    )
+    llm = LLMCategorizer(cache_file=str(tmp_path / "cache.json"), enabled=True)
+    assert llm._client_ready is True
+    out = llm._call_llm("sys", "user")
+    assert out == {0: "Expense:Dining"}
+    assert mock_complete.call_args.kwargs["family"] == "claude"
+    assert mock_complete.call_args.kwargs["title"] == "gajana_categorize"
+
+    mock_complete.return_value = ("no json array here", {})
+    assert llm._call_llm("sys", "user") == {}

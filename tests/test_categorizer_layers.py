@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -148,19 +147,13 @@ def test_llm_live_path_mocked(tmp_path, mocker):
     """Exercises LLMCategorizer._call_llm + cache persistence with a mock."""
     from src.llm_categorizer import LLMCategorizer
 
-    fake = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(
-                    content='[{"i": 0, "category": "Expense:Dining"}]'
-                )
-            )
-        ]
+    mocker.patch(
+        "src.llm_categorizer.llm_client.complete_text",
+        return_value=('[{"i": 0, "category": "Expense:Dining"}]', {}),
     )
-    mocker.patch("litellm.completion", return_value=fake)
     cache = tmp_path / "cache.json"
     llm = LLMCategorizer(cache_file=str(cache), enabled=True)
-    llm._client_ready = True  # bypass real API-key requirement
+    llm._client_ready = True  # bypass real gateway requirement
     txns = [{"description": "some cafe bill", "amount": -250, "account": "cc"}]
     res = llm.classify(txns, ["Expense:Dining"], {"Expense:Dining": ['"x" [DEBIT]']})
     assert res == {0: ("Expense:Dining", "llm")}
@@ -172,14 +165,10 @@ def test_llm_live_path_mocked(tmp_path, mocker):
 def test_llm_off_vocab_prediction_dropped(tmp_path, mocker):
     from src.llm_categorizer import LLMCategorizer
 
-    fake = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content='[{"i": 0, "category": "Bogus"}]')
-            )
-        ]
+    mocker.patch(
+        "src.llm_categorizer.llm_client.complete_text",
+        return_value=('[{"i": 0, "category": "Bogus"}]', {}),
     )
-    mocker.patch("litellm.completion", return_value=fake)
     llm = LLMCategorizer(cache_file=str(tmp_path / "c.json"), enabled=True)
     llm._client_ready = True
     txns = [{"description": "x", "amount": -1, "account": "a"}]

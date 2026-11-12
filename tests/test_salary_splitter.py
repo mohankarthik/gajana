@@ -287,3 +287,93 @@ def test_run_idempotent_skip(monkeypatch):
     monkeypatch.setattr(sp, "find_payslip", lambda ym: ("fid", f"{ym}.pdf"))
     sp.run("2026-01")
     assert ds.appended == []  # already split → no-op
+
+
+def _minimal_pdf_bytes() -> bytes:
+    import io
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def test_parse_payslip_happy_path(monkeypatch):
+    from plugins.salary_splitter import payslip_parser
+
+    monkeypatch.setattr(payslip_parser, "has_any_api_key", lambda: True)
+    calls: list[dict] = []
+
+    def fake_complete_pdf(prompt, pdf_bytes, **kwargs):
+        calls.append(kwargs)
+        return (
+            {
+                "date_of_payment": "2026-01-29",
+                "net_pay": "4,73,808",
+                "basic": 312467,
+                "gsus_income": 3278546,
+                "gsus_broker_tax": -1176342,
+            },
+            {"family": kwargs.get("family")},
+        )
+
+    monkeypatch.setattr(payslip_parser.llm_client, "complete_pdf", fake_complete_pdf)
+    out = payslip_parser.parse_payslip(_minimal_pdf_bytes())
+    assert out["date_of_payment"] == "2026-01-29"
+    assert out["net_pay"] == 473808.0
+    assert out["gsus_broker_tax"] == 1176342.0
+    assert len(calls) == 1
+    assert calls[0]["family"] == "gemini"
+    assert calls[0]["title"] == "gajana_payslip"
+
+
+def test_parse_payslip_primary_to_fallback_failover(monkeypatch):
+    from plugins.salary_splitter import payslip_parser
+    from src.llm_client import LLMGatewayError
+
+    monkeypatch.setattr(payslip_parser, "has_any_api_key", lambda: True)
+    families: list[str | None] = []
+
+    def fake_complete_pdf(prompt, pdf_bytes, **kwargs):
+        fam = kwargs.get("family")
+        families.append(fam)
+        if fam == "gemini":
+            raise LLMGatewayError("primary exhausted")
+        return (
+            {
+                "date_of_payment": "2026-01-29",
+                "net_pay": 473808,
+                "basic": 312467,
+            },
+            {"family": fam},
+        )
+
+    monkeypatch.setattr(payslip_parser.llm_client, "complete_pdf", fake_complete_pdf)
+    out = payslip_parser.parse_payslip(_minimal_pdf_bytes())
+    assert out["net_pay"] == 473808.0
+    assert families == ["gemini", "claude"]
+
+
+def test_parse_payslip_unavailable_gateway_raises(monkeypatch):
+    from plugins.salary_splitter import payslip_parser
+    from plugins.salary_splitter.payslip_parser import PayslipParseError
+
+    monkeypatch.setattr(payslip_parser, "has_any_api_key", lambda: False)
+    with pytest.raises(PayslipParseError):
+        payslip_parser.parse_payslip(_minimal_pdf_bytes())
+
+
+def test_parse_payslip_missing_field_raises(monkeypatch):
+    from plugins.salary_splitter import payslip_parser
+    from plugins.salary_splitter.payslip_parser import PayslipParseError
+
+    monkeypatch.setattr(payslip_parser, "has_any_api_key", lambda: True)
+    monkeypatch.setattr(
+        payslip_parser.llm_client,
+        "complete_pdf",
+        lambda *a, **kw: ({"basic": 312467}, {}),
+    )
+    with pytest.raises(PayslipParseError):
+        payslip_parser.parse_payslip(_minimal_pdf_bytes())
