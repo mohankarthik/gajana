@@ -252,7 +252,9 @@ def resolve_cardholder_tag(
                 continue
             if _matches_name(ch_norm, pat_norm):
                 return f"addon:{user.label}"
-            if len(pat_norm) >= 4 and pat_norm in ch_norm:
+            if len(pat_norm) >= 4 and re.search(
+                rf"(?<![A-Z0-9]){re.escape(pat_norm)}(?![A-Z0-9])", ch_norm
+            ):
                 return f"addon:{user.label}"
 
     # Step 3: Fuzzy / subsequence match on primary cardholders

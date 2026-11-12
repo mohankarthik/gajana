@@ -885,6 +885,32 @@ def test_hdfc_card_bare_name_multiline_wrapped_continuation_guard():
     assert st.verified
 
 
+HDFC_CARD_EMI_WRAPPED_DESC = """
+ BENGALURU 560049 KAR                                Billing Period               13 Jul, 2026 - 12 Aug, 2026
+       PREVIOUS STATEMENT DUES        PAYMENTS/CREDITS            PURCHASES/DEBIT              FINANCE CHARGES
+                   C0.00                  C0.00                       C10,500.00                   C0.00
+   Domestic Transactions
+                                                    ALEX MORGAN
+14/07/2026| 10:00            ELECTRONICS STORE EMI PURCHASE                                                C 10,000.00     l
+BANGALORE IN
+15/07/2026| 11:00            COFFEE SHOP                                                                   C 500.00        l
+   Reward Points Summary
+   Opening Balance: 1000
+   GST Summary
+"""
+
+
+def test_hdfc_card_dated_row_with_exclude_words_wrapped_continuation():
+    st = extract_from_pages(
+        pages(HDFC_CARD_EMI_WRAPPED_DESC), "cc-hdfc-infiniametal-2026-08.pdf"
+    )
+    assert st.kind == "hdfc-cc"
+    assert len(st.rows) == 2
+    # "BANGALORE IN" under dated row containing "EMI" is still treated as continuation line
+    assert [r.cardholder for r in st.rows] == ["ALEX MORGAN", "ALEX MORGAN"]
+    assert st.verified
+
+
 # --------------------------------------------------------------------------
 # Opt-in regression against the real corpus
 # --------------------------------------------------------------------------

@@ -758,8 +758,23 @@ class TransactionProcessor:
                         if "cardholder" in df.columns:
 
                             def _apply_cardholder_tag(row: pd.Series) -> str:
-                                desc = row.get("description")
-                                credit = row.get("credit") or row.get("amount") or 0.0
+                                desc = _clean_remark_str(row.get("description"))
+                                raw_cr = row.get("credit")
+                                raw_amt = row.get("amount")
+                                credit: Any = 0.0
+                                if (
+                                    raw_cr is not None
+                                    and not pd.isna(raw_cr)
+                                    and str(raw_cr).strip() != ""
+                                ):
+                                    credit = raw_cr
+                                elif (
+                                    raw_amt is not None
+                                    and not pd.isna(raw_amt)
+                                    and str(raw_amt).strip() != ""
+                                ):
+                                    credit = raw_amt
+
                                 if is_card_bill_payment_or_cashback(desc, credit):
                                     tag = None
                                 else:

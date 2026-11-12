@@ -2130,3 +2130,62 @@ def test_llm_pdf_card_bill_payment_not_tagged_addon(
     assert new_txns[0]["remarks"] == ""
     # Purchase row remarks must be "addon:Mom"
     assert new_txns[1]["remarks"] == "addon:Mom"
+
+
+def test_llm_pdf_mixed_types_credit_column_no_na_ambiguity_crash(
+    transaction_processor, mock_data_source, mocker
+):
+    """When passed_txns mixes float debit + empty credit AND empty debit + float credit
+    (matching StatementExtractor types), df.replace('', pd.NA) creates object dtype with pd.NA.
+    _apply_cardholder_tag must not crash with 'TypeError: boolean value of NA is ambiguous'.
+    """
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.get_transaction_log_data.return_value = []
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_mixed", name="cc-hdfc-test-2026-08.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-08-10",
+                    "description": "GROCERY SPEND",
+                    "debit": 500.0,  # float debit, string empty credit
+                    "credit": "",
+                    "cardholder": "PATRICIA MORGAN",
+                },
+                {
+                    "date": "2026-08-12",
+                    "description": "PAYMENT RECEIVED - AUTOPAY",
+                    "debit": "",
+                    "credit": 5000.0,  # string empty debit, float credit
+                    "cardholder": "PATRICIA MORGAN",
+                },
+            ],
+            True,
+        ),
+    )
+    transaction_processor.addon_cards = {
+        "primary_cardholders": ["ALEX MORGAN"],
+        "users": [
+            {
+                "id": "mom",
+                "label": "Mom",
+                "cardholder_patterns": ["PATRICIA MORGAN"],
+                "reimburse": True,
+            }
+        ],
+    }
+    new_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", latest_txn_by_account={"cc-hdfc-test": None}
+    )
+    assert len(new_txns) == 2
+    # Debit row gets tagged addon:Mom without boolean ambiguity crash
+    assert new_txns[0]["remarks"] == "addon:Mom"
+    # Credit bill payment gets empty remarks
+    assert new_txns[1]["remarks"] == ""

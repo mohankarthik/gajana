@@ -129,6 +129,25 @@ def test_resolve_cardholder_tag():
     assert resolve_cardholder_tag("M MORGAN", shared_initial_cfg) is None
     assert resolve_cardholder_tag("MR M MORGAN (PRIMARY)", shared_initial_cfg) is None
 
+    # Pattern "RAJ K" cannot substring-match "SURAJ K KUMAR"
+    substring_boundary_cfg = {
+        "primary_cardholders": ["ALEX MORGAN"],
+        "users": [
+            {
+                "id": "brother",
+                "label": "Brother",
+                "cardholder_patterns": ["RAJ K"],
+            }
+        ],
+    }
+    assert (
+        resolve_cardholder_tag("SURAJ K KUMAR", substring_boundary_cfg)
+        == "addon:Suraj K Kumar"
+    )
+    assert (
+        resolve_cardholder_tag("RAJ K KUMAR", substring_boundary_cfg) == "addon:Brother"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Tag Parsing & Reimbursable Row Check

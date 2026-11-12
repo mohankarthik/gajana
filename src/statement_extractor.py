@@ -871,14 +871,14 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                     is_continuation = False
                     while k >= 0 and lines[k].strip():
                         prev_k = lines[k].strip()
+                        if _HDFC_CARD_DATE_RE.search(prev_k):
+                            is_continuation = True
+                            break
                         k_words = set(re.findall(r"[A-Z]+", prev_k.upper()))
                         if (
                             k_words.intersection(_HEADER_EXCLUDE_WORDS)
                             or "[CKYC ID" in prev_k
                         ):
-                            break
-                        if _HDFC_CARD_DATE_RE.search(prev_k):
-                            is_continuation = True
                             break
                         k -= 1
                     if is_continuation:
