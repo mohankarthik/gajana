@@ -127,7 +127,7 @@ class TelegramCashBot:
         self.addon_cards = (
             addon_cards
             if addon_cards is not None
-            else settings.get("addon_cards") or ADDON_CARDS
+            else ADDON_CARDS or settings.get("addon_cards") or {}
         )
         self.state = self._load_state()
 
@@ -209,7 +209,7 @@ class TelegramCashBot:
     # --- Cash ledger writes --------------------------------------------------
     def append_cash_row(self, entry: ParsedEntry, category: str, remarks: str) -> int:
         if not self.sheets:
-            return -1
+            raise RuntimeError("Google Sheets service is not configured on data_source")
         debit = "" if entry.is_credit else round(entry.amount, 2)
         credit = round(entry.amount, 2) if entry.is_credit else ""
         values = [
@@ -378,7 +378,16 @@ class TelegramCashBot:
         categorizer.categorize([txn])
         category = str(txn.get("category") or DEFAULT_CATEGORY)
 
-        row = self.append_cash_row(entry, category, remarks=label)
+        try:
+            row = self.append_cash_row(entry, category, remarks=label)
+        except Exception as e:
+            logger.error(f"Failed to append cash row: {redact_telegram_token(e)}")
+            self.send_message(
+                chat_id,
+                "Failed to record entry in Google Sheets. Please check bot logs or configuration.",
+            )
+            return False
+
         flow = "+" if entry.is_credit else ""
         summary = f"{entry.description} {flow}₹{entry.amount:.0f}"
         self.state["last_appended"] = {

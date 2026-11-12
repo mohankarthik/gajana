@@ -43,7 +43,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pypdf import PdfReader
 
-from src.addon_tracker import is_card_bill_payment_or_cashback
+from src.utils import is_card_bill_payment_or_cashback
 
 logger = logging.getLogger(__name__)
 
@@ -856,10 +856,23 @@ def extract_hdfc_card(pages: Sequence[str]) -> ExtractedStatement:
                 bare_match = re.match(r"^([A-Z]+(?:\s+(?:[A-Z]\.?|[A-Z]{2,}))+)$", norm)
                 if bare_match:
                     # Guard against wrapped description continuation lines:
-                    # If the line immediately above was a dated transaction row,
+                    # If any preceding contiguous non-blank line was a dated transaction row,
                     # this line is a continuation line, not a cardholder subheader.
-                    prev_line = lines[i - 1].strip() if i > 0 else ""
-                    if prev_line and _HDFC_CARD_DATE_RE.search(prev_line):
+                    k = i - 1
+                    is_continuation = False
+                    while k >= 0 and lines[k].strip():
+                        prev_k = lines[k].strip()
+                        k_words = set(re.findall(r"[A-Z]+", prev_k.upper()))
+                        if (
+                            k_words.intersection(_HEADER_EXCLUDE_WORDS)
+                            or "[CKYC ID" in prev_k
+                        ):
+                            break
+                        if _HDFC_CARD_DATE_RE.search(prev_k):
+                            is_continuation = True
+                            break
+                        k -= 1
+                    if is_continuation:
                         continue
                     words = set(re.findall(r"[A-Z]+", norm.upper()))
                     if not words.intersection(_HEADER_EXCLUDE_WORDS):

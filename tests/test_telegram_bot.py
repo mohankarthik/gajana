@@ -454,3 +454,54 @@ def test_addon_command_handles_data_source_error_gracefully(
     assert len(outbox) == 1
     reply = outbox[-1]["text"]
     assert "Could not fetch add-on spend right now; please try again shortly." in reply
+
+
+def test_append_cash_row_missing_sheets_service_raises_and_handles_gracefully(
+    tmp_path, sent
+):
+    outbox, _ = sent
+    ds = FakeDataSource(CASH_HISTORY)
+    ds.sheets_service = None  # simulate missing sheets service
+    state = str(tmp_path / "state.json")
+    bot = TelegramCashBot(
+        ds, SETTINGS, "TOKEN", state, addon_cards=SYNTHETIC_ADDON_CONFIG
+    )
+    cat = bot._build_categorizer()
+
+    # Direct append_cash_row raises RuntimeError
+    entry = parse_entry("Coffee 100")
+    assert entry is not None
+    with pytest.raises(RuntimeError, match="Google Sheets service is not configured"):
+        bot.append_cash_row(entry, "Expense:Dining", "Karti")
+
+    # process_message catches the error, sends error message, returns False, does not set last_appended
+    res = bot.process_message(
+        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "Coffee 100"}, cat
+    )
+    assert res is False
+    assert bot.state.get("last_appended") is None
+    assert len(outbox) == 1
+    assert "Failed to record entry in Google Sheets" in outbox[-1]["text"]
+
+
+def test_telegram_bot_addon_cards_config_precedence(tmp_path, monkeypatch):
+    ds = FakeDataSource(CASH_HISTORY)
+    state = str(tmp_path / "state.json")
+
+    # 1. Explicit addon_cards passed
+    b1 = TelegramCashBot(ds, SETTINGS, "TOKEN", state, addon_cards={"custom": "passed"})
+    assert b1.addon_cards == {"custom": "passed"}
+
+    # 2. addon_cards is None -> falls back to ADDON_CARDS or settings.get("addon_cards") or {}
+    b2 = TelegramCashBot(
+        ds,
+        {**SETTINGS, "addon_cards": {"from": "settings"}},
+        "TOKEN",
+        state,
+        addon_cards=None,
+    )
+    # If ADDON_CARDS in constants is set, it takes priority, else settings
+    from src.constants import ADDON_CARDS
+
+    expected = ADDON_CARDS or {"from": "settings"}
+    assert b2.addon_cards == expected

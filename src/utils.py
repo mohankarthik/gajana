@@ -17,6 +17,30 @@ _DATE_TOKEN_RE = re.compile(
     r"|\d{1,2}\s+[A-Za-z]{3,}\s+\d{2,4}"
 )
 
+_CARD_BILL_PAY_OR_CASHBACK_RE = re.compile(
+    r"\b(?:"
+    r"payment\s+received|cc\s+payment|credit\s*card\s+payment|"
+    r"autopay|auto\s+debit|bbps|billdesk\s+payment|"
+    r"neft\s+credit|imps\s+credit|upi\s+credit|infinity\s+payment|"
+    r"netbanking\s+payment|cash\s*back|cashback"
+    r")\b",
+    re.I,
+)
+
+
+def is_card_bill_payment_or_cashback(description: Any, amount: Any) -> bool:
+    """True if an incoming credit (amount > 0) is a card-level bill payment or cashback,
+    not a merchant reversal/refund like AMAZON REFUND or IRCTC REVERSAL.
+    """
+    try:
+        amt = float(amount)
+    except (TypeError, ValueError):
+        return False
+    if amt <= 0:
+        return False
+    desc_clean = re.sub(r"[_\s]+", " ", str(description or ""))
+    return bool(_CARD_BILL_PAY_OR_CASHBACK_RE.search(desc_clean))
+
 
 def log_and_exit(
     logger_instance: logging.Logger,

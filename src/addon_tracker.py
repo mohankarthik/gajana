@@ -16,7 +16,7 @@ from typing import Any, Hashable, Optional, Sequence
 import requests
 import pandas as pd
 
-from src.settings import ADDON_CARDS
+from src.utils import is_card_bill_payment_or_cashback
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +30,15 @@ _DEFAULT_TOKEN_PATH = os.path.join(
     os.path.dirname(__file__), "..", "secrets", "telegram.json"
 )
 
-_CARD_BILL_PAY_OR_CASHBACK_RE = re.compile(
-    r"\b(?:"
-    r"payment\s+received|cc\s+payment|credit\s*card\s+payment|"
-    r"autopay|auto\s+debit|bbps|billdesk\s+payment|"
-    r"neft\s+credit|imps\s+credit|upi\s+credit|infinity\s+payment|"
-    r"netbanking\s+payment|cash\s*back|cashback"
-    r")\b",
-    re.I,
-)
+
+def _default_addon_cards() -> dict[str, Any]:
+    """Lazily loads ADDON_CARDS from settings without requiring settings.json at import time."""
+    try:
+        from src.settings import ADDON_CARDS
+
+        return ADDON_CARDS
+    except Exception:
+        return {}
 
 
 def redact_telegram_token(msg: Any) -> str:
@@ -59,20 +59,6 @@ def _clean_remark_str(val: Any) -> str:
     if s.lower() in ("<na>", "nan"):
         return ""
     return s
-
-
-def is_card_bill_payment_or_cashback(description: Any, amount: Any) -> bool:
-    """True if an incoming credit (amount > 0) is a card-level bill payment or cashback,
-    not a merchant reversal/refund like AMAZON REFUND or IRCTC REVERSAL.
-    """
-    try:
-        amt = float(amount)
-    except (TypeError, ValueError):
-        return False
-    if amt <= 0:
-        return False
-    desc_clean = re.sub(r"[_\s]+", " ", str(description or ""))
-    return bool(_CARD_BILL_PAY_OR_CASHBACK_RE.search(desc_clean))
 
 
 @dataclass(frozen=True)
@@ -137,7 +123,7 @@ def parse_addon_config(
 ) -> tuple[list[str], list[AddonUser]]:
     """Parses addon_cards config dictionary into (primary_cardholders, users)."""
     if config is None:
-        config = ADDON_CARDS
+        config = _default_addon_cards()
     primaries = [
         str(p).strip() for p in config.get("primary_cardholders", []) if str(p).strip()
     ]
@@ -180,6 +166,62 @@ def parse_addon_config(
     return primaries, users
 
 
+_HONORIFICS = {"MR", "MRS", "MS", "MISS", "DR", "SHRI", "SMT", "SRI", "KUM"}
+
+
+def _normalize_name(name: str) -> str:
+    """Strips parenthetical suffixes, punctuation, and honorific tokens from a name."""
+    s = re.sub(r"\([^)]*\)", " ", str(name or ""))
+    s = re.sub(r"[.,]", " ", s)
+    tokens = [t.upper() for t in s.split() if t]
+    filtered = [t for t in tokens if t not in _HONORIFICS]
+    tokens = filtered if filtered else tokens
+    return " ".join(tokens)
+
+
+def _token_matches(tok_a: str, tok_b: str) -> bool:
+    if tok_a == tok_b:
+        return True
+    if len(tok_a) == 1 and tok_b.startswith(tok_a):
+        return True
+    if len(tok_b) == 1 and tok_a.startswith(tok_b):
+        return True
+    return False
+
+
+def _subsequence_match(
+    s_toks: list[str], l_toks: list[str], s_i: int = 0, l_i: int = 0
+) -> bool:
+    if s_i == len(s_toks):
+        return True
+    if l_i == len(l_toks):
+        return False
+    if len(l_toks) - l_i < len(s_toks) - s_i:
+        return False
+    if _token_matches(s_toks[s_i], l_toks[l_i]):
+        if _subsequence_match(s_toks, l_toks, s_i + 1, l_i + 1):
+            return True
+    return _subsequence_match(s_toks, l_toks, s_i, l_i + 1)
+
+
+def _matches_name(query: str, target: str) -> bool:
+    if query == target:
+        return True
+    if not query or not target:
+        return False
+    if query.startswith(target + " ") or target.startswith(query + " "):
+        return True
+    q_toks = query.split()
+    t_toks = target.split()
+    if len(q_toks) >= 2 and len(t_toks) >= 2:
+        shorter, longer = (
+            (q_toks, t_toks) if len(q_toks) <= len(t_toks) else (t_toks, q_toks)
+        )
+        if _subsequence_match(shorter, longer):
+            return True
+    return False
+
+
 def resolve_cardholder_tag(
     cardholder: Any, addon_config: Optional[dict[str, Any]] = None
 ) -> Optional[str]:
@@ -194,52 +236,32 @@ def resolve_cardholder_tag(
     s = str(cardholder).strip()
     if not s or s.lower() in ("<na>", "nan", "none"):
         return None
-    ch = " ".join(s.split()).strip()
-    if not ch:
-        return None
 
     primaries, users = parse_addon_config(addon_config)
-    ch_upper = ch.upper()
+    ch_norm = _normalize_name(s)
+    if not ch_norm:
+        return None
 
-    def _matches_name(query: str, target: str) -> bool:
-        if (
-            query == target
-            or query.startswith(target + " ")
-            or target.startswith(query + " ")
-        ):
-            return True
-        q_toks = [t.rstrip(".") for t in query.split() if t.rstrip(".")]
-        t_toks = [t.rstrip(".") for t in target.split() if t.rstrip(".")]
-        if len(q_toks) == len(t_toks) and len(q_toks) >= 2:
-            if all(
-                q == t
-                or (len(q) == 1 and t.startswith(q))
-                or (len(t) == 1 and q.startswith(t))
-                for q, t in zip(q_toks, t_toks)
-            ):
-                return True
-        return False
-
-    # Check primary cardholders: exact match or token prefix match
+    # Check primary cardholders: exact match or token subsequence match
     for p in primaries:
-        p_norm = " ".join(p.split()).strip().upper()
-        if _matches_name(ch_upper, p_norm):
+        p_norm = _normalize_name(p)
+        if _matches_name(ch_norm, p_norm):
             return None
 
     # Check configured add-on users
     for user in users:
         for pat in user.cardholder_patterns:
-            pat_norm = " ".join(pat.split()).strip().upper()
+            pat_norm = _normalize_name(pat)
             if not pat_norm:
                 continue
-            if _matches_name(ch_upper, pat_norm):
+            if _matches_name(ch_norm, pat_norm):
                 return f"addon:{user.label}"
-            if len(pat_norm) >= 4 and pat_norm in ch_upper:
+            if len(pat_norm) >= 4 and pat_norm in ch_norm:
                 return f"addon:{user.label}"
 
     # If primary cardholders is non-empty and cardholder is non-empty and did not match
     if primaries:
-        return f"addon:{ch.title()}"
+        return f"addon:{ch_norm.title()}"
 
     return None
 
@@ -322,7 +344,16 @@ def match_addon_repayment(
             if txn_date < user.repayment_since:
                 continue
 
-        # b) remarks check
+        # b) category check (recategorization away from reimburse_category opts out)
+        cat = _clean_remark_str(txn.get("category"))
+        if (
+            cat
+            and cat.lower() != "uncategorized"
+            and cat.lower() != user.reimburse_category.lower()
+        ):
+            continue
+
+        # c) remarks check
         if rem_str:
             low_rem = rem_str.lower()
             allowed_rem = (

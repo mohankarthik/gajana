@@ -858,6 +858,33 @@ def test_hdfc_card_bare_name_wrapped_continuation_guard():
     assert st.verified
 
 
+HDFC_CARD_MULTI_LINE_WRAPPED_DESC = """
+ BENGALURU 560049 KAR                                Billing Period               13 Jul, 2026 - 12 Aug, 2026
+       PREVIOUS STATEMENT DUES        PAYMENTS/CREDITS            PURCHASES/DEBIT              FINANCE CHARGES
+                   C0.00                  C0.00                       C10,500.00                   C0.00
+   Domestic Transactions
+                                                    ALEX MORGAN
+14/07/2026| 10:00            ONLINE RETAIL STORE                                                           C 10,000.00     l
+RETAIL LOGISTICS PVT LTD
+BANGALORE IN
+15/07/2026| 11:00            COFFEE SHOP                                                                   C 500.00        l
+   Reward Points Summary
+   Opening Balance: 1000
+   GST Summary
+"""
+
+
+def test_hdfc_card_bare_name_multiline_wrapped_continuation_guard():
+    st = extract_from_pages(
+        pages(HDFC_CARD_MULTI_LINE_WRAPPED_DESC), "cc-hdfc-infiniametal-2026-08.pdf"
+    )
+    assert st.kind == "hdfc-cc"
+    assert len(st.rows) == 2
+    # Neither "RETAIL LOGISTICS PVT LTD" nor "BANGALORE IN" is captured as cardholder name
+    assert [r.cardholder for r in st.rows] == ["ALEX MORGAN", "ALEX MORGAN"]
+    assert st.verified
+
+
 # --------------------------------------------------------------------------
 # Opt-in regression against the real corpus
 # --------------------------------------------------------------------------

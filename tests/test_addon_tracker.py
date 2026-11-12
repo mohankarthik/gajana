@@ -91,16 +91,25 @@ def test_resolve_cardholder_tag():
     assert resolve_cardholder_tag("ALEX MORGAN", cfg) is None
     assert resolve_cardholder_tag("Alex Morgan", cfg) is None
     assert resolve_cardholder_tag("ALEX M", cfg) is None
+    assert resolve_cardholder_tag("MR ALEX K MORGAN (PRIMARY)", cfg) is None
+    assert resolve_cardholder_tag("ALEX KARTHIK MORGAN", cfg) is None
+    assert resolve_cardholder_tag("DR. ALEX MORGAN", cfg) is None
 
     # Configured reimbursable add-on user
     assert resolve_cardholder_tag("PATRICIA MORGAN", cfg) == "addon:Mom"
     assert resolve_cardholder_tag("patricia m", cfg) == "addon:Mom"
+    assert resolve_cardholder_tag("MRS PATRICIA MORGAN (ADD-ON)", cfg) == "addon:Mom"
+    assert resolve_cardholder_tag("PATRICIA ANN MORGAN", cfg) == "addon:Mom"
 
     # Configured non-reimbursable add-on user
     assert resolve_cardholder_tag("SAMIRA K", cfg) == "addon:Partner"
 
-    # Unconfigured non-primary name -> title-cased fallback
+    # Unconfigured non-primary name -> title-cased fallback (honorifics/suffixes stripped)
     assert resolve_cardholder_tag("RANDOM COUSIN", cfg) == "addon:Random Cousin"
+    assert (
+        resolve_cardholder_tag("MR RANDOM COUSIN (ADD-ON)", cfg)
+        == "addon:Random Cousin"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +227,35 @@ def test_match_addon_repayment():
     }
     assert match_addon_repayment(txn_opt_out, users) is None
 
+    # Category check: recategorization away from reimburse_category (e.g. Income:Other) opts out
+    txn_recategorized = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "category": "Income:Other",
+        "remarks": "",
+    }
+    assert match_addon_repayment(txn_recategorized, users) is None
+
+    # Matching category ("Transfer") or empty/missing category allows match
+    txn_matching_cat = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "category": "Transfer",
+        "remarks": "",
+    }
+    assert match_addon_repayment(txn_matching_cat, users) is not None
+
+    txn_empty_cat = {
+        "date": datetime.date(2026, 8, 15),
+        "amount": 10000.0,
+        "description": "UPI/CR/123456789012/PATRICIA@OKBANK/PAYMENT",
+        "category": "",
+        "remarks": "",
+    }
+    assert match_addon_repayment(txn_empty_cat, users) is not None
+
     # Review remarks allowed
     txn_review_rem = {
         "date": datetime.date(2026, 8, 15),
@@ -227,11 +265,12 @@ def test_match_addon_repayment():
     }
     assert match_addon_repayment(txn_review_rem, users) is not None
 
-    # Explicit addon-repay tag matches directly
+    # Explicit addon-repay tag matches directly even if category is different
     txn_explicit_tag = {
         "date": datetime.date(2026, 5, 1),
         "amount": 5000.0,
         "description": "NEFT TRANSFER FROM MOTHER",
+        "category": "Income:Other",
         "remarks": "addon-repay:Mom",
     }
     matched_explicit = match_addon_repayment(txn_explicit_tag, users)
