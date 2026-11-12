@@ -711,6 +711,15 @@ _HEADER_EXCLUDE_WORDS = {
     "DETAILS",
     "DUE",
     "COMPANIES",
+    "EMI",
+    "OTHER",
+    "CHARGES",
+    "FEES",
+    "GST",
+    "INTEREST",
+    "MARKUP",
+    "LOAN",
+    "CONSOLIDATED",
 }
 
 _HDFC_CARD_DATE_RE = re.compile(

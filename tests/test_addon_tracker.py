@@ -92,7 +92,7 @@ def test_resolve_cardholder_tag():
     assert resolve_cardholder_tag("Alex Morgan", cfg) is None
     assert resolve_cardholder_tag("ALEX M", cfg) is None
     assert resolve_cardholder_tag("MR ALEX K MORGAN (PRIMARY)", cfg) is None
-    assert resolve_cardholder_tag("ALEX KARTHIK MORGAN", cfg) is None
+    assert resolve_cardholder_tag("ALEX KENNETH MORGAN", cfg) is None
     assert resolve_cardholder_tag("DR. ALEX MORGAN", cfg) is None
 
     # Configured reimbursable add-on user
@@ -110,6 +110,24 @@ def test_resolve_cardholder_tag():
         resolve_cardholder_tag("MR RANDOM COUSIN (ADD-ON)", cfg)
         == "addon:Random Cousin"
     )
+
+    # Configured add-on pattern sharing initial/surname with primary is not swallowed by primary fuzzy matching
+    shared_initial_cfg = {
+        "primary_cardholders": ["M MORGAN"],
+        "users": [
+            {
+                "id": "mom",
+                "label": "Mom",
+                "cardholder_patterns": ["M PATRICIA MORGAN"],
+                "reimburse": True,
+            }
+        ],
+    }
+    assert (
+        resolve_cardholder_tag("M PATRICIA MORGAN", shared_initial_cfg) == "addon:Mom"
+    )
+    assert resolve_cardholder_tag("M MORGAN", shared_initial_cfg) is None
+    assert resolve_cardholder_tag("MR M MORGAN (PRIMARY)", shared_initial_cfg) is None
 
 
 # ---------------------------------------------------------------------------
@@ -265,17 +283,37 @@ def test_match_addon_repayment():
     }
     assert match_addon_repayment(txn_review_rem, users) is not None
 
-    # Explicit addon-repay tag matches directly even if category is different
-    txn_explicit_tag = {
+    # Auto-tagged row with category changed away from Transfer (e.g. Income:Other) opts out
+    txn_tagged_opt_out_cat = {
         "date": datetime.date(2026, 5, 1),
         "amount": 5000.0,
         "description": "NEFT TRANSFER FROM MOTHER",
         "category": "Income:Other",
         "remarks": "addon-repay:Mom",
     }
-    matched_explicit = match_addon_repayment(txn_explicit_tag, users)
-    assert matched_explicit is not None
-    assert matched_explicit.id == "mom"
+    assert match_addon_repayment(txn_tagged_opt_out_cat, users) is None
+
+    # Auto-tagged row with free-text remarks added (e.g. birthday gift) opts out
+    txn_tagged_opt_out_rem = {
+        "date": datetime.date(2026, 5, 1),
+        "amount": 5000.0,
+        "description": "NEFT TRANSFER FROM MOTHER",
+        "category": "Transfer",
+        "remarks": "addon-repay:Mom; birthday gift",
+    }
+    assert match_addon_repayment(txn_tagged_opt_out_rem, users) is None
+
+    # Auto-tagged row with review flag preserved matches
+    txn_tagged_review = {
+        "date": datetime.date(2026, 5, 1),
+        "amount": 5000.0,
+        "description": "NEFT TRANSFER FROM MOTHER",
+        "category": "Transfer",
+        "remarks": "addon-repay:Mom; REVIEW: low-confidence",
+    }
+    matched_review = match_addon_repayment(txn_tagged_review, users)
+    assert matched_review is not None
+    assert matched_review.id == "mom"
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +538,12 @@ def test_compute_addon_report_fifo_settlement():
     mom_rep5 = next(u for u in rep5.users if u.user.id == "mom")
     assert mom_rep5.total_spend == 8000.0  # 9000 - 1000
     assert mom_rep5.net_due == 8000.0
+    assert mom_rep5.total_refunds == 1000.0
+    # Because merchant refund contributed to settling open items, use neutral label
+    msg5 = format_reimbursable_user_message(mom_rep5)
+    assert "Items total: ₹9,000" in msg5
+    assert "Already paid / adjusted: -₹1,000" in msg5
+    assert "Amount due: ₹8,000" in msg5
 
 
 def test_format_non_reimbursable_and_overview():
@@ -609,6 +653,73 @@ def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
     )
     assert "Hi Amma, credit card spend summary:" in outbox[1]["text"]
     assert "• 10 Aug – PHARMACY: ₹2,500" in outbox[1]["text"]
+
+    # Case 3: Batch containing a purchase (-3000), a refund (+500), and card bill payment (+10000)
+    outbox.clear()
+    new_cc_mixed = [
+        {
+            "date": datetime.date(2026, 8, 12),
+            "description": "CLOTHING STORE",
+            "amount": -3000.0,
+            "remarks": "addon:Mom",
+        },
+        {
+            "date": datetime.date(2026, 8, 13),
+            "description": "CLOTHING RETURN",
+            "amount": 500.0,
+            "remarks": "addon:Mom",
+        },
+        {
+            "date": datetime.date(2026, 8, 14),
+            "description": "PAYMENT RECEIVED - AUTOPAY",
+            "amount": 10000.0,
+            "remarks": "addon:Mom",
+        },
+    ]
+    res3 = send_telegram_addon_notification(
+        all_cc=new_cc_mixed,
+        all_bank=[],
+        newly_added_cc=new_cc_mixed,
+        addon_config=SYNTHETIC_ADDON_CONFIG,
+        settings_path=str(settings_file),
+        token_path=str(token_file),
+    )
+    assert res3 is True
+    # Card bill payment (10000) is skipped; net spend is 3000 - 500 = 2500 (2 txns)
+    assert (
+        "New CC statement add-on spend booked: Mom ₹2,500 (2 txns)."
+        in outbox[0]["text"]
+    )
+
+    # Case 4: Net refund activity (refund exceeds purchase)
+    outbox.clear()
+    new_cc_refund = [
+        {
+            "date": datetime.date(2026, 8, 12),
+            "description": "COFFEE",
+            "amount": -500.0,
+            "remarks": "addon:Mom",
+        },
+        {
+            "date": datetime.date(2026, 8, 13),
+            "description": "STORE REFUND",
+            "amount": 1000.0,
+            "remarks": "addon:Mom",
+        },
+    ]
+    res4 = send_telegram_addon_notification(
+        all_cc=new_cc_refund,
+        all_bank=[],
+        newly_added_cc=new_cc_refund,
+        addon_config=SYNTHETIC_ADDON_CONFIG,
+        settings_path=str(settings_file),
+        token_path=str(token_file),
+    )
+    assert res4 is True
+    assert (
+        "New CC statement add-on spend booked: Mom net -₹500 (2 txns)."
+        in outbox[0]["text"]
+    )
 
 
 # ---------------------------------------------------------------------------

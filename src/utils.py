@@ -42,6 +42,11 @@ def is_card_bill_payment_or_cashback(description: Any, amount: Any) -> bool:
     return bool(_CARD_BILL_PAY_OR_CASHBACK_RE.search(desc_clean))
 
 
+def redact_telegram_token(msg: Any) -> str:
+    """Redacts bot token patterns like bot123456:ABC-DEF from strings or exceptions."""
+    return re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<REDACTED>", str(msg))
+
+
 def log_and_exit(
     logger_instance: logging.Logger,
     message: str,

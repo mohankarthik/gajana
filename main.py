@@ -23,7 +23,7 @@ from src.llm_categorizer import LLMCategorizer
 from src.google_data_source import GoogleDataSource
 from src.transaction_matcher import TransactionMatcher
 from src.transaction_processor import ROW_KEY, TransactionProcessor
-from src.utils import log_and_exit
+from src.utils import log_and_exit, redact_telegram_token
 
 logging.basicConfig(
     level=logging.INFO,
@@ -262,10 +262,7 @@ def run_normal_mode(
         for t in added_by_type.get("cc", [])
     ):
         try:
-            from src.addon_tracker import (
-                redact_telegram_token,
-                send_telegram_addon_notification,
-            )
+            from src.addon_tracker import send_telegram_addon_notification
 
             all_cc = old_by_type.get("cc", []) + added_by_type.get("cc", [])
             all_bank = old_by_type.get("bank", []) + added_by_type.get("bank", [])

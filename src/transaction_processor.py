@@ -26,7 +26,11 @@ from src.transaction_matcher import (
     PRE_CONSUMED_KEY,
     SOURCE_KEY,
 )
-from src.utils import log_and_exit, parse_mixed_datetime
+from src.utils import (
+    is_card_bill_payment_or_cashback,
+    log_and_exit,
+    parse_mixed_datetime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -754,8 +758,13 @@ class TransactionProcessor:
                         if "cardholder" in df.columns:
 
                             def _apply_cardholder_tag(row: pd.Series) -> str:
-                                ch = row.get("cardholder")
-                                tag = resolve_cardholder_tag(ch, self.addon_cards)
+                                desc = row.get("description")
+                                credit = row.get("credit") or row.get("amount") or 0.0
+                                if is_card_bill_payment_or_cashback(desc, credit):
+                                    tag = None
+                                else:
+                                    ch = row.get("cardholder")
+                                    tag = resolve_cardholder_tag(ch, self.addon_cards)
                                 existing_rem = _clean_remark_str(row.get("remarks"))
                                 if existing_rem:
                                     if tag and tag not in existing_rem:

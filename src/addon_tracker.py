@@ -16,7 +16,7 @@ from typing import Any, Hashable, Optional, Sequence
 import requests
 import pandas as pd
 
-from src.utils import is_card_bill_payment_or_cashback
+from src.utils import is_card_bill_payment_or_cashback, redact_telegram_token
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +39,6 @@ def _default_addon_cards() -> dict[str, Any]:
         return ADDON_CARDS
     except Exception:
         return {}
-
-
-def redact_telegram_token(msg: Any) -> str:
-    """Redacts bot token patterns like bot123456:ABC-DEF from strings or exceptions."""
-    return re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<REDACTED>", str(msg))
 
 
 def _clean_remark_str(val: Any) -> str:
@@ -97,6 +92,7 @@ class UserReport:
     recent_swipes: list[dict[Hashable, Any]]
     current_month_spend: float
     previous_month_spend: float
+    total_refunds: float = 0.0
 
 
 @dataclass
@@ -242,13 +238,13 @@ def resolve_cardholder_tag(
     if not ch_norm:
         return None
 
-    # Check primary cardholders: exact match or token subsequence match
+    # Step 1: Exact match on primary cardholders
     for p in primaries:
         p_norm = _normalize_name(p)
-        if _matches_name(ch_norm, p_norm):
+        if ch_norm == p_norm:
             return None
 
-    # Check configured add-on users
+    # Step 2: Check configured add-on users (explicit patterns take precedence over fuzzy primary matching)
     for user in users:
         for pat in user.cardholder_patterns:
             pat_norm = _normalize_name(pat)
@@ -258,6 +254,12 @@ def resolve_cardholder_tag(
                 return f"addon:{user.label}"
             if len(pat_norm) >= 4 and pat_norm in ch_norm:
                 return f"addon:{user.label}"
+
+    # Step 3: Fuzzy / subsequence match on primary cardholders
+    for p in primaries:
+        p_norm = _normalize_name(p)
+        if _matches_name(ch_norm, p_norm):
+            return None
 
     # If primary cardholders is non-empty and cardholder is non-empty and did not match
     if primaries:
@@ -326,6 +328,34 @@ def match_addon_repayment(
         if not user.reimburse:
             continue
 
+        # 1. Category check: if categorized away from reimburse_category (e.g. Income:Other), opt out
+        cat = _clean_remark_str(txn.get("category"))
+        if (
+            cat
+            and cat.lower() != "uncategorized"
+            and cat.lower() != user.reimburse_category.lower()
+        ):
+            continue
+
+        # 2. Remarks check: if remarks are present, every non-empty semicolon-separated part
+        # must be either a review flag or an addon-repay tag for this user.
+        # Any free-text remark (e.g. "birthday gift", "travel") opts out.
+        if rem_str:
+            parts = [p.strip() for p in rem_str.split(";") if p.strip()]
+            valid_parts = True
+            for part in parts:
+                p_low = part.lower()
+                is_review = p_low.startswith("review:")
+                is_user_tag = (
+                    p_low == f"addon-repay:{user.label.lower()}"
+                    or p_low == f"addon-repay:{user.id.lower()}"
+                )
+                if not (is_review or is_user_tag):
+                    valid_parts = False
+                    break
+            if not valid_parts:
+                continue
+
         # Condition 1: explicit tag in remarks
         if repay_tag and (
             repay_tag.lower() == user.label.lower()
@@ -336,35 +366,14 @@ def match_addon_repayment(
         if not user.repayment_patterns:
             continue
 
-        # Condition 2:
-        # a) date check
+        # Condition 2: pattern matching (date + description)
         if user.repayment_since is not None:
             if txn_date is None:
                 continue
             if txn_date < user.repayment_since:
                 continue
 
-        # b) category check (recategorization away from reimburse_category opts out)
-        cat = _clean_remark_str(txn.get("category"))
-        if (
-            cat
-            and cat.lower() != "uncategorized"
-            and cat.lower() != user.reimburse_category.lower()
-        ):
-            continue
-
-        # c) remarks check
-        if rem_str:
-            low_rem = rem_str.lower()
-            allowed_rem = (
-                low_rem.startswith("review:")
-                or low_rem.startswith(f"addon-repay:{user.label.lower()}")
-                or low_rem.startswith(f"addon-repay:{user.id.lower()}")
-            )
-            if not allowed_rem:
-                continue
-
-        # c) description check (handles exact handle vs word boundaries for names)
+        # Description check (handles exact handle vs word boundaries for names)
         for pat in user.repayment_patterns:
             p_clean = re.sub(r"\s*@\s*", "@", pat.lower().strip())
             if not p_clean:
@@ -558,6 +567,15 @@ def compute_addon_report(
                         )
                     )
 
+        total_refunds = round(
+            sum(
+                float(t.get("amount", 0.0))
+                for t in u_cc_sorted
+                if float(t.get("amount", 0.0)) > 0
+            ),
+            2,
+        )
+
         user_reports.append(
             UserReport(
                 user=user,
@@ -568,6 +586,7 @@ def compute_addon_report(
                 recent_swipes=recent_swipes,
                 current_month_spend=curr_spend,
                 previous_month_spend=prev_spend,
+                total_refunds=total_refunds,
             )
         )
 
@@ -642,7 +661,12 @@ def format_reimbursable_user_message(report: UserReport) -> str:
     lines.append("")
     if partial_credit > 0.01:
         lines.append(f"Items total: {_format_currency(open_items_gross)}")
-        lines.append(f"Already received via UPI: -{_format_currency(partial_credit)}")
+        credit_label = (
+            "Already paid / adjusted"
+            if report.total_refunds > 0
+            else "Already received via UPI"
+        )
+        lines.append(f"{credit_label}: -{_format_currency(partial_credit)}")
         lines.append(f"Amount due: {_format_currency(report.net_due)}")
     else:
         if len(report.open_items) > 1:
@@ -763,12 +787,18 @@ def send_telegram_addon_notification(
     """Sends header notification and separate forwardable messages when new CC add-on rows land.
     Returns True if notification was sent, False if unconfigured or no add-on rows.
     """
-    # 1. Filter newly added CC rows that have an addon: tag
+    # 1. Filter newly added CC rows that have an addon: tag, skipping card bill payments
     new_addon_rows: list[tuple[str, float]] = []
     for t in newly_added_cc:
+        desc = t.get("description", "")
+        raw_amt = float(t.get("amount", 0.0) or 0.0)
+        if is_card_bill_payment_or_cashback(desc, raw_amt):
+            continue
         tag = parse_addon_tag(t.get("remarks"))
         if tag:
-            new_addon_rows.append((tag, abs(float(t.get("amount", 0.0)))))
+            # CC spend is negative amount (e.g. -500), so -raw_amt is positive spend (+500);
+            # refunds are positive amount (e.g. +100), so -raw_amt reduces spend (-100).
+            new_addon_rows.append((tag, -raw_amt))
 
     if not new_addon_rows:
         return False
@@ -810,17 +840,22 @@ def send_telegram_addon_notification(
     # 3. Compute full report
     report = compute_addon_report(all_cc, all_bank, addon_config)
 
-    # 4. Group new add-on rows by tag
-    user_swipes: dict[str, list[float]] = defaultdict(list)
+    # 4. Group new add-on rows by tag and compute net spend
+    user_spends: dict[str, list[float]] = defaultdict(list)
     for tag, amt in new_addon_rows:
-        user_swipes[tag].append(amt)
+        user_spends[tag].append(amt)
 
     summary_parts = []
-    for tag, amounts in user_swipes.items():
-        total_amt = sum(amounts)
-        fmt_a = _format_currency(total_amt)
+    for tag, amounts in user_spends.items():
+        net_spend = round(sum(amounts), 2)
         n = len(amounts)
-        summary_parts.append(f"{tag} {fmt_a} ({n} txn{'s' if n != 1 else ''})")
+        txn_str = f"({n} txn{'s' if n != 1 else ''})"
+        if net_spend >= 0:
+            summary_parts.append(f"{tag} {_format_currency(net_spend)} {txn_str}")
+        else:
+            summary_parts.append(
+                f"{tag} net -{_format_currency(abs(net_spend))} {txn_str}"
+            )
 
     header_msg = f"New CC statement add-on spend booked: {', '.join(summary_parts)}."
 
@@ -847,7 +882,7 @@ def send_telegram_addon_notification(
         for u_rep in report.users
         if u_rep.user.reimburse
     }
-    for tag in user_swipes:
+    for tag in user_spends:
         u_rep = reimb_users_with_new_rows.get(tag.lower())
         if u_rep:
             msg = format_reimbursable_user_message(u_rep)
