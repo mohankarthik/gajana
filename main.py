@@ -195,9 +195,14 @@ def find_latest_transaction_by_account(
     return latest
 
 
-def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
+def run_normal_mode(
+    processor: TransactionProcessor, categorizer: Categorizer
+) -> list[str]:
     logger.info("Running in NORMAL mode.")
+    processor.quarantined_files.clear()
+    processor.review_write_failed_files.clear()
     all_new_txns_added_count = 0
+    errors: list[str] = []
 
     # Fetch existing history for both account types up front and build the
     # category lookup index from it (exact + fuzzy layers).
@@ -213,12 +218,14 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 old_txns, statement_only=True
             )
             potential_new_txns = processor.get_new_transactions_from_statements(
-                acc_type, latest_by_account
+                acc_type, latest_by_account, defer_commit=True
             )
 
             # TransactionMatcher.find_new_txns now returns only new_txns
             new_txns_to_add = TransactionMatcher.find_new_txns(
-                old_txns, potential_new_txns
+                old_txns,
+                potential_new_txns,
+                watermark_by_account=latest_by_account,
             )
             new_txns_to_add = apply_ignore_rules(new_txns_to_add)
 
@@ -228,22 +235,26 @@ def run_normal_mode(processor: TransactionProcessor, categorizer: Categorizer):
                 )
                 categorized_txns = categorizer.categorize(new_txns_to_add)
                 processor.add_new_transactions_to_log(categorized_txns, acc_type)
+                processor.commit_statement_progress(acc_type)
                 all_new_txns_added_count += len(categorized_txns)
                 # Bank cash movements (ATM withdrawals, cash deposits) mirror
                 # into the shared Cash Transactions ledger. No-op for cc.
                 if acc_type == "bank":
                     mirror_bank_cash_txns(processor.data_source, categorized_txns)
             else:
+                processor.commit_statement_progress(acc_type)
                 logger.info(f"No new {acc_type} transactions found to add.")
         except Exception as e:  # Catch exceptions per account type processing
+            errors.append(f"{acc_type}: {e}")
             logger.error(
-                f"Error processing {acc_type} transactions in normal mode: {e}", e
+                f"Error processing {acc_type} transactions in normal mode: {e}",
+                exc_info=e,
             )
-            # Decide if you want to continue to the next account type or assert False here
 
     logger.info(
         f"Normal mode finished. Added {all_new_txns_added_count} new transactions."
     )
+    return errors
 
 
 def run_recategorize_mode(
@@ -452,7 +463,9 @@ def run_daily_mode(
             logger.warning("Daily mode without GoogleDataSource; skipping email fetch.")
         monitor.record_pdf_fetch(new_pdf_count)
 
-        run_normal_mode(processor, categorizer)
+        normal_errors = run_normal_mode(processor, categorizer)
+        if normal_errors:
+            pipeline_error = "; ".join(normal_errors)
     except Exception as e:
         pipeline_error = str(e)
         logger.error(f"Daily pipeline error: {e}", exc_info=e)
@@ -464,10 +477,28 @@ def run_daily_mode(
         pipeline_error = pipeline_error or f"could not read latest txn: {e}"
         logger.error(f"Failed reading latest txn date: {e}", exc_info=e)
 
+    unresolved_review: dict[str, int] | None = None
+    try:
+        unresolved_review = data_source.get_unresolved_review_counts()
+    except Exception as e:
+        logger.warning(f"Failed to query unresolved review counts: {e}")
+
+    if isinstance(unresolved_review, dict):
+        quarantined_to_report = dict(unresolved_review)
+        failed_writes = getattr(processor, "review_write_failed_files", None)
+        if isinstance(failed_writes, dict):
+            for fname, cnt in failed_writes.items():
+                quarantined_to_report[fname] = max(
+                    quarantined_to_report.get(fname, 0), cnt
+                )
+    else:
+        quarantined_to_report = processor.quarantined_files
+
     is_up, msg = monitor.evaluate_health(
         pipeline_error=pipeline_error,
         new_pdf_count=new_pdf_count,
         latest_txn_date=latest_txn_date,
+        quarantined_files=quarantined_to_report,
     )
     monitor.push_daily(is_up, msg)
     logger.info(f"Daily mode finished. health={'UP' if is_up else 'DOWN'} | {msg}")

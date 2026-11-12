@@ -134,15 +134,25 @@ class DataSourceInterface(abc.ABC):
         surface (e.g. CSV) simply skip it."""
         return None
 
-    def get_processed_statements(self) -> Dict[str, str]:
+    def clear_review_rows(self, account: str, file_name: str) -> None:
+        """Clears rows from the review location for a statement that parsed cleanly.
+        Default is a no-op so backends without a review surface simply skip it."""
+        return None
+
+    def get_unresolved_review_counts(self) -> Optional[Dict[str, int]]:
+        """Returns unresolved review rows mapped by file_name -> count.
+        Returns None if not supported or unable to read, so caller can fall back."""
+        return None
+
+    def get_processed_statements(self) -> Dict[str, Any]:
         """Returns a cache of statement file IDs already fully parsed, mapping
-        file ID -> the latest transaction date (ISO) that parse booked. Used to
-        skip re-parsing (and re-paying the LLM for) immutable statements the
-        account watermark already covers. Default empty so backends without
-        persistent state (e.g. CSV, tests) always re-parse."""
+        file ID -> the latest transaction date (ISO) or partial status dict that
+        parse booked. Used to skip re-parsing (and re-paying the LLM for)
+        immutable statements the account watermark already covers. Default empty
+        so backends without persistent state (e.g. CSV, tests) always re-parse."""
         return {}
 
-    def save_processed_statements(self, cache: Dict[str, str]) -> None:
+    def save_processed_statements(self, cache: Dict[str, Any]) -> None:
         """Persists the processed-statements cache. Default no-op."""
         return None
 

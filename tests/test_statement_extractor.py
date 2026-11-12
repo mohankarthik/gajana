@@ -121,6 +121,50 @@ HDFC_CARD_NEW = """
                                                     25/06/2026| 00:00    PAYMENT RECEIVED                      C 10,000.00 Cr
 """
 
+AXIS_NEW_WITH_FD = """
+ Statement Period From : 01-08-2026 To : 31-08-2026
+  Txn Date                    Transaction                 Withdrawals        Deposits           Balance      Other Information
+                Opening Balance                                                              100,000.00
+  02-08-2026    UPI/BOOK STORE/8891                          1,000.00
+  09-08-2026    NEFT REFUND                                                  5,000.00
+               Closing Balance                                                               104,000.00
+                         Term Deposit No. XXXXXXXXXXX1111 - Quick View between 01/08/2026 to 31/08/2026
+     Txn Date                            Transaction                          Value Date         Withdrawals            Deposits              Balance
+                   Opening Balance                                                                                                             50,000.00
+    21-08-2026     Int on TermDep[500.00] Tax[50.00]                         21-08-2026                                        450.00
+                   Closing Balance                                                                                                              50,450.00
+"""
+
+HDFC_CARD_NEWER = """
+ BENGALURU 560049 KAR                                Billing Period               13 Jul, 2026 - 12 Aug, 2026
+       PREVIOUS STATEMENT DUES        PAYMENTS/CREDITS            PURCHASES/DEBIT              FINANCE CHARGES
+                   C-9,585.00             C10,000.00                   C26,000.00                    C0.00
+   Domestic Transactions
+                                                    JOHN DOE             [CKYC ID : XXXXXXXXXX9999 ]
+14/07/2026| 16:14     EMI    SYNTHETIC GROCER BENGALURU                                    + 50                            C 20,000.00     l
+18/07/2026| 10:00            RETURN REFUND MERCHANT                                        - 10                         +  C 1,000.00      l
+20/07/2026| 00:00            PAYMENT RECEIVED                                                                           +  C 9,000.00      l
+                                                    JANE DOE             [CKYC ID : XXXXXXXXXX1234 ]
+25/07/2026| 12:30     EMI    CAFE COFFEE BENGALURU                                         + 25                            C 2,000.00      l
+   International Transactions
+30/07/2026| 09:15            OVERSEAS BOOKSTORE LONDON                                                                     C 4,000.00      l
+   Rewards Program Points Summary
+   Opening Balance: 1000
+   GST Summary
+"""
+
+AXIS_COMPACT_MULTILINE = """
+ Statement of account between 01-02-2026 to 28-02-2026
+ Tran Date      Chq No             Particulars                                          Debit             Credit            Balance          Init.
+                                                                                                                                                 Br
+                             OPENING BALANCE                                                                          100,000.00
+                             UPI/P2A/112233445566/SYNTHETIC/BANK/P
+ 02-02-2026                  ayment/                                                                         15,000.00        115,000.00
+ 05-02-2026                  ATM CASH WDL                                               10,000.00                            105,000.00
+                             TRANSACTION TOTAL                                          10,000.00            15,000.00
+                             CLOSING BALANCE                                                                          105,000.00
+"""
+
 
 def pages(text: str):
     """One page of layout-mode text, minus the leading blank line."""
@@ -156,6 +200,17 @@ def test_axis_compact_verifies():
     assert st.verified
 
 
+def test_axis_compact_multiline_narration():
+    st = extract_bank_statement(pages(AXIS_COMPACT_MULTILINE))
+    assert st.kind == "axis-compact"
+    assert len(st.rows) == 2
+    assert st.rows[0].description == "UPI/P2A/112233445566/SYNTHETIC/BANK/P ayment/"
+    assert st.rows[0].amount == 15000.0
+    assert st.rows[1].description == "ATM CASH WDL"
+    assert st.rows[1].amount == -10000.0
+    assert st.verified
+
+
 def test_axis_new_uses_column_band_and_opening_closing_identity():
     # The only layout with no per-row balance: the column decides the side and
     # the opening/closing identity is what proves that assignment right.
@@ -179,20 +234,98 @@ def test_axis_new_column_swap_breaks_the_identity():
     assert any("closing" in p for p in st.problems)
 
 
+def test_axis_new_excludes_trailing_term_deposit_subtables():
+    st = extract_bank_statement(pages(AXIS_NEW_WITH_FD))
+    assert st.kind == "axis-new"
+    assert len(st.rows) == 2
+    assert [r.amount for r in st.rows] == [-1000.0, 5000.0]
+    assert (st.opening, st.closing) == (100000.0, 104000.0)
+    assert st.verified
+
+
+def test_bank_statement_with_closing_balance_in_narration():
+    """A dated transaction row containing 'closing balance' in its narration
+    does not prematurely terminate the statement.
+    """
+    fixture = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+    01/08/2026        TRANSFER FOR CLOSING BALANCE OF FD              0.00            5,000.00                15,000.00
+    02/08/2026        UPI-GROCERY STORE                             500.00                0.00                14,500.00
+                      Closing Balance                                                                         14,500.00
+"""
+    st = extract_bank_statement(pages(fixture))
+    assert len(st.rows) == 2
+    assert "CLOSING BALANCE" in st.rows[0].description
+    assert st.rows[1].description == "UPI-GROCERY STORE"
+    assert [r.amount for r in st.rows] == [5000.0, -500.0]
+
+
+def test_bank_narration_continuation_across_page_break():
+    """A narration line wrapping across a page break right under Page 2's repeated
+    table header attaches to the last row of Page 1.
+    """
+    page1 = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+    01/08/2026        NEFT CR-ACME TECH SOLUTIONS                     0.00           10,000.00                20,000.00
+"""
+    page2 = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+                      INDIA PRIVATE LIMITED CONTINUATION
+    02/08/2026        UPI-GROCERY STORE                             500.00                0.00                19,500.00
+                      Closing Balance                                                                         19,500.00
+"""
+    st = extract_bank_statement([page1, page2])
+    assert len(st.rows) == 2
+    assert (
+        st.rows[0].description
+        == "NEFT CR-ACME TECH SOLUTIONS INDIA PRIVATE LIMITED CONTINUATION"
+    )
+    assert st.rows[1].description == "UPI-GROCERY STORE"
+    assert st.verified
+
+
 def test_hdfc_rel_verifies_and_folds_continuation_lines():
     st = extract_bank_statement(pages(HDFC_REL))
     assert st.kind == "hdfc-rel"
     assert [r.amount for r in st.rows] == [-770.0, 25000.0]
-    # Known wart, pinned deliberately: a wrapped narration line is carried
-    # forward onto the NEXT row rather than back onto the row it belongs to.
-    # It costs nothing today (the reconciler compares dates and amounts, never
-    # descriptions) and keeping it makes this port byte-identical to the audit
-    # snapshot; fixing it is a job for the step that starts using descriptions.
-    assert st.rows[0].description == "UPI-MATOSHRI CATTLE"
-    assert st.rows[1].description == "NEFT CR-SALARY FEED-q052676264@"
+    # Continuation lines wrap below their row and attach to it directly.
+    assert st.rows[0].description == "UPI-MATOSHRI CATTLE FEED-q052676264@"
+    assert st.rows[1].description == "NEFT CR-SALARY"
     assert (st.opening, st.closing) == (10000.0, 34230.0)
     assert (st.n_debit, st.n_credit) == (1, 1)
     assert st.verified
+
+
+def test_continuation_lines_attach_to_current_row():
+    fixture = """
+Statement From : 01-08-2026 To : 31-08-2026
+Opening Balance      : 10,000.00                                        Limit       : 0.00
+     Txn Date                     Narration                    Withdrawals            Deposits           Closing Balance
+    01/08/2026        NEFT CR-ACME IT                                 0.00           10,000.00                20,000.00
+                      SERVICES INTL PVT LTD-SYNTHETIC
+                      ACCOUNTING TRANSFER NOTES
+    02/08/2026        UPI-GROCERY STORE                               500.00                0.00                19,500.00
+HDFC BANK LIMITED
+*Closing balance includes funds earmarked for hold and uncleared funds
+Registered Office Address: HDFC Bank House, Mumbai
+                            Opening Balance          Debit Amount           Credit Amount              Closing Balance
+
+                              10,000.00                  500.00               10,000.00                   19,500.00
+"""
+    st = extract_bank_statement(pages(fixture))
+    assert st.verified
+    assert len(st.rows) == 2
+    assert (
+        st.rows[0].description
+        == "NEFT CR-ACME IT SERVICES INTL PVT LTD-SYNTHETIC ACCOUNTING TRANSFER NOTES"
+    )
+    assert st.rows[1].description == "UPI-GROCERY STORE"
 
 
 def test_hdfc_classic_verifies_with_counts():
@@ -399,6 +532,23 @@ def test_hdfc_card_new_layout_reads_the_dues_boxes():
     assert st.verified
 
 
+def test_hdfc_card_newer_layout_with_negative_dues_and_addons():
+    st = extract_from_pages(pages(HDFC_CARD_NEWER), "cc-hdfc-infiniametal-2026-08.pdf")
+    assert st.kind == "hdfc-cc"
+    assert st.period == ("13 Jul, 2026", "12 Aug, 2026")
+    assert (st.payments, st.purchases, st.charges) == (10000.0, 26000.0, 0.0)
+    assert len(st.rows) == 5
+    assert [r.amount for r in st.rows] == [-20000.0, 1000.0, 9000.0, -2000.0, -4000.0]
+    assert [r.description for r in st.rows] == [
+        "SYNTHETIC GROCER BENGALURU",
+        "RETURN REFUND MERCHANT",
+        "PAYMENT RECEIVED",
+        "CAFE COFFEE BENGALURU",
+        "OVERSEAS BOOKSTORE LONDON",
+    ]
+    assert st.verified
+
+
 def test_hdfc_card_row_without_an_amount_is_a_warning():
     amountless = HDFC_CARD_NEW.replace("C 5,000.00", "          ")
     st = extract_from_pages(pages(amountless), "cc-hdfc-infiniametal-2026-07.pdf")
@@ -412,6 +562,45 @@ def test_hdfc_card_without_any_period_marker_has_none():
     st = extract_from_pages(pages(undated), "cc-hdfc-regaliagold-2025-02.pdf")
     assert st.period is None
     assert st.verified
+
+
+def test_hdfc_card_preserves_trailing_c_in_merchant_names():
+    """Merchant names ending in 'C' (IRCTC, ACME LLC, WIDGETS INC) are not truncated
+    by the optional rupee-glyph 'C' prefix on either old or new HDFC card layouts."""
+    old_c = """
+0      Address    : A1106 Some Street                     Statement Date:12/01/2025
+                                                     Account Summary
+                                        Opening        Payment/         Purchase/        Finance        Total Dues
+                                        Balance          Credits          Debits         Charges
+
+                                       1,000.00          500.00         1,234.00          0.00          1,734.00
+
+      10/01/2025             IRCTC                                                       1,234.00
+      11/01/2025             ACME LLC                                                      500.00Cr
+"""
+    st_old = extract_from_pages(pages(old_c), "cc-hdfc-regaliagold-2025-02.pdf")
+    assert st_old.verified
+    assert [(r.description, r.amount) for r in st_old.rows] == [
+        ("IRCTC", -1234.0),
+        ("ACME LLC", 500.0),
+    ]
+
+    new_c = """
+ BENGALURU 560049 KAR                                Billing Period               13 Jul, 2026 - 12 Aug, 2026
+       PREVIOUS STATEMENT DUES        PAYMENTS/CREDITS            PURCHASES/DEBIT              FINANCE CHARGES
+                   C0.00                   C500.00                   C2,034.00                    C0.00
+   Domestic Transactions
+14/07/2026| 16:14            IRCTC                                                                            C 1,234.00     l
+15/07/2026| 12:00            WIDGETS INC                                          + 20                        C 800.00       l
+16/07/2026| 09:00            ACME LLC                                                                      +  C 500.00       l
+"""
+    st_new = extract_from_pages(pages(new_c), "cc-hdfc-infiniametal-2026-08.pdf")
+    assert st_new.verified
+    assert [(r.description, r.amount) for r in st_new.rows] == [
+        ("IRCTC", -1234.0),
+        ("WIDGETS INC", -800.0),
+        ("ACME LLC", 500.0),
+    ]
 
 
 def test_card_family_dispatch_follows_the_registry():

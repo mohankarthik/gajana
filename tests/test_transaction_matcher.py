@@ -397,3 +397,402 @@ def test_find_new_txns_keeps_distinct_references_distinct():
     ]
     result = TransactionMatcher.find_new_txns([], potential)
     assert len(result) == 3
+
+
+def test_matcher_ref_spacing_and_gst_distinction():
+    """Spacing around Ref# normalizes identically; CGST and SGST remain distinct."""
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "ONLINE RETAILER (Ref# VT262860075035080000135)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -45.0,
+            "description": "FEE CGST (Ref# VT262860075035080000135)",
+        },
+    ]
+    potential_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "ONLINE RETAILER (Ref#VT262860075035080000135)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -45.0,
+            "description": "FEE SGST (Ref# VT262860075035080000135)",
+        },
+    ]
+    new_txns = TransactionMatcher.find_new_txns(old_txns, potential_txns)
+    assert len(new_txns) == 1
+    assert "SGST" in new_txns[0]["description"]
+
+
+def test_matcher_distinct_descriptions_sharing_ref_stay_distinct():
+    """Two distinct descriptions sharing one Ref# on the same date/amount stay distinct."""
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "DCC FEE (Ref# ST1234567890)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "MERCHANTSWIPE (Ref# ST1234567890)",
+        },
+    ]
+    result = TransactionMatcher.find_new_txns([], potential)
+    assert len(result) == 2
+    descs = {t["description"] for t in result}
+    assert "DCC FEE (Ref# ST1234567890)" in descs
+    assert "MERCHANTSWIPE (Ref# ST1234567890)" in descs
+
+
+def test_matcher_lookback_window_multiset_dedup_and_description_drift():
+    """Lookback window (date <= watermark) deduplicates by (date, account, amount) multiset count,
+    ignoring description drift, while booking missing rows and backdated refunds.
+    """
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 7, 10, 0, 0)}
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -1500.0,
+            "description": "EMI ASTER STORE",  # LLM booked with EMI prefix
+        },
+        {
+            "date": datetime.datetime(2026, 7, 8),
+            "account": "cc-hdfc-test",
+            "amount": -320.0,
+            "description": "CLOUD INC",  # LLM booked without USD note
+        },
+        {
+            "date": datetime.datetime(2026, 7, 9),
+            "account": "cc-hdfc-test",
+            "amount": -50000.0,
+            "description": "SALARY (auto-split from payslip)",  # synthetic plugin row excluded
+        },
+    ]
+    potential_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -1500.0,
+            "description": "ASTER STORE",  # StatementExtractor description (drifted)
+        },
+        {
+            "date": datetime.datetime(2026, 7, 8),
+            "account": "cc-hdfc-test",
+            "amount": -320.0,
+            "description": "CLOUD INC USD 3.86",  # StatementExtractor description (drifted)
+        },
+        {
+            "date": datetime.datetime(2026, 6, 25),  # 15 days ago, backdated refund
+            "account": "cc-hdfc-test",
+            "amount": 450.0,
+            "description": "BACKDATED REFUND",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),  # on watermark date, missing CGST
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "CGST TAX LEG",
+        },
+        {
+            "date": datetime.datetime(
+                2026, 7, 10
+            ),  # on watermark date, missing SGST (same amt)
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "SGST TAX LEG",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),  # date > watermark (forward)
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "DCC FEE (Ref# ST9999)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),  # date > watermark (forward)
+            "account": "cc-hdfc-test",
+            "amount": -120.0,
+            "description": "MERCHANTSWIPE (Ref# ST9999)",
+        },
+    ]
+
+    new_txns = TransactionMatcher.find_new_txns(
+        old_txns, potential_txns, watermark_by_account=watermark
+    )
+    # The 2 drifted description txns on 07-05 and 07-08 were deduped (0 duplicates).
+    # Expected booked: BACKDATED REFUND, CGST TAX LEG, SGST TAX LEG, DCC FEE, MERCHANTSWIPE.
+    assert len(new_txns) == 5
+    descs = [t["description"] for t in new_txns]
+    assert "ASTER STORE" not in descs
+    assert "CLOUD INC USD 3.86" not in descs
+    assert "BACKDATED REFUND" in descs
+    assert "CGST TAX LEG" in descs
+    assert "SGST TAX LEG" in descs
+    assert "DCC FEE (Ref# ST9999)" in descs
+    assert "MERCHANTSWIPE (Ref# ST9999)" in descs
+
+
+def test_matcher_duplicate_feeds_collapse_in_lookback_window():
+    """Duplicate feeds arriving with the same missing txn in the lookback window collapse."""
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "CGST TAX LEG",
+            SOURCE_KEY: "feed_a.pdf",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -80.0,
+            "description": "CGST TAX LEG",
+            SOURCE_KEY: "feed_b.pdf",
+        },
+    ]
+    # No old_txns, so this row is genuinely missing. It should only be booked once!
+    result = TransactionMatcher.find_new_txns(
+        [
+            {
+                "date": datetime.datetime(2026, 7, 1),
+                "account": "cc-hdfc-test",
+                "amount": -1.0,
+                "description": "dummy",
+            }
+        ],
+        potential,
+        watermark_by_account=watermark,
+    )
+    assert len(result) == 1
+    assert result[0]["description"] == "CGST TAX LEG"
+
+
+def test_matcher_value_date_drift_tolerance_in_lookback_window():
+    """Value-date drift (±1..3 days) inside the lookback window is absorbed so
+    txns booked on value date by LLM are not double-booked when extractor reads txn date.
+    """
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 10, 10)}
+    # Ledger holds 1 transaction booked by LLM on value date (2026-10-02)
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 10, 2),
+            "account": "cc-hdfc-test",
+            "amount": -100.0,
+            "description": "LLM BOOKED ON VALUE DATE",
+        }
+    ]
+    # Extractor reads 2 transactions with amount -100:
+    # 1. 2026-10-01 (drifted by 1 day from 10-02) -> should match old_txns[0] and NOT be re-booked
+    # 2. 2026-10-03 (a second genuine txn on 10-03) -> unmatched, must be booked!
+    potential = [
+        {
+            "date": datetime.datetime(2026, 10, 1),
+            "account": "cc-hdfc-test",
+            "amount": -100.0,
+            "description": "SWIPE ON TXN DATE",
+        },
+        {
+            "date": datetime.datetime(2026, 10, 3),
+            "account": "cc-hdfc-test",
+            "amount": -100.0,
+            "description": "SECOND GENUINE SWIPE",
+        },
+    ]
+    result = TransactionMatcher.find_new_txns(
+        old_txns, potential, watermark_by_account=watermark
+    )
+    assert len(result) == 1
+    assert result[0]["description"] == "SECOND GENUINE SWIPE"
+
+
+def test_matcher_watermark_account_name_case_and_whitespace_fallback():
+    """watermark_by_account matches account names with leading/trailing whitespace or mixed case."""
+    watermark = {"  CC-HDFC-TEST  ": datetime.datetime(2026, 7, 10)}
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -50.0,
+            "description": "LLM BOOKED ROW",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -50.0,
+            "description": "EXTRACTOR ROW WITH DRIFTED DESC",
+        }
+    ]
+    # Because watermark_by_account matched cc-hdfc-test, lookback window dedup applies
+    result = TransactionMatcher.find_new_txns(
+        old_txns, potential, watermark_by_account=watermark
+    )
+    assert result == []
+
+
+def test_matcher_lookback_handles_none_or_nan_description():
+    """Unmatched lookback booking with None/NaN description does not raise TypeError."""
+    watermark = {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 1),
+            "account": "cc-hdfc-test",
+            "amount": -10.0,
+            "description": "EARLIER ROW",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -75.0,
+            "description": "VALID STRING",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -75.0,
+            "description": None,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "cc-hdfc-test",
+            "amount": -75.0,
+            "description": float("nan"),
+        },
+    ]
+    res = TransactionMatcher.find_new_txns(
+        old_txns, potential, watermark_by_account=watermark
+    )
+    assert len(res) == 3
+    assert [r["amount"] for r in res] == [-75.0, -75.0, -75.0]
+
+
+def test_matcher_pre_consumed_lookback_drift_accounting():
+    """Pre-consumed partial-retry rows with ±3d value-date drift consume Day 1's
+    ledger entry in available_old so Day 2's rescued sibling row is booked."""
+    from src.transaction_matcher import (
+        EFFECTIVE_WM_KEY,
+        PRE_CONSUMED_KEY,
+        SOURCE_KEY,
+    )
+
+    base_wm = datetime.datetime(2026, 7, 10)
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 6),  # Day 1 LLM value date
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "LLM VALUE DATE ROW",
+        }
+    ]
+    pre_ct = {
+        "date": datetime.datetime(2026, 7, 5),
+        "account": "cc-hdfc-test",
+        "amount": -500.0,
+        "description": "EXTRACTOR SIBLING 1",
+        SOURCE_KEY: "stmt.pdf",
+        EFFECTIVE_WM_KEY: base_wm,
+    }
+    rescued = {
+        "date": datetime.datetime(2026, 7, 5),
+        "account": "cc-hdfc-test",
+        "amount": -500.0,
+        "description": "EXTRACTOR SIBLING 2",
+        SOURCE_KEY: "stmt.pdf",
+        EFFECTIVE_WM_KEY: base_wm,
+        PRE_CONSUMED_KEY: [pre_ct],
+    }
+    res = TransactionMatcher.find_new_txns(
+        old_txns,
+        [rescued],
+        watermark_by_account={"cc-hdfc-test": datetime.datetime(2026, 7, 31)},
+    )
+    assert len(res) == 1
+    assert res[0]["amount"] == -500.0
+    assert EFFECTIVE_WM_KEY not in res[0]
+    assert PRE_CONSUMED_KEY not in res[0]
+
+
+def test_matcher_does_not_absorb_missing_lookback_row_into_nearby_forward_row():
+    """A genuinely missing lookback row (Jul 9, <= Jul 10 watermark) and a new forward
+    row (Jul 11, > Jul 10 watermark) of the same amount (-10,000) in one statement are
+    BOTH booked; the forward row never satisfies ±3d drift matching."""
+    from src.transaction_matcher import EFFECTIVE_WM_KEY, SOURCE_KEY
+
+    old_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "bank-hdfc-test",
+            "amount": -250.0,
+            "description": "WATERMARK GROCERY",
+        }
+    ]
+    potential = [
+        {
+            "date": datetime.datetime(2026, 7, 9),
+            "account": "bank-hdfc-test",
+            "amount": -10000.0,
+            "description": "ATM WDL JUL 9",
+            SOURCE_KEY: "stmt-jul.pdf",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "account": "bank-hdfc-test",
+            "amount": -10000.0,
+            "description": "ATM WDL JUL 11",
+            SOURCE_KEY: "stmt-jul.pdf",
+        },
+    ]
+    res = TransactionMatcher.find_new_txns(
+        old_txns,
+        potential,
+        watermark_by_account={"bank-hdfc-test": datetime.datetime(2026, 7, 10)},
+    )
+    assert len(res) == 2
+    assert [(r["date"], r["amount"]) for r in res] == [
+        (datetime.datetime(2026, 7, 9), -10000.0),
+        (datetime.datetime(2026, 7, 11), -10000.0),
+    ]
+
+    # Cross-source exact-date overlap (partial-retry forward row + second PDF lookback row)
+    # deduplicates once instead of double-booking:
+    cross_pot = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "bank-hdfc-test",
+            "amount": -400.0,
+            "description": "RESCUED FORWARD ROW",
+            SOURCE_KEY: "stmt-jul.pdf",
+            EFFECTIVE_WM_KEY: datetime.datetime(2026, 6, 30),
+        },
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "account": "bank-hdfc-test",
+            "amount": -400.0,
+            "description": "SAME ROW IN OVERLAPPING AUG LOOKBACK",
+            SOURCE_KEY: "stmt-aug.pdf",
+        },
+    ]
+    cross_res = TransactionMatcher.find_new_txns(
+        old_txns,
+        cross_pot,
+        watermark_by_account={"bank-hdfc-test": datetime.datetime(2026, 7, 10)},
+    )
+    assert len(cross_res) == 1
+    assert cross_res[0]["amount"] == -400.0

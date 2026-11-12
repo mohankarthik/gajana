@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from functools import wraps
+from collections import Counter, defaultdict
+import datetime
 import json
 import logging
 import os
+import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
@@ -28,6 +31,58 @@ from src.interfaces import DataSourceFile, DataSourceInterface
 from src.utils import log_and_exit
 
 logger = logging.getLogger(__name__)
+
+_ACK_TOKENS = {"ack", "acknowledged", "resolved", "done", "ignore", "ignored"}
+
+
+def _normalize_date_str(date_str: str) -> str:
+    s = date_str.strip()
+    if not s:
+        return ""
+    try:
+        return datetime.date.fromisoformat(s).isoformat()
+    except ValueError:
+        pass
+    for fmt in (
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%m/%d/%Y",
+        "%d %b %Y",
+        "%d-%b-%Y",
+        "%d %b %y",
+        "%d-%b-%y",
+    ):
+        try:
+            return datetime.datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return s
+
+
+def _normalize_amount_str(val: Any) -> str:
+    s = str(val).strip().replace(",", "")
+    if not s:
+        return ""
+    try:
+        return f"{float(s):.2f}"
+    except ValueError:
+        return s
+
+
+def _review_row_key(r: Sequence[Any]) -> tuple[str, str, str, str, str, str]:
+    account = str(r[0]).strip() if len(r) > 0 else ""
+    date_str = _normalize_date_str(str(r[1])) if len(r) > 1 else ""
+    debit = _normalize_amount_str(r[3]) if len(r) > 3 else ""
+    credit = _normalize_amount_str(r[4]) if len(r) > 4 else ""
+    reason_disc = (
+        re.sub(r"[-+]?\d[\d,.]*", "#", str(r[5]).strip().lower())
+        if (not date_str and not debit and not credit and len(r) > 5)
+        else ""
+    )
+    file_name = str(r[6]).strip() if len(r) > 6 else ""
+    return (account, date_str, debit, credit, reason_disc, file_name)
 
 
 def retry_on_gcp_error(max_retries=3, initial_backoff=5):
@@ -81,6 +136,7 @@ class GoogleDataSource(DataSourceInterface):
         self.logger = logger
         self.drive_service = self._get_drive_service()
         self.sheets_service = self._get_sheets_service()
+        self._sheet_id_cache: dict[str, int] = {}
 
     def _get_credential(self) -> ServiceAccountCredentials:
         logger.info(
@@ -339,44 +395,281 @@ class GoogleDataSource(DataSourceInterface):
         updated = result.get("updates", {}).get("updatedCells", 0)
         logger.info(f"Appended {updated} cells ({len(data_values)} rows) to cash log.")
 
+    def _get_sheet_id(self, sheet_name: str) -> Optional[int]:
+        """Gets numeric sheetId for a sheet tab title, caching across calls."""
+        if not hasattr(self, "_sheet_id_cache"):
+            self._sheet_id_cache = {}
+        if sheet_name in self._sheet_id_cache:
+            return self._sheet_id_cache[sheet_name]
+        try:
+            metadata = (
+                self.sheets_service.spreadsheets()
+                .get(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    fields="sheets.properties(sheetId,title)",
+                )
+                .execute()
+            )
+            for s in metadata.get("sheets", []):
+                props = s.get("properties", {})
+                title = props.get("title")
+                sid = props.get("sheetId")
+                if title and sid is not None:
+                    self._sheet_id_cache[title] = int(sid)
+            return self._sheet_id_cache.get(sheet_name)
+        except Exception as e:
+            logger.warning(f"Could not retrieve sheetId for '{sheet_name}': {e}")
+            return None
+
+    def _delete_sheet_rows(
+        self, sheet_id: int, zero_based_row_indices: List[int]
+    ) -> None:
+        """Deletes rows in a sheet atomically via deleteDimension batchUpdate,
+        merging contiguous indices and deleting descending to preserve row offsets."""
+        if not zero_based_row_indices:
+            return
+        sorted_indices = sorted(set(zero_based_row_indices))
+        ranges: list[tuple[int, int]] = []
+        for idx in sorted_indices:
+            if ranges and idx == ranges[-1][1]:
+                ranges[-1] = (ranges[-1][0], idx + 1)
+            else:
+                ranges.append((idx, idx + 1))
+        # Sort descending by start index so deletions never shift earlier row offsets
+        ranges.sort(key=lambda r: r[0], reverse=True)
+        requests = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": start_idx,
+                        "endIndex": end_idx,
+                    }
+                }
+            }
+            for start_idx, end_idx in ranges
+        ]
+        self.sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=TRANSACTIONS_SHEET_ID,
+            body={"requests": requests},
+        ).execute()
+
     @retry_on_gcp_error()
     def write_review_rows(self, data_values: List[List[Any]]) -> None:
         """Appends validation-flagged rows to the Review tab for manual triage.
 
-        Writes at an explicitly computed row rather than via ``append``: with a
-        column-range target, append re-anchors on the table it finds and each
-        batch landed five columns right of the last one (A, then F, then K...),
-        so the tab read as a staircase instead of a list.
+        Idempotent across daily retries:
+        - Keeps acknowledged rows in col H (e.g. ack, resolved, done, ignore) untouched.
+        - Deletes unacknowledged prior rows for the incoming (account, file_name) via deleteDimension.
+        - Appends incoming unacknowledged rows at the tail via valueInputOption='RAW'.
         """
         if not data_values:
             return
-        existing = (
+        existing: List[List[Any]] = (
             self.sheets_service.spreadsheets()
             .values()
             .get(
                 spreadsheetId=TRANSACTIONS_SHEET_ID,
-                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:A",
+                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:H",
             )
             .execute()
             .get("values", [])
         )
-        start = len(existing) + 1
-        result = (
-            self.sheets_service.spreadsheets()
-            .values()
-            .update(
-                spreadsheetId=TRANSACTIONS_SHEET_ID,
-                range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
-                valueInputOption="USER_ENTERED",
-                body={"values": data_values},
+
+        incoming_keys = {
+            (str(row[0]).strip(), str(row[6]).strip())
+            for row in data_values
+            if len(row) >= 7
+        }
+
+        # Count acknowledged rows matching incoming keys so multiplicity is preserved
+        ack_counts = Counter(
+            _review_row_key(r)
+            for r in existing
+            if len(r) >= 7
+            and (str(r[0]).strip(), str(r[6]).strip()) in incoming_keys
+            and (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
+        )
+
+        remaining_values: List[List[Any]] = []
+        for v in data_values:
+            if len(v) >= 7:
+                key = _review_row_key(v)
+                if ack_counts[key] > 0:
+                    ack_counts[key] -= 1
+                    continue
+            remaining_values.append(v)
+
+        # Find 0-based indices of UNACKNOWLEDGED rows matching incoming_keys to delete
+        unack_indices = [
+            i
+            for i, r in enumerate(existing)
+            if len(r) >= 7
+            and (str(r[0]).strip(), str(r[6]).strip()) in incoming_keys
+            and not (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
+        ]
+
+        deleted_count = 0
+        if unack_indices:
+            if len(unack_indices) == len(existing):
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:Z",
+                ).execute()
+                deleted_count = len(existing)
+                logger.info(
+                    f"Cleared all {deleted_count} prior unacknowledged review row(s)."
+                )
+            else:
+                sheet_id = self._get_sheet_id(REVIEW_TRANSACTIONS_SHEET_NAME)
+                if sheet_id is not None:
+                    self._delete_sheet_rows(sheet_id, unack_indices)
+                    deleted_count = len(unack_indices)
+                    logger.info(
+                        f"Deleted {deleted_count} prior unacknowledged review row(s) via deleteDimension."
+                    )
+                else:
+                    kept = [r for i, r in enumerate(existing) if i not in unack_indices]
+                    all_to_write = kept + remaining_values
+                    if all_to_write:
+                        self.sheets_service.spreadsheets().values().update(
+                            spreadsheetId=TRANSACTIONS_SHEET_ID,
+                            range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
+                            valueInputOption="RAW",
+                            body={"values": all_to_write},
+                        ).execute()
+                    if len(all_to_write) < len(existing):
+                        self.sheets_service.spreadsheets().values().clear(
+                            spreadsheetId=TRANSACTIONS_SHEET_ID,
+                            range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{len(all_to_write) + 1}:H",
+                        ).execute()
+                    logger.info(
+                        f"Rewrote Review tab without {len(unack_indices)} unack row(s) "
+                        f"and appended {len(remaining_values)} new row(s)."
+                    )
+                    return
+
+        if remaining_values:
+            start = (len(existing) - deleted_count) + 1
+            result = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{start}",
+                    valueInputOption="RAW",
+                    body={"values": remaining_values},
+                )
+                .execute()
             )
-            .execute()
-        )
-        updated = result.get("updatedCells", 0)
-        logger.info(
-            f"Wrote {updated} cells ({len(data_values)} rows) to Review tab "
-            f"from row {start}."
-        )
+            updated = result.get("updatedCells", 0)
+            logger.info(
+                f"Wrote {updated} cells ({len(remaining_values)} rows) to Review tab from row {start}."
+            )
+
+    def clear_review_rows(self, account: str, file_name: str) -> None:
+        """Removes review rows for (account, file_name) when a statement later parses cleanly.
+        Uses atomic deleteDimension; makes zero write calls if no matching rows exist.
+        """
+        try:
+            existing: List[List[Any]] = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .get(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:H",
+                )
+                .execute()
+                .get("values", [])
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to read Review tab to clear rows for '{file_name}': {e}"
+            )
+            return
+
+        indices = [
+            i
+            for i, r in enumerate(existing)
+            if len(r) >= 7
+            and str(r[0]).strip() == account.strip()
+            and str(r[6]).strip() == file_name.strip()
+            and not (len(r) >= 8 and str(r[7]).strip().lower() in _ACK_TOKENS)
+        ]
+        if not indices:
+            return
+
+        try:
+            if len(indices) == len(existing):
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:Z",
+                ).execute()
+                logger.info(
+                    f"Cleared all {len(indices)} review row(s) for '{file_name}' ({account})."
+                )
+                return
+            sheet_id = self._get_sheet_id(REVIEW_TRANSACTIONS_SHEET_NAME)
+            if sheet_id is not None:
+                self._delete_sheet_rows(sheet_id, indices)
+                logger.info(
+                    f"Deleted {len(indices)} review row(s) for '{file_name}' ({account}) via deleteDimension."
+                )
+            else:
+                kept = [r for i, r in enumerate(existing) if i not in indices]
+                self.sheets_service.spreadsheets().values().update(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A1",
+                    valueInputOption="RAW",
+                    body={"values": kept},
+                ).execute()
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A{len(kept) + 1}:H",
+                ).execute()
+        except Exception as e:
+            logger.warning(f"Failed to delete review rows for '{file_name}': {e}")
+
+    def get_unresolved_review_counts(self) -> Optional[Dict[str, int]]:
+        """Reads Review tab and returns counts of unacknowledged rows grouped by file_name.
+        Returns None on read failure."""
+        try:
+            existing: List[List[Any]] = (
+                self.sheets_service.spreadsheets()
+                .values()
+                .get(
+                    spreadsheetId=TRANSACTIONS_SHEET_ID,
+                    range=f"'{REVIEW_TRANSACTIONS_SHEET_NAME}'!A:H",
+                )
+                .execute()
+                .get("values", [])
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read Review tab for unresolved counts: {e}")
+            return None
+
+        counts: dict[str, int] = defaultdict(int)
+        for r in existing:
+            if not r or len(r) < 7:
+                continue
+            if (len(r) > 0 and str(r[0]).strip().lower() == "account") or (
+                len(r) > 1 and str(r[1]).strip().lower() == "date"
+            ):
+                continue
+            if str(r[2]).strip().upper() == "STATEMENT" and not str(r[1]).strip():
+                continue
+            debit = str(r[3]).strip() if len(r) > 3 else ""
+            credit = str(r[4]).strip() if len(r) > 4 else ""
+            if not str(r[1]).strip() and not debit and not credit:
+                continue
+
+            col_h = str(r[7]).strip().lower() if len(r) >= 8 else ""
+            if col_h not in _ACK_TOKENS:
+                file_name = str(r[6]).strip()
+                if file_name:
+                    counts[file_name] += 1
+        return dict(counts)
 
     # --- Processed-statements cache (local state; avoids re-parsing/paying the
     # LLM for immutable statements the account watermark already covers) --------
@@ -384,7 +677,7 @@ class GoogleDataSource(DataSourceInterface):
         "data", "state", "processed_statements.json"
     )
 
-    def get_processed_statements(self) -> Dict[str, str]:
+    def get_processed_statements(self) -> Dict[str, Any]:
         path = self._PROCESSED_STATEMENTS_PATH
         if not os.path.exists(path):
             return {}
@@ -396,7 +689,7 @@ class GoogleDataSource(DataSourceInterface):
             logger.warning(f"Could not read processed-statements cache: {e}")
             return {}
 
-    def save_processed_statements(self, cache: Dict[str, str]) -> None:
+    def save_processed_statements(self, cache: Dict[str, Any]) -> None:
         path = self._PROCESSED_STATEMENTS_PATH
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)

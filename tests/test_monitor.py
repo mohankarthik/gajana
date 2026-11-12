@@ -109,6 +109,125 @@ def test_health_down_when_no_txns():
     assert "no transactions in log" in msg
 
 
+def test_health_down_on_quarantined_files():
+    monitor.record_pdf_fetch(1, today=TODAY)
+    is_up, msg = monitor.evaluate_health(
+        pipeline_error=None,
+        new_pdf_count=1,
+        latest_txn_date=_dt(2026, 7, 2),
+        today=TODAY,
+        quarantined_files={"bank-axis-test.pdf": 3},
+    )
+    assert is_up is False
+    assert "3 txn(s) quarantined in bank-axis-test.pdf (3)" in msg
+
+
+def test_run_daily_mode_propagates_quarantined_files(monkeypatch):
+    import main
+    from unittest.mock import MagicMock
+
+    mock_ds = MagicMock()
+    mock_processor = MagicMock()
+    mock_processor.quarantined_files = {"stmt.pdf": 2}
+    mock_categorizer = MagicMock()
+
+    captured_push = {}
+
+    def _mock_push_daily(is_up, msg):
+        captured_push["is_up"] = is_up
+        captured_push["msg"] = msg
+
+    monkeypatch.setattr(main.monitor, "push_daily", _mock_push_daily)
+    monkeypatch.setattr(main, "run_normal_mode", lambda proc, cat: None)
+    monkeypatch.setattr(main, "_latest_txn_date", lambda proc: datetime.datetime.now())
+    monitor.record_pdf_fetch(1, today=datetime.date.today())
+
+    main.run_daily_mode(mock_ds, mock_processor, mock_categorizer, fetch_days=1)
+    assert captured_push["is_up"] is False
+    assert "quarantined in stmt.pdf (2)" in captured_push["msg"]
+
+
+def test_run_daily_mode_uses_unresolved_review_counts_when_available(monkeypatch):
+    import main
+    from unittest.mock import MagicMock
+
+    mock_ds = MagicMock()
+    # Review tab has 0 unresolved rows because user marked them ack
+    mock_ds.get_unresolved_review_counts.return_value = {}
+    mock_processor = MagicMock()
+    mock_processor.quarantined_files = {"stmt.pdf": 2}
+    mock_categorizer = MagicMock()
+
+    captured_push = {}
+
+    def _mock_push_daily(is_up, msg):
+        captured_push["is_up"] = is_up
+        captured_push["msg"] = msg
+
+    monkeypatch.setattr(main.monitor, "push_daily", _mock_push_daily)
+    monkeypatch.setattr(main, "run_normal_mode", lambda proc, cat: None)
+    monkeypatch.setattr(main, "_latest_txn_date", lambda proc: datetime.datetime.now())
+    monitor.record_pdf_fetch(1, today=datetime.date.today())
+
+    main.run_daily_mode(mock_ds, mock_processor, mock_categorizer, fetch_days=1)
+    # Because unresolved_review is {} (user acknowledged in Review tab), health is UP!
+    assert captured_push["is_up"] is True
+    assert "OK" in captured_push["msg"]
+
+
+def test_run_daily_mode_propagates_normal_mode_errors(monkeypatch):
+    import main
+    from unittest.mock import MagicMock
+
+    mock_ds = MagicMock()
+    mock_ds.get_unresolved_review_counts.return_value = {}
+    mock_processor = MagicMock()
+    mock_processor.quarantined_files = {}
+    mock_categorizer = MagicMock()
+
+    captured_push = {}
+    monkeypatch.setattr(
+        main.monitor,
+        "push_daily",
+        lambda is_up, msg: captured_push.update(is_up=is_up, msg=msg),
+    )
+    monkeypatch.setattr(main, "run_normal_mode", lambda proc, cat: ["cc: Sheets 503"])
+    monkeypatch.setattr(main, "_latest_txn_date", lambda proc: datetime.datetime.now())
+    monitor.record_pdf_fetch(1, today=datetime.date.today())
+
+    main.run_daily_mode(mock_ds, mock_processor, mock_categorizer, fetch_days=1)
+    assert captured_push["is_up"] is False
+    assert "cc: Sheets 503" in captured_push["msg"]
+
+
+def test_run_daily_mode_merges_review_write_failures_with_unresolved_review(
+    monkeypatch,
+):
+    import main
+    from unittest.mock import MagicMock
+
+    mock_ds = MagicMock()
+    mock_ds.get_unresolved_review_counts.return_value = {}
+    mock_processor = MagicMock()
+    mock_processor.quarantined_files = {"bad.pdf": 1}
+    mock_processor.review_write_failed_files = {"bad.pdf": 1}
+    mock_categorizer = MagicMock()
+
+    captured_push = {}
+    monkeypatch.setattr(
+        main.monitor,
+        "push_daily",
+        lambda is_up, msg: captured_push.update(is_up=is_up, msg=msg),
+    )
+    monkeypatch.setattr(main, "run_normal_mode", lambda proc, cat: [])
+    monkeypatch.setattr(main, "_latest_txn_date", lambda proc: datetime.datetime.now())
+    monitor.record_pdf_fetch(1, today=datetime.date.today())
+
+    main.run_daily_mode(mock_ds, mock_processor, mock_categorizer, fetch_days=1)
+    assert captured_push["is_up"] is False
+    assert "bad.pdf (1)" in captured_push["msg"]
+
+
 def test_push_noop_when_url_empty(monkeypatch):
     called = {"n": 0}
 

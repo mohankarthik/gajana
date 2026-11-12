@@ -1058,3 +1058,808 @@ def test_get_old_transactions_carries_row_index(
 
     assert [t[ROW_KEY] for t in txns] == [0, 1, 2]
     assert [t["description"] for t in txns] == ["SHOP A", "SHOP B", "SHOP C"]
+
+
+def _generate_synthetic_pdf(text: str) -> bytes:
+    import io
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    pdf = canvas.Canvas(buf, pagesize=A4)
+    pdf.setFont("Courier", 6)
+    y = A4[1] - 30
+    for line in text.lstrip("\n").split("\n"):
+        pdf.drawString(20, y, line)
+        y -= 8
+    pdf.save()
+    return buf.getvalue()
+
+
+_SYNTHETIC_AXIS_NEW = """
+ Statement Period From : 01-06-2026 To : 30-06-2026
+  Txn Date                    Transaction                 Withdrawals        Deposits           Balance
+                Opening Balance                                                              200,000.00
+  02-06-2026    UPI/SYNTHETIC GROCERY/1234                   2,000.00
+  09-06-2026    NEFT REFUND FROM STORE                                       1,000.00
+               Closing Balance                                                               199,000.00
+"""
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_deterministic_extractor_used_ahead_of_pdf_parser(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """When StatementExtractor verifies, PDFParser is never instantiated."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-axis-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="bank-axis-test-2026-06.pdf")
+    ]
+    mock_data_source.download_file.return_value = _generate_synthetic_pdf(
+        _SYNTHETIC_AXIS_NEW
+    )
+    mock_data_source.get_processed_statements.return_value = {}
+
+    txns = transaction_processor.get_new_transactions_from_statements(
+        "bank", {"bank-axis-test": datetime.datetime(2026, 5, 31)}
+    )
+    assert len(txns) == 2
+    assert mock_pdf_parser_class.call_count == 0
+    assert txns[0]["description"] == "UPI/SYNTHETIC GROCERY/1234"
+    assert txns[0]["amount"] == -2000.0
+
+
+@patch("src.pdf_parser.PDFParser")
+def test_fallback_to_pdf_parser_when_extractor_unverified(
+    mock_pdf_parser_class, transaction_processor, mock_data_source, mocker
+):
+    """When StatementExtractor cannot verify, falls back to PDFParser + validator."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-axis-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="bank-axis-test-2026-06.pdf")
+    ]
+    # Remove closing balance so deterministic extractor fails verification
+    tampered = _SYNTHETIC_AXIS_NEW.replace("Closing Balance", "Some Balance")
+    mock_data_source.download_file.return_value = _generate_synthetic_pdf(tampered)
+    mock_data_source.get_processed_statements.return_value = {}
+
+    inst = mock_pdf_parser_class.return_value
+    inst.parse_pdf_with_text.return_value = (
+        [
+            {
+                "date": "2026-06-02",
+                "description": "UPI/SYNTHETIC GROCERY/1234",
+                "debit": "2000.00",
+                "credit": "",
+            }
+        ],
+        "pdf text",
+        {"closing_balance": "199000.00"},
+    )
+    mocker.patch(
+        "src.statement_validator.validate_statement",
+        return_value=mocker.MagicMock(
+            passed=[
+                {
+                    "date": "2026-06-02",
+                    "description": "UPI/SYNTHETIC GROCERY/1234",
+                    "debit": "2000.00",
+                    "credit": "",
+                }
+            ],
+            flagged=[],
+            statement_flags=[],
+        ),
+    )
+
+    txns = transaction_processor.get_new_transactions_from_statements(
+        "bank", {"bank-axis-test": datetime.datetime(2026, 5, 31)}
+    )
+    assert mock_pdf_parser_class.call_count >= 1
+    assert len(txns) == 1
+
+
+def test_settlement_lag_lookback_and_boundary_dedup(
+    transaction_processor, mock_data_source, mocker
+):
+    """Lookback preserves boundary splits (txn_date == last_txn_date) and backdated refunds
+    within 45 days, drops txns older than 45 days, and TransactionMatcher deduplicates booked txns.
+    """
+    from src.transaction_matcher import TransactionMatcher
+
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 5, 21),  # 50 days ago
+            "description": "OLD TXN",
+            "amount": -100.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 6, 20),  # 20 days ago
+            "description": "BACKDATED REFUND",
+            "amount": 250.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),  # boundary split (same day)
+            "description": "ADDON SWIPE (Ref# VT262860075035080000135)",
+            "amount": -500.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),  # forward txn with spaced Ref#
+            "description": "FORWARD SWIPE (Ref# VT9999)",
+            "amount": -150.0,
+            "account": "cc-hdfc-test",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 12),  # genuine new forward txn
+            "description": "NEW SWIPE",
+            "amount": -200.0,
+            "account": "cc-hdfc-test",
+        },
+    ]
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}" if t["amount"] < 0 else "",
+                    "credit": f"{t['amount']:.2f}" if t["amount"] >= 0 else "",
+                }
+                for t in statement_txns
+            ],
+            True,
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+
+    # 1 (OLD TXN) was dropped (>45d); 2, 3, 4, 5 were kept
+    assert len(parsed_txns) == 4
+    descriptions = [t["description"] for t in parsed_txns]
+    assert "OLD TXN" not in descriptions
+    assert "BACKDATED REFUND" in descriptions
+    assert "ADDON SWIPE (Ref# VT262860075035080000135)" in descriptions
+    assert "FORWARD SWIPE (Ref# VT9999)" in descriptions
+    assert "NEW SWIPE" in descriptions
+
+    # Deduplicate against already-booked sheet transactions:
+    # - Row 3 (ADDON SWIPE) is <= watermark: multiset matching dedupes it against old_booked_txns[0].
+    # - Row 4 (FORWARD SWIPE) is > watermark: _description_signature normalizes Ref# spacing
+    #   and dedupes it against old_booked_txns[1].
+    old_booked_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "account": "cc-hdfc-test",
+            "amount": -500.0,
+            "description": "ADDON SWIPE (Ref#VT262860075035080000135)",
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "account": "cc-hdfc-test",
+            "amount": -150.0,
+            "description": "FORWARD SWIPE (Ref#VT9999)",
+        },
+    ]
+    new_final = TransactionMatcher.find_new_txns(
+        old_booked_txns, parsed_txns, watermark_by_account={"cc-hdfc-test": last_txn}
+    )
+    assert len(new_final) == 2
+    final_descs = [t["description"] for t in new_final]
+    assert "BACKDATED REFUND" in final_descs
+    assert "NEW SWIPE" in final_descs
+    assert "ADDON SWIPE (Ref# VT262860075035080000135)" not in final_descs
+    assert "FORWARD SWIPE (Ref# VT9999)" not in final_descs
+
+
+def test_first_deploy_uncached_legacy_pdf_uses_strict_filter(
+    transaction_processor, mock_data_source, mocker
+):
+    """On first deploy, an uncached legacy PDF whose max date <= last_txn_date uses
+    strict forward filter (re-booking 0 edited/deleted rows) and writes its clean cache entry.
+    """
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 6, 25),
+            "description": "USER DELETED ROW",
+            "amount": -500.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 10),
+            "description": "LAST ROW IN STMT",
+            "amount": -200.0,
+        },
+    ]
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_legacy", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}",
+                    "credit": "",
+                }
+                for t in statement_txns
+            ],
+            True,
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    # stmt_max_date (2026-07-10) <= last_txn_date (2026-07-10) -> strict > filter applied -> 0 rows
+    assert len(parsed_txns) == 0
+    # Clean PDF cache entry was saved
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {"f_legacy": "2026-07-10"}
+    )
+
+
+def test_daily_retry_of_partially_quarantined_pdf(
+    transaction_processor, mock_data_source, mocker
+):
+    """On Day 2 of a partially-quarantined PDF:
+    - Cached 'partial' dict preserves Day 1's base_watermark and emitted multiset.
+    - Rescues rows dated on or before Day 2's watermark (which advanced after Day 1).
+    - Does NOT re-book rows deleted from the ledger on Day 1 evening.
+    - Overwrites cache with clean ISO max date and calls clear_review_rows only after rescue.
+    """
+    # On Day 2 morning, ledger watermark has advanced to Day 1's latest booked txn (2026-07-31)
+    last_txn = datetime.datetime(2026, 7, 31, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "description": "DAY 1 PASSED ROW (DELETED FROM LEDGER ON DAY 1 EVENING)",
+            "amount": -100.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "description": "DAY 1 FLAGGED ROW (RESCUED ON DAY 2 <= WATERMARK)",
+            "amount": -200.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 31),
+            "description": "DAY 1 PASSED ROW (BOOKED ON DAY 1)",
+            "amount": -300.0,
+        },
+    ]
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_partial", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    # Present in processed_cache as partial dict recording Day 1 state
+    mock_data_source.get_processed_statements.return_value = {
+        "f_partial": {
+            "status": "partial",
+            "base_watermark": "2026-07-01",
+            "opened_lookback": True,
+            "emitted": [
+                ["2026-07-11", -100.0],
+                ["2026-07-31", -300.0],
+            ],
+        }
+    }
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}",
+                    "credit": "",
+                }
+                for t in statement_txns
+            ],
+            True,  # Now verified clean on Day 2 retry!
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+
+    # Rescued row dated 2026-07-15 (<= Day 2 watermark 2026-07-31) was emitted!
+    # Deleted 2026-07-11 row was NOT re-booked (subtracted 1-for-1 from emitted)!
+    # Already-booked 2026-07-31 row was NOT re-booked!
+    assert len(parsed_txns) == 1
+    assert (
+        parsed_txns[0]["description"]
+        == "DAY 1 FLAGGED ROW (RESCUED ON DAY 2 <= WATERMARK)"
+    )
+    assert parsed_txns[0]["amount"] == -200.0
+    assert parsed_txns[0]["date"] == datetime.datetime(2026, 7, 15)
+
+    # clear_review_rows was called for the rescued statement
+    mock_data_source.clear_review_rows.assert_called_once_with(
+        "cc-hdfc-test", "cc-hdfc-test-2026-07.pdf"
+    )
+
+    # Cache overwritten with clean ISO date
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {"f_partial": "2026-07-31"}
+    )
+
+
+def test_day1_100pct_flagged_pdf_records_partial_cache(
+    transaction_processor, mock_data_source, mocker
+):
+    """When 100% of rows in a PDF are flagged on Day 1, df is empty/None but partial cache entry is saved."""
+    last_txn = datetime.datetime(2026, 7, 1, 0, 0, 0)
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_flagged", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=([], False),  # 100% flagged
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    assert len(parsed_txns) == 0
+    mock_data_source.clear_review_rows.assert_not_called()
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {
+            "f_flagged": {
+                "status": "partial",
+                "base_watermark": "2026-07-01T00:00:00",
+                "opened_lookback": False,
+                "was_first_ingest": True,
+                "emitted": [],
+            }
+        }
+    )
+
+
+def test_partial_retry_opened_lookback_false_and_pre_cutoff_leaves_partial_state(
+    transaction_processor, mock_data_source, mocker
+):
+    """A partial retry with opened_lookback=False (or pre-cutoff rows) promotes cleanly
+    to an ISO date and clears Review once pdf_clean=True, rather than looping forever.
+    """
+    last_txn = datetime.datetime(2026, 7, 15, 0, 0, 0)
+    statement_txns = [
+        {
+            "date": datetime.datetime(2026, 7, 5),
+            "description": "PRE-WATERMARK HISTORICAL ROW",
+            "amount": -50.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 11),
+            "description": "DAY 1 PASSED ROW",
+            "amount": -100.0,
+        },
+        {
+            "date": datetime.datetime(2026, 7, 15),
+            "description": "DAY 2 RESCUED ROW",
+            "amount": -200.0,
+        },
+    ]
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_selfheal", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {
+        "f_selfheal": {
+            "status": "partial",
+            "base_watermark": "2026-07-10T00:00:00",
+            "opened_lookback": False,
+            "was_first_ingest": False,
+            "emitted": [["2026-07-11", -100.0]],
+        }
+    }
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": t["date"].strftime("%Y-%m-%d"),
+                    "description": t["description"],
+                    "debit": f"{-t['amount']:.2f}",
+                    "credit": "",
+                }
+                for t in statement_txns
+            ],
+            True,
+        ),
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+    assert len(parsed_txns) == 1
+    assert parsed_txns[0]["description"] == "DAY 2 RESCUED ROW"
+    mock_data_source.save_processed_statements.assert_called_once_with(
+        {
+            "f_selfheal": "2026-07-15",
+        }
+    )
+    mock_data_source.clear_review_rows.assert_called_once_with(
+        "cc-hdfc-test", "cc-hdfc-test-2026-07.pdf"
+    )
+
+
+def test_run_normal_mode_does_not_commit_partial_cache_when_sheet_write_fails(
+    transaction_processor, mock_data_source, mocker
+):
+    """When add_new_transactions_to_log fails in run_normal_mode, partial emitted rows
+    and Review clears are NOT persisted so the next run retries without losing rows."""
+    import main as gajana_main
+    from src.categorizer import Categorizer
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", [])
+    mock_data_source.get_transaction_log_data.return_value = []
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_fail", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-07-15",
+                    "description": "PASSED ROW",
+                    "debit": "125.00",
+                    "credit": "",
+                }
+            ],
+            False,  # Partial (some other row flagged)
+        ),
+    )
+    mocker.patch.object(
+        transaction_processor,
+        "add_new_transactions_to_log",
+        side_effect=RuntimeError("Sheets 503"),
+    )
+    categorizer = Categorizer(matchers_file="data/matchers.example.json", llm=None)
+
+    errors = gajana_main.run_normal_mode(transaction_processor, categorizer)
+    assert errors == ["cc: Sheets 503"]
+
+    # Sheet write failed -> save_processed_statements and clear_review_rows must NOT have run!
+    mock_data_source.save_processed_statements.assert_not_called()
+    mock_data_source.clear_review_rows.assert_not_called()
+
+
+def test_non_pdf_sheet_statements_use_strict_forward_filter(
+    transaction_processor, mock_data_source, mocker
+):
+    """Mutable non-PDF Sheet statements use strict forward filter (date > last_txn_date),
+    never re-reading or re-offering rows on or before the watermark.
+    """
+    last_txn = datetime.datetime(2026, 7, 10, 0, 0, 0)
+    sheet_data = [
+        ["Date", "Description", "Amount"],
+        ["2026-06-20", "OLD ROW IN LOOKBACK", "-100.00"],
+        ["2026-07-10", "SAME DAY AS WATERMARK", "-200.00"],
+        ["2026-07-11", "NEW FORWARD ROW", "-300.00"],
+    ]
+
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_sheet1", name="cc-hdfc-test-2026-07.gsheet")
+    ]
+    mock_data_source.get_first_sheet_name_from_file.return_value = "Sheet1"
+    mock_data_source.get_sheet_data.return_value = sheet_data
+    mock_data_source.get_processed_statements.return_value = {}
+
+    mocker.patch(
+        "src.transaction_processor.PARSING_CONFIG",
+        {
+            "cc-hdfc": {
+                "header_patterns": [["Date", "Description", "Amount"]],
+                "column_map": {
+                    "Date": "date",
+                    "Description": "description",
+                    "Amount": "amount",
+                },
+                "date_formats": ["%Y-%m-%d"],
+            }
+        },
+    )
+
+    parsed_txns = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": last_txn}
+    )
+
+    # For .gsheet, strict > last_txn_date applies: 2026-06-20 and 2026-07-10 are dropped
+    assert len(parsed_txns) == 1
+    assert parsed_txns[0]["description"] == "NEW FORWARD ROW"
+    assert parsed_txns[0]["amount"] == -300.0
+
+
+def test_clean_pdf_clears_review_rows(transaction_processor, mock_data_source, mocker):
+    """When a PDF verifies cleanly via deterministic extractor, clear_review_rows is called."""
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-axis-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f1", name="bank-axis-test-2026-06.pdf")
+    ]
+    mock_data_source.download_file.return_value = _generate_synthetic_pdf(
+        _SYNTHETIC_AXIS_NEW
+    )
+    mock_data_source.get_processed_statements.return_value = {}
+
+    transaction_processor.get_new_transactions_from_statements(
+        "bank", {"bank-axis-test": datetime.datetime(2026, 5, 31)}
+    )
+
+    mock_data_source.clear_review_rows.assert_called_once_with(
+        "bank-axis-test", "bank-axis-test-2026-06.pdf"
+    )
+
+
+def test_partial_retry_absorbs_llm_to_extractor_date_drift(
+    transaction_processor, mock_data_source, mocker
+):
+    """When Day 1 emitted a row via LLM at its value date (Jul 16) and Day 2 re-parses
+    via deterministic extractor at its transaction date (Jul 15, within ±3d), the Day 1
+    row is subtracted rather than emitted twice."""
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_drift", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {
+        "f_drift": {
+            "status": "partial",
+            "base_watermark": "2026-07-10T00:00:00",
+            "opened_lookback": True,
+            "was_first_ingest": True,
+            "emitted": [["2026-07-16", -500.0]],
+        }
+    }
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-07-15",
+                    "description": "SAME PURCHASE TXN DATE",
+                    "debit": "500.00",
+                    "credit": "",
+                },
+                {
+                    "date": "2026-07-18",
+                    "description": "RESCUED ROW",
+                    "debit": "900.00",
+                    "credit": "",
+                },
+            ],
+            True,
+        ),
+    )
+
+    res = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": datetime.datetime(2026, 7, 16)}
+    )
+    assert len(res) == 1
+    assert res[0]["amount"] == -900.0
+    assert (
+        mock_data_source.save_processed_statements.call_args[0][0]["f_drift"]
+        == "2026-07-18"
+    )
+
+
+def test_pdf_parse_loss_records_quarantine_and_partial_cache(
+    transaction_processor, mock_data_source, mocker
+):
+    """When a PDF drops unparseable or future-dated rows (parse_loss=True), those rows
+    are written to Review, recorded in quarantined_files, and valid rows are saved in
+    a partial cache entry; if write_review_rows fails, review_write_failed_files tracks it.
+    """
+    mocker.patch("src.transaction_processor.CC_ACCOUNTS", ["cc-hdfc-test"])
+    mock_data_source.list_statement_file_details.return_value = [
+        DataSourceFile(id="f_loss", name="cc-hdfc-test-2026-07.pdf")
+    ]
+    mock_data_source.download_file.return_value = b"dummy"
+    mock_data_source.get_processed_statements.return_value = {}
+    future_date = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+    mocker.patch.object(
+        transaction_processor,
+        "_parse_validate_pdf",
+        return_value=(
+            [
+                {
+                    "date": "2026-07-15",
+                    "description": "VALID ROW",
+                    "debit": "250.00",
+                    "credit": "",
+                },
+                {
+                    "date": "NOT-A-DATE",
+                    "description": "BAD DATE TOKEN",
+                    "debit": "111.00",
+                    "credit": "",
+                },
+                {
+                    "date": future_date,
+                    "description": "HALLUCINATED FUTURE ROW",
+                    "debit": "999.00",
+                    "credit": "",
+                },
+            ],
+            True,
+        ),
+    )
+
+    res = transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    )
+    assert len(res) == 1
+    assert res[0]["amount"] == -250.0
+    assert transaction_processor.quarantined_files["cc-hdfc-test-2026-07.pdf"] == 2
+    mock_data_source.write_review_rows.assert_called_once()
+    review_written = mock_data_source.write_review_rows.call_args[0][0]
+    assert len(review_written) == 2
+    assert review_written[0][5] == "unparseable date"
+    assert review_written[1][5] == "future date"
+    saved = mock_data_source.save_processed_statements.call_args[0][0]["f_loss"]
+    assert saved["status"] == "partial"
+    assert saved["emitted"] == [["2026-07-15", -250.0]]
+
+    mock_data_source.write_review_rows.side_effect = RuntimeError("Sheets timeout")
+    transaction_processor.get_new_transactions_from_statements(
+        "cc", {"cc-hdfc-test": datetime.datetime(2026, 7, 10)}
+    )
+    assert (
+        transaction_processor.review_write_failed_files["cc-hdfc-test-2026-07.pdf"] == 2
+    )
+
+
+def test_partial_retry_through_matcher_preserves_repeated_identical_rows(
+    transaction_processor, mock_data_source, mocker
+):
+    """End-to-end processor + matcher check for repeated identical rows:
+    1) Forward case (5 Jul > base_watermark 30 Jun, Day 1 advances watermark to 31 Jul):
+       Statement has two -10,000 ATM rows on 5 Jul and one -500 row on 31 Jul.
+       Day 1 books one -10,000 row + the -500 row; Day 2 rescues and books the second
+       -10,000 row through TransactionMatcher without double-subtracting Day 1's row.
+    2) Lookback case (5 Jul <= base_watermark 10 Jul):
+       Same two -10,000 rows inside Day 1's lookback window; Day 2 still rescues and
+       books the second -10,000 row cleanly and strips all transient keys."""
+    from src.transaction_matcher import TransactionMatcher
+
+    mocker.patch("src.transaction_processor.BANK_ACCOUNTS", ["bank-hdfc-test"])
+
+    for base_wm_day in (30, 10):
+        base_wm = (
+            datetime.datetime(2026, 6, 30)
+            if base_wm_day == 30
+            else datetime.datetime(2026, 7, 10)
+        )
+        ledger = [
+            {
+                "date": base_wm,
+                "account": "bank-hdfc-test",
+                "amount": -100.0,
+                "description": "PRIOR WATERMARK ROW",
+            }
+        ]
+        cache: dict = {}
+        mock_data_source.list_statement_file_details.return_value = [
+            DataSourceFile(id="f_atm", name="bank-hdfc-test-2026-07.pdf")
+        ]
+        mock_data_source.download_file.return_value = b"dummy"
+        mock_data_source.get_processed_statements.side_effect = lambda c=cache: dict(c)
+        mock_data_source.save_processed_statements.side_effect = (
+            lambda u, c=cache: c.update(u)
+        )
+
+        # Day 1: one ATM row passes, second ATM row was flagged, 31 Jul row passes
+        mocker.patch.object(
+            transaction_processor,
+            "_parse_validate_pdf",
+            return_value=(
+                [
+                    {
+                        "date": "2026-07-05",
+                        "description": "ATM CASH WDL",
+                        "debit": "10000.00",
+                        "credit": "",
+                    },
+                    {
+                        "date": "2026-07-31",
+                        "description": "END OF MONTH PURCHASE",
+                        "debit": "500.00",
+                        "credit": "",
+                    },
+                ],
+                False,
+            ),
+        )
+        wm_day1 = {"bank-hdfc-test": max(t["date"] for t in ledger)}
+        pot_day1 = transaction_processor.get_new_transactions_from_statements(
+            "bank", wm_day1
+        )
+        booked_day1 = TransactionMatcher.find_new_txns(
+            ledger, pot_day1, watermark_by_account=wm_day1
+        )
+        assert [t["amount"] for t in booked_day1] == [-10000.0, -500.0]
+        ledger.extend(booked_day1)
+
+        # Day 2: watermark is now 2026-07-31; full statement parses cleanly with BOTH ATM rows
+        mocker.patch.object(
+            transaction_processor,
+            "_parse_validate_pdf",
+            return_value=(
+                [
+                    {
+                        "date": "2026-07-05",
+                        "description": "ATM CASH WDL",
+                        "debit": "10000.00",
+                        "credit": "",
+                    },
+                    {
+                        "date": "2026-07-05",
+                        "description": "ATM CASH WDL",
+                        "debit": "10000.00",
+                        "credit": "",
+                    },
+                    {
+                        "date": "2026-07-31",
+                        "description": "END OF MONTH PURCHASE",
+                        "debit": "500.00",
+                        "credit": "",
+                    },
+                ],
+                True,
+            ),
+        )
+        wm_day2 = {"bank-hdfc-test": max(t["date"] for t in ledger)}
+        assert wm_day2["bank-hdfc-test"] == datetime.datetime(2026, 7, 31)
+        pot_day2 = transaction_processor.get_new_transactions_from_statements(
+            "bank", wm_day2
+        )
+        booked_day2 = TransactionMatcher.find_new_txns(
+            ledger, pot_day2, watermark_by_account=wm_day2
+        )
+        assert len(booked_day2) == 1
+        assert booked_day2[0]["amount"] == -10000.0
+        assert booked_day2[0]["date"] == datetime.datetime(2026, 7, 5)
+        assert "_effective_wm" not in booked_day2[0]
+        assert "_pre_consumed" not in booked_day2[0]
+        assert "_source" not in booked_day2[0]
+        assert cache["f_atm"] == "2026-07-31"
