@@ -401,6 +401,11 @@ class GoogleDataSource(DataSourceInterface):
             self._sheet_id_cache = {}
         if sheet_name in self._sheet_id_cache:
             return self._sheet_id_cache[sheet_name]
+        target_lower = sheet_name.strip().lower()
+        for cached_title, cached_sid in self._sheet_id_cache.items():
+            if cached_title.strip().lower() == target_lower:
+                self._sheet_id_cache[sheet_name] = cached_sid
+                return cached_sid
         try:
             metadata = (
                 self.sheets_service.spreadsheets()
@@ -416,7 +421,13 @@ class GoogleDataSource(DataSourceInterface):
                 sid = props.get("sheetId")
                 if title and sid is not None:
                     self._sheet_id_cache[title] = int(sid)
-            return self._sheet_id_cache.get(sheet_name)
+            if sheet_name in self._sheet_id_cache:
+                return self._sheet_id_cache[sheet_name]
+            for cached_title, cached_sid in list(self._sheet_id_cache.items()):
+                if cached_title.strip().lower() == target_lower:
+                    self._sheet_id_cache[sheet_name] = cached_sid
+                    return cached_sid
+            return None
         except Exception as e:
             logger.warning(f"Could not retrieve sheetId for '{sheet_name}': {e}")
             return None
