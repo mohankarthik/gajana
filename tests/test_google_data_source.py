@@ -837,6 +837,11 @@ def test_write_review_rows_distinguishes_statement_flags_by_reason(
     written = values.update.call_args.kwargs["body"]["values"]
     assert len(written) == 1
     assert written[0][5] == "missing closing balance"
+    gds._sheet_id_cache.clear()
+    sheets.get.reset_mock()
+    assert gds._get_sheet_id("review") == 77
+    assert gds._get_sheet_id("REVIEW") == 77
+    sheets.get.assert_called_once()
 
 
 # --- Tests for update_transaction_categories ---

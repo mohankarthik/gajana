@@ -56,7 +56,7 @@ SLASH_DATE_RE = re.compile(r"\b(\d{2})/(\d{2})/(\d{4})\b")
 # Axis cards print the side after the amount; HDFC prints "Cr" or nothing.
 CARD_AMOUNT_RE = re.compile(r"(?<![\d.,])(\d[\d,]*\.\d{2})\s*(Dr|Cr)?(?![\w])")
 HDFC_CARD_AMOUNT_RE = re.compile(
-    r"(\+\s*(?=C\s*\d))?(?:(?<![A-Za-z])C\s*)?(?<![\d.,])(\d[\d,]*\.\d{2})\s*(Cr)?(?![\w])"
+    r"(\+\s*(?=C\s*\d))?(?:(?<![A-Za-z])C\s*)?(?<![\d.,])(\d[\d,]*\.\d{2})(?:\s*(Cr)|l)?(?![\w%])"
 )
 
 # Cheap pre-filter so the (expensive) header patterns are only tried on lines
