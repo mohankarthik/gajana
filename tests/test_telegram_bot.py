@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import socket
 import threading
@@ -658,7 +659,8 @@ def test_run_once_append_cash_row_error_does_not_retry_even_after_commit(tmp_pat
     assert client.acked == [("finance", 30), ("finance", 31)]
     assert len(client.sent) == 2
     assert client.sent[0]["text"].startswith("✗ ")
-    assert "Failed to record entry:" in client.sent[0]["text"]
+    assert "Failed to record entry (RuntimeError)" in client.sent[0]["text"]
+    assert "Sheets read timeout after commit" not in client.sent[0]["text"]
     assert (
         "row may have been written; check sheet before resending"
         in client.sent[0]["text"]
@@ -842,6 +844,67 @@ def test_run_once_chat_socket_errors_exit_cleanly(tmp_path, caplog):
     with caplog.at_level("ERROR"):
         assert bot.run_once() == 0
     assert "Chat bridge permission error during finance poll" in caplog.text
+
+
+def test_run_once_skips_when_state_lock_held_and_runs_after_unlock(tmp_path, caplog):
+    bot, ds, client = make_bot(tmp_path)
+    client.events = [
+        {"seq": 1, "event_type": "message", "sender_id": "111", "text": "Coffee 250"},
+    ]
+    lock_path = Path(f"{bot.state_path}.lock")
+    lock_file = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with caplog.at_level("INFO"):
+            assert bot.run_once() == 0
+        assert "Another finance poll is already running; skipping." in caplog.text
+        assert client.registered == []
+        assert client.pulls == []
+        assert ds.sheets_service.appended == []
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+    # Once unlocked, the next run proceeds normally (and lockfile remains reusable).
+    assert bot.run_once() == 1
+    assert lock_path.exists()
+    assert len(ds.sheets_service.appended) == 1
+    assert client.acked == [("finance", 1)]
+    assert bot.state["last_seq"] == 1
+
+
+def test_run_once_reloads_state_from_disk_after_acquiring_lock(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
+    assert bot.state == {}
+    Path(bot.state_path).write_text(json.dumps({"last_seq": 10}), encoding="utf-8")
+    client.events = [
+        {"seq": 10, "event_type": "message", "sender_id": "111", "text": "Tea 20"},
+        {"seq": 11, "event_type": "message", "sender_id": "111", "text": "Auto 80"},
+    ]
+    assert bot.run_once() == 1
+    assert client.pulls == [("finance", 10, 0)]
+    assert len(ds.sheets_service.appended) == 1
+    assert ds.sheets_service.appended[0][1] == "Auto"
+    assert client.acked == [("finance", 11)]
+
+
+def test_run_once_save_state_oserror_after_append_still_acks_event(
+    tmp_path, monkeypatch, caplog
+):
+    bot, ds, client = make_bot(tmp_path)
+    client.events = [
+        {"seq": 7, "event_type": "message", "sender_id": "111", "text": "Coffee 250"},
+    ]
+
+    def _fail_save():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bot, "_save_state", _fail_save)
+    with caplog.at_level("ERROR"):
+        assert bot.run_once() == 1
+    assert "Failed to save state after seq=7: disk full" in caplog.text
+    assert len(ds.sheets_service.appended) == 1
+    assert client.acked == [("finance", 7)]
 
 
 def test_save_state_atomic_replace_cleans_temp_on_failure(tmp_path, monkeypatch):
@@ -1036,7 +1099,7 @@ def test_append_cash_row_missing_sheets_service_raises_and_handles_gracefully(
     assert res is False
     assert bot.state.get("last_appended") is None
     assert len(client.sent) == 1
-    assert "Failed to record entry:" in client.sent[-1]["text"]
+    assert "Failed to record entry (RuntimeError)" in client.sent[-1]["text"]
     assert (
         "row may have been written; check sheet before resending"
         in client.sent[-1]["text"]

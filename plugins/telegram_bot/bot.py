@@ -16,11 +16,13 @@ Account column (a single shared cash ledger).
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import logging
 import os
 import re
 import tempfile
+from pathlib import Path
 from typing import Any, Hashable, Optional
 
 from src.categorizer import Categorizer
@@ -304,7 +306,7 @@ class TelegramCashBot:
             except OSError as save_err:
                 logger.error(f"Failed to persist cleared last_appended: {save_err}")
             self.send_message(
-                f"✗ Failed to undo row {row_num}: {e} — "
+                f"✗ Failed to undo row {row_num} ({type(e).__name__}) — "
                 "check sheet before manually deleting"
             )
             return
@@ -405,7 +407,7 @@ class TelegramCashBot:
         except Exception as e:
             logger.error(f"Failed to append cash row: {e}")
             self.send_message(
-                f"✗ Failed to record entry: {e} — "
+                f"✗ Failed to record entry ({type(e).__name__}) — "
                 "row may have been written; check sheet before resending"
             )
             return False
@@ -508,7 +510,10 @@ class TelegramCashBot:
         if retry_count < MAX_EVENT_RETRIES:
             self.state["retry_seq"] = seq
             self.state["retry_count"] = retry_count
-            self._save_state()
+            try:
+                self._save_state()
+            except OSError as e:
+                logger.error(f"Failed to save retry state for seq={seq}: {e}")
             logger.warning(
                 f"Backend error on event seq={seq} "
                 f"(attempt {retry_count}/{MAX_EVENT_RETRIES}); "
@@ -526,12 +531,36 @@ class TelegramCashBot:
     def run_once(self) -> int:
         """Poll the host chat bridge once, process message events, and persist state.
 
+        Acquires a non-blocking exclusive flock on ``{state_path}.lock`` so
+        overlapping cron runs cannot double-read ``last_seq`` or double-append.
         Returns the number of cash entries actually written (not events seen).
         """
         if not self.enabled:
             logger.info("Finance chat bot disabled in settings; skipping.")
             return 0
 
+        lock_path = Path(f"{self.state_path}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(lock_path, "a+", encoding="utf-8")
+        try:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                logger.info(
+                    f"Another {self.channel} poll is already running; skipping."
+                )
+                return 0
+            try:
+                if os.path.exists(self.state_path):
+                    self.state = self._load_state()
+                return self._run_once_locked()
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+    def _run_once_locked(self) -> int:
+        """Execute one chat-bridge poll cycle under the state lock."""
         try:
             self.chat_client.register_channel(self.channel, transport=self.transport)
             try:
@@ -620,7 +649,10 @@ class TelegramCashBot:
             self.state.pop("retry_seq", None)
             self.state.pop("retry_count", None)
             self.state["last_seq"] = seq
-            self._save_state()
+            try:
+                self._save_state()
+            except OSError as e:
+                logger.error(f"Failed to save state after seq={seq}: {e}")
             try:
                 self.chat_client.ack_event(self.channel, seq)
             except (ChatSocketError, OSError) as e:
