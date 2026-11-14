@@ -297,8 +297,15 @@ class TelegramCashBot:
             deleted = self.delete_row(int(last["row"]))
         except Exception as e:
             logger.error(f"Failed to delete cash row for /undo: {e}")
+            row_num = last["row"]
+            self.state["last_appended"] = None
+            try:
+                self._save_state()
+            except OSError as save_err:
+                logger.error(f"Failed to persist cleared last_appended: {save_err}")
             self.send_message(
-                "✗ Failed to undo entry in Google Sheets. Please check the sheet and bot logs."
+                f"✗ Failed to undo row {row_num}: {e} — "
+                "check sheet before manually deleting"
             )
             return
         if deleted:
@@ -398,7 +405,8 @@ class TelegramCashBot:
         except Exception as e:
             logger.error(f"Failed to append cash row: {e}")
             self.send_message(
-                "✗ Failed to record entry in Google Sheets. Please check bot logs or configuration."
+                f"✗ Failed to record entry: {e} — "
+                "row may have been written; check sheet before resending"
             )
             return False
 

@@ -400,6 +400,51 @@ def test_undo_with_nothing_to_undo(tmp_path):
     assert "Nothing to undo" in client.sent[-1]["text"]
 
 
+def test_undo_error_clears_last_appended_and_blocks_second_undo(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
+    state_file = tmp_path / "state.json"
+    cat = bot._build_categorizer()
+    bot.process_message(
+        {"event_type": "message", "sender_id": "111", "text": "Coffee 250"}, cat
+    )
+    bot._save_state()
+    assert bot.state["last_appended"] == {"row": 2320, "summary": "Coffee ₹250"}
+
+    orig_batch_update = ds.sheets_service.batchUpdate
+    batch_calls = {"n": 0}
+
+    def _ambiguous_batch_update(spreadsheetId=None, body=None):
+        batch_calls["n"] += 1
+        orig_batch_update(spreadsheetId=spreadsheetId, body=body)
+        raise RuntimeError("Sheets read timeout after commit")
+
+    ds.sheets_service.batchUpdate = _ambiguous_batch_update  # type: ignore[method-assign]
+
+    bot.process_message(
+        {"event_type": "message", "sender_id": "111", "text": "/undo"}, cat
+    )
+    assert batch_calls["n"] == 1
+    assert bot.state["last_appended"] is None
+    persisted = json.loads(state_file.read_text(encoding="utf-8"))
+    assert persisted["last_appended"] is None
+    assert "Failed to undo row 2320" in client.sent[-1]["text"]
+    assert "check sheet before manually deleting" in client.sent[-1]["text"]
+
+    # Subsequent manual /undo (even after process restart) does not delete again.
+    bot2 = TelegramCashBot(
+        ds,
+        SETTINGS,
+        str(state_file),
+        chat_client=client,
+        addon_cards=SYNTHETIC_ADDON_CONFIG,
+    )
+    bot2.process_message(
+        {"event_type": "message", "sender_id": "111", "text": "/undo"}, cat
+    )
+    assert batch_calls["n"] == 1
+    assert client.sent[-1]["text"] == "Nothing to undo."
+
+
 def test_bot_mention_suffix_stripped_on_commands(tmp_path):
     bot, _, client = make_bot(tmp_path)
     bot.process_message(
@@ -613,7 +658,11 @@ def test_run_once_append_cash_row_error_does_not_retry_even_after_commit(tmp_pat
     assert client.acked == [("finance", 30), ("finance", 31)]
     assert len(client.sent) == 2
     assert client.sent[0]["text"].startswith("✗ ")
-    assert "Failed to record entry in Google Sheets" in client.sent[0]["text"]
+    assert "Failed to record entry:" in client.sent[0]["text"]
+    assert (
+        "row may have been written; check sheet before resending"
+        in client.sent[0]["text"]
+    )
     assert "Auto ₹80" in client.sent[1]["text"]
     saved = json.loads(state_file.read_text(encoding="utf-8"))
     assert saved["last_seq"] == 31
@@ -700,9 +749,11 @@ def test_run_once_undo_error_does_not_retry_even_after_commit(tmp_path):
     assert client.acked == [("finance", 50)]
     assert len(client.sent) == 1
     assert client.sent[0]["text"].startswith("✗ ")
-    assert "Failed to undo entry in Google Sheets" in client.sent[0]["text"]
+    assert "Failed to undo row 2320" in client.sent[0]["text"]
+    assert "check sheet before manually deleting" in client.sent[0]["text"]
     saved = json.loads(state_file.read_text(encoding="utf-8"))
     assert saved["last_seq"] == 50
+    assert saved["last_appended"] is None
     assert "retry_seq" not in saved
     assert "retry_count" not in saved
 
@@ -985,7 +1036,11 @@ def test_append_cash_row_missing_sheets_service_raises_and_handles_gracefully(
     assert res is False
     assert bot.state.get("last_appended") is None
     assert len(client.sent) == 1
-    assert "Failed to record entry in Google Sheets" in client.sent[-1]["text"]
+    assert "Failed to record entry:" in client.sent[-1]["text"]
+    assert (
+        "row may have been written; check sheet before resending"
+        in client.sent[-1]["text"]
+    )
 
 
 def test_telegram_bot_addon_cards_config_precedence(tmp_path):
