@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 CASH_SHEET_NAME = "Cash Transactions"
 CHANNEL = "finance"
+MAX_EVENT_RETRIES = 3
 
 # A leading-token that flags the entry as cash-in (a Credit) rather than a spend.
 CREDIT_FIRST_WORDS = {"atm", "received", "deposit", "credit", "cashin", "refund"}
@@ -143,6 +144,14 @@ class TelegramCashBot:
             else ADDON_CARDS or cfg.get("addon_cards") or {}
         )
         self.state = self._load_state()
+        self._last_backend_error: Optional[str] = None
+        self._suppress_error_replies: bool = False
+
+    def _record_backend_error(self, user_message: str) -> None:
+        """Record a transient backend error and notify immediately unless suppressed."""
+        self._last_backend_error = user_message
+        if not self._suppress_error_replies:
+            self.send_message(user_message)
 
     # --- Chat bridge transport -----------------------------------------------
     def send_message(self, text: str) -> bool:
@@ -264,7 +273,15 @@ class TelegramCashBot:
         if not last:
             self.send_message("Nothing to undo.")
             return
-        if self.delete_row(int(last["row"])):
+        try:
+            deleted = self.delete_row(int(last["row"]))
+        except Exception as e:
+            logger.error(f"Failed to delete cash row for /undo: {e}")
+            self._record_backend_error(
+                "Failed to undo entry in Google Sheets. Please try again shortly."
+            )
+            return
+        if deleted:
             self.send_message(f"✗ Removed: {last['summary']}")
             self.state["last_appended"] = None
         else:
@@ -332,7 +349,7 @@ class TelegramCashBot:
             )
         except Exception as e:
             logger.warning(f"Failed to handle /addon: {e}")
-            self.send_message(
+            self._record_backend_error(
                 "Could not fetch add-on spend right now; please try again shortly."
             )
 
@@ -360,7 +377,7 @@ class TelegramCashBot:
             row = self.append_cash_row(entry, category, remarks=sender_label)
         except Exception as e:
             logger.error(f"Failed to append cash row: {e}")
-            self.send_message(
+            self._record_backend_error(
                 "Failed to record entry in Google Sheets. Please check bot logs or configuration."
             )
             return False
@@ -399,6 +416,7 @@ class TelegramCashBot:
         self, event: dict[str, Any], categorizer: Optional[Categorizer] = None
     ) -> bool:
         """Handle one chat bridge message event. Returns True if a cash entry was recorded."""
+        self._last_backend_error = None
         raw_payload = event.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         text = str(event.get("text") or payload.get("text") or "").strip()
@@ -429,6 +447,33 @@ class TelegramCashBot:
             return self._handle_entry(text, categorizer, sender_label=sender_label)
         return False
 
+    def _should_retry_event(self, seq: int, backend_error: str) -> bool:
+        """Persist bounded retry state for a failed event; return True to defer ack."""
+        prev_seq = self.state.get("retry_seq")
+        try:
+            prev_count = (
+                int(self.state.get("retry_count") or 0) if prev_seq == seq else 0
+            )
+        except (TypeError, ValueError):
+            prev_count = 0
+        retry_count = prev_count + 1
+        if retry_count < MAX_EVENT_RETRIES:
+            self.state["retry_seq"] = seq
+            self.state["retry_count"] = retry_count
+            self._save_state()
+            logger.warning(
+                f"Backend error on event seq={seq} "
+                f"(attempt {retry_count}/{MAX_EVENT_RETRIES}); "
+                "leaving unacked for next poll."
+            )
+            return True
+        logger.error(
+            f"Giving up on event seq={seq} after {retry_count} attempts: "
+            f"{backend_error}"
+        )
+        self.send_message(backend_error)
+        return False
+
     # --- Orchestration -------------------------------------------------------
     def run_once(self) -> int:
         """Poll the host chat bridge once, process message events, and persist state.
@@ -456,7 +501,10 @@ class TelegramCashBot:
         recorded = 0
         for event in events:
             seq = int(event["seq"])
+            backend_error: Optional[str] = None
             if event.get("event_type") == "message":
+                self._last_backend_error = None
+                self._suppress_error_replies = True
                 try:
                     raw_payload = event.get("payload")
                     payload: dict[str, Any] = (
@@ -467,8 +515,25 @@ class TelegramCashBot:
                         categorizer = self._build_categorizer()
                     if self.process_message(event, categorizer):
                         recorded += 1
-                except Exception as e:  # never let one bad message wedge the loop
-                    logger.error(f"Error processing message: {e}", exc_info=True)
+                    backend_error = self._last_backend_error
+                except Exception as e:
+                    logger.error(
+                        f"Error processing message seq={seq}: {e}", exc_info=True
+                    )
+                    backend_error = (
+                        self._last_backend_error
+                        or "Failed to record entry in Google Sheets. Please check bot logs or configuration."
+                    )
+                finally:
+                    self._suppress_error_replies = False
+
+            if backend_error is not None and self._should_retry_event(
+                seq, backend_error
+            ):
+                break
+
+            self.state.pop("retry_seq", None)
+            self.state.pop("retry_count", None)
             self.state["last_seq"] = seq
             self._save_state()
             try:

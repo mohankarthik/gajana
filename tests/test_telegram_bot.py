@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 import run_telegram_bot
-from plugins.telegram_bot.bot import TelegramCashBot, parse_entry
+from plugins.telegram_bot.bot import MAX_EVENT_RETRIES, TelegramCashBot, parse_entry
 from src.chat_client import (
     ChatGatewayUnavailableError,
     ChatSocketClient,
@@ -526,6 +526,195 @@ def test_run_once_ack_error_persists_last_seq_and_continues(tmp_path, caplog):
     assert len(ds.sheets_service.appended) == 1
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["last_seq"] == 5
+
+
+def test_run_once_transient_build_categorizer_failure_retries_and_recovers(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
+    state_file = tmp_path / "state.json"
+    client.events = [
+        {"seq": 20, "event_type": "message", "sender_id": "111", "text": "Coffee 250"},
+    ]
+
+    orig_get_sheet_data = ds.get_sheet_data
+    calls = {"n": 0}
+
+    def _flaky_sheet_data(sheet_id, sheet_name, rng):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Google Sheets 503 transient")
+        return orig_get_sheet_data(sheet_id, sheet_name, rng)
+
+    ds.get_sheet_data = _flaky_sheet_data  # type: ignore[method-assign]
+
+    # Attempt 1: transient _build_categorizer failure leaves last_seq & acked untouched
+    assert bot.run_once() == 0
+    assert client.acked == []
+    assert client.sent == []
+    assert ds.sheets_service.appended == []
+    assert "last_seq" not in bot.state
+    saved1 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved1 == {"retry_seq": 20, "retry_count": 1}
+
+    # Attempt 2 (new bot instance loading persisted state): succeeds, clears retry, acks
+    bot2 = TelegramCashBot(
+        ds,
+        SETTINGS,
+        str(state_file),
+        chat_client=client,
+        addon_cards=SYNTHETIC_ADDON_CONFIG,
+    )
+    assert bot2.run_once() == 1
+    assert len(ds.sheets_service.appended) == 1
+    assert ds.sheets_service.appended[0][1] == "Coffee"
+    assert client.acked == [("finance", 20)]
+    assert len(client.sent) == 1 and "Coffee ₹250" in client.sent[0]["text"]
+    saved2 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved2["last_seq"] == 20
+    assert "retry_seq" not in saved2
+    assert "retry_count" not in saved2
+
+
+def test_run_once_transient_append_cash_row_failure_retries_and_recovers(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
+    state_file = tmp_path / "state.json"
+    client.events = [
+        {"seq": 30, "event_type": "message", "sender_id": "111", "text": "Tea 40"},
+        {"seq": 31, "event_type": "message", "sender_id": "222", "text": "Auto 80"},
+    ]
+
+    orig_append = bot.append_cash_row
+    attempts = {"n": 0}
+
+    def _flaky_append(entry, category, remarks=""):
+        attempts["n"] += 1
+        if attempts["n"] == 2:  # fail on second event (seq=31) first attempt
+            raise RuntimeError("Sheets timeout")
+        return orig_append(entry, category, remarks)
+
+    bot.append_cash_row = _flaky_append  # type: ignore[method-assign]
+
+    # Run 1: seq=30 succeeds & acks; seq=31 fails -> breaks before advancing to 31
+    assert bot.run_once() == 1
+    assert len(ds.sheets_service.appended) == 1
+    assert ds.sheets_service.appended[0][1] == "Tea"
+    assert client.acked == [("finance", 30)]
+    assert len(client.sent) == 1 and "Tea ₹40" in client.sent[0]["text"]
+    saved1 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved1["last_seq"] == 30
+    assert saved1["retry_seq"] == 31
+    assert saved1["retry_count"] == 1
+
+    # Run 2: seq=31 succeeds, records, clears retry state, advances last_seq & acks
+    assert bot.run_once() == 1
+    assert len(ds.sheets_service.appended) == 2
+    assert ds.sheets_service.appended[1][1] == "Auto"
+    assert client.acked == [("finance", 30), ("finance", 31)]
+    assert len(client.sent) == 2 and "Auto ₹80" in client.sent[1]["text"]
+    saved2 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved2["last_seq"] == 31
+    assert "retry_seq" not in saved2
+    assert "retry_count" not in saved2
+
+
+def test_run_once_capped_retries_advances_after_max_attempts(tmp_path, caplog):
+    bot, ds, client = make_bot(tmp_path)
+    state_file = tmp_path / "state.json"
+    ds.sheets_service = None  # permanent failure on append_cash_row
+    bot.sheets = None
+    client.events = [
+        {"seq": 40, "event_type": "message", "sender_id": "111", "text": "Coffee 100"},
+        {"seq": 41, "event_type": "message", "sender_id": "111", "text": "dinner?"},
+    ]
+
+    assert MAX_EVENT_RETRIES == 3
+
+    # Attempts 1 and 2: deferred without advancing last_seq, acking, or sending failure
+    assert bot.run_once() == 0
+    assert client.acked == []
+    assert client.sent == []
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {
+        "retry_seq": 40,
+        "retry_count": 1,
+    }
+
+    assert bot.run_once() == 0
+    assert client.acked == []
+    assert client.sent == []
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {
+        "retry_seq": 40,
+        "retry_count": 2,
+    }
+
+    # Attempt 3: logs error, sends user failure once, clears retry state, advances & acks,
+    # and continues processing seq=41 without wedging the queue
+    with caplog.at_level("ERROR"):
+        assert bot.run_once() == 0
+    assert "Giving up on event seq=40 after 3 attempts" in caplog.text
+    assert len(client.sent) == 1
+    assert "Failed to record entry in Google Sheets" in client.sent[0]["text"]
+    assert client.acked == [("finance", 40), ("finance", 41)]
+    saved3 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved3["last_seq"] == 41
+    assert "retry_seq" not in saved3
+    assert "retry_count" not in saved3
+
+
+def test_run_once_transient_undo_and_addon_failures_retry_without_acking(tmp_path):
+    bot, ds, client = make_bot(
+        tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG
+    )
+    bot.state["last_appended"] = {"row": 2320, "summary": "Coffee ₹250"}
+    bot._save_state()
+
+    client.events = [
+        {"seq": 50, "event_type": "message", "sender_id": "111", "text": "/undo"},
+        {"seq": 51, "event_type": "message", "sender_id": "111", "text": "/addon"},
+    ]
+
+    orig_delete = bot.delete_row
+    delete_calls = {"n": 0}
+
+    def _flaky_delete(row):
+        delete_calls["n"] += 1
+        if delete_calls["n"] == 1:
+            raise RuntimeError("Sheets 503 on delete")
+        return orig_delete(row)
+
+    bot.delete_row = _flaky_delete  # type: ignore[method-assign]
+
+    orig_txn_log = ds.get_transaction_log_data
+    addon_calls = {"n": 0}
+
+    def _flaky_addon(acc):
+        addon_calls["n"] += 1
+        if addon_calls["n"] == 1:
+            raise RuntimeError("Sheets 503 on addon")
+        return orig_txn_log(acc)
+
+    ds.get_transaction_log_data = _flaky_addon  # type: ignore[method-assign]
+
+    # Run 1: /undo fails -> stops before acking 50 or running 51
+    assert bot.run_once() == 0
+    assert client.acked == []
+    assert client.sent == []
+    assert bot.state["retry_seq"] == 50
+    assert bot.state["retry_count"] == 1
+
+    # Run 2: /undo succeeds & acks 50; /addon fails -> stops before acking 51
+    assert bot.run_once() == 0
+    assert client.acked == [("finance", 50)]
+    assert len(client.sent) == 1 and "Removed: Coffee ₹250" in client.sent[0]["text"]
+    assert bot.state["last_seq"] == 50
+    assert bot.state["retry_seq"] == 51
+    assert bot.state["retry_count"] == 1
+
+    # Run 3: /addon succeeds, clears retry state, acks 51
+    assert bot.run_once() == 0
+    assert client.acked == [("finance", 50), ("finance", 51)]
+    assert len(client.sent) == 2 and "Hi Amma" in client.sent[1]["text"]
+    assert bot.state["last_seq"] == 51
+    assert "retry_seq" not in bot.state
+    assert "retry_count" not in bot.state
 
 
 # --- addon commands ------------------------------------------------------------
