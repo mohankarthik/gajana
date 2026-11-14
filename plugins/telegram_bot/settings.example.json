@@ -1,5 +1,6 @@
 {
-  "allowed_chat_id": 0,
+  "enabled": true,
+  "transport": "telegram",
   "allowed_users": {
     "111111111": "Karti",
     "222222222": "Mini"

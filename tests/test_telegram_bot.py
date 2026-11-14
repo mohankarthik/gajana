@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import datetime
+import json
+import socket
+import threading
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from plugins.telegram_bot import bot as bot_mod
+import run_telegram_bot
 from plugins.telegram_bot.bot import TelegramCashBot, parse_entry
+from src.chat_client import (
+    ChatGatewayUnavailableError,
+    ChatSocketClient,
+    ChatSocketError,
+)
 
 TODAY = datetime.date.today()
 
 SETTINGS = {
-    "allowed_chat_id": -100123,
+    "enabled": True,
+    "transport": "telegram",
     "allowed_users": {"111": "Karti", "222": "Mini"},
 }
 
@@ -28,6 +39,7 @@ def test_parse_spend():
 
 def test_parse_credit_plus_prefix():
     e = parse_entry("+2000 ATM")
+    assert e is not None
     assert e.is_credit is True
     assert e.amount == 2000.0
     assert "ATM" in e.description
@@ -35,28 +47,33 @@ def test_parse_credit_plus_prefix():
 
 def test_parse_credit_first_word():
     e = parse_entry("received 5000 from dad")
+    assert e is not None
     assert e.is_credit is True
     assert e.amount == 5000.0
 
 
 def test_parse_yesterday():
     e = parse_entry("Groceries 640 yesterday")
+    assert e is not None
     assert e.entry_date == TODAY - datetime.timedelta(days=1)
     assert e.description == "Groceries"
 
 
 def test_parse_explicit_date():
     e = parse_entry("Rent 12000 2026-07-01")
+    assert e is not None
     assert e.entry_date == datetime.date(2026, 7, 1)
 
 
 def test_parse_commas_and_decimals():
     e = parse_entry("Fridge 1,250.50")
+    assert e is not None
     assert e.amount == 1250.50
 
 
 def test_parse_cash_prefix_ignored():
     e = parse_entry("/cash Auto 80")
+    assert e is not None
     assert e.description == "Auto" and e.amount == 80.0
 
 
@@ -72,6 +89,7 @@ def test_parse_zero_is_not_entry():
 
 def test_parse_missing_description_defaults():
     e = parse_entry("500")
+    assert e is not None
     assert e.description == "Cash" and e.amount == 500.0
 
 
@@ -108,6 +126,7 @@ class FakeSheets:
     ):
         self.appended.append(body["values"][0])
         rng = f"'Cash Transactions'!B{self.next_row}:G{self.next_row}"
+        self.next_row += 1
         return _Exec({"updates": {"updatedRange": rng}})
 
     def get(self, spreadsheetId=None):
@@ -142,41 +161,99 @@ class FakeDataSource:
         return []
 
 
+class FakeChatClient:
+    def __init__(self):
+        self.registered: list[tuple[str, str | None]] = []
+        self.pulls: list[tuple[str, int, float]] = []
+        self.sent: list[dict[str, Any]] = []
+        self.acked: list[tuple[str, int]] = []
+        self.events: list[dict[str, Any]] = []
+        self.register_error: Exception | None = None
+        self.pull_error: Exception | None = None
+        self.send_error: Exception | None = None
+        self.ack_error: Exception | None = None
+
+    def register_channel(self, channel: str, transport: str | None = None) -> dict:
+        if self.register_error is not None:
+            raise self.register_error
+        self.registered.append((channel, transport))
+        return {"ok": True, "channel": channel, "transport": transport}
+
+    def pull_events(
+        self,
+        channel: str,
+        after_seq: int = 0,
+        wait_s: float = 0.0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if self.pull_error is not None:
+            raise self.pull_error
+        self.pulls.append((channel, after_seq, wait_s))
+        return [e for e in self.events if int(e["seq"]) > after_seq][:limit]
+
+    def send_message(
+        self, channel: str, text: str, reply_to: str | int | None = None
+    ) -> dict:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append({"channel": channel, "text": text, "reply_to": reply_to})
+        return {"ok": True}
+
+    def ack_event(self, channel: str, seq: int) -> dict:
+        if self.ack_error is not None:
+            raise self.ack_error
+        self.acked.append((channel, seq))
+        return {"ok": True}
+
+
+class _LocalUnixChatServer:
+    def __init__(self, sock_path: Path, handler):
+        self.sock_path = sock_path
+        self.handler = handler
+        self.requests: list[dict[str, Any]] = []
+        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._srv.bind(str(sock_path))
+        self._srv.listen(8)
+        self._stop = False
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                break
+            with conn:
+                data = b""
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b"\n" in data:
+                        break
+                line = data.splitlines()[0].decode("utf-8") if data else "{}"
+                req = json.loads(line)
+                self.requests.append(req)
+                resp = self.handler(req)
+                conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+
+    def close(self) -> None:
+        self._stop = True
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2.0)
+
+
 CASH_HISTORY = [
     # B:G rows: Date, Description, Debit, Credit, Category, Remarks
     ["2026-06-01", "Coffee", "200.00", "", "Expense:Dining", ""],
     ["2026-06-02", "Auto", "80.00", "", "Expense:Local Travel", ""],
     ["2026-06-03", "ATM", "", "3000.00", "Transfer:Cash", ""],
 ]
-
-
-@pytest.fixture
-def sent(monkeypatch):
-    outbox = []
-
-    class _Resp:
-        def __init__(self, data):
-            self._d = data
-
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return self._d
-
-    self_updates = {"result": []}
-
-    def fake_get(url, params=None, timeout=None):
-        return _Resp(self_updates)
-
-    def fake_post(url, json=None, timeout=None):
-        outbox.append(json)
-        return _Resp({})
-
-    monkeypatch.setattr(bot_mod.requests, "get", fake_get)
-    monkeypatch.setattr(bot_mod.requests, "post", fake_post)
-    return outbox, self_updates
-
 
 SYNTHETIC_ADDON_CONFIG = {
     "primary_cardholders": ["ALEX MORGAN"],
@@ -207,47 +284,30 @@ def make_bot(
     cc_history=None,
     bank_history=None,
     addon_cards=SYNTHETIC_ADDON_CONFIG,
+    settings=None,
+    chat_client=None,
 ):
     ds = FakeDataSource(cash_history, cc_history=cc_history, bank_history=bank_history)
     state = str(tmp_path / "state.json")
-    return TelegramCashBot(ds, SETTINGS, "TOKEN", state, addon_cards=addon_cards), ds
-
-
-# --- authorization -------------------------------------------------------------
-
-
-def test_authorized_accepts_configured_chat_and_user(tmp_path, sent):
-    bot, _ = make_bot(tmp_path)
-    msg = {"chat": {"id": -100123}, "from": {"id": 111}}
-    assert bot._authorized(msg) is True
-
-
-def test_authorized_rejects_other_chat_or_user(tmp_path, sent):
-    bot, _ = make_bot(tmp_path)
-    assert bot._authorized({"chat": {"id": -999}, "from": {"id": 111}}) is False
-    assert bot._authorized({"chat": {"id": -100123}, "from": {"id": 999}}) is False
-
-
-def test_setup_mode_processes_nothing(tmp_path, sent):
-    ds = FakeDataSource(CASH_HISTORY)
+    client = chat_client if chat_client is not None else FakeChatClient()
     bot = TelegramCashBot(
         ds,
-        {"allowed_chat_id": 0, "allowed_users": {"111": "Karti"}},
-        "TOKEN",
-        str(tmp_path / "s.json"),
+        SETTINGS if settings is None else settings,
+        state,
+        chat_client=client,
+        addon_cards=addon_cards,
     )
-    assert bot._authorized({"chat": {"id": -100123}, "from": {"id": 111}}) is False
+    return bot, ds, client
 
 
 # --- entry handling ------------------------------------------------------------
 
 
-def test_entry_appends_row_and_replies(tmp_path, sent):
-    outbox, _ = sent
-    bot, ds = make_bot(tmp_path)
+def test_entry_appends_row_and_replies(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
     cat = bot._build_categorizer()
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "Coffee 250"}, cat
+        {"event_type": "message", "sender_id": "111", "text": "Coffee 250"}, cat
     )
     row = ds.sheets_service.appended[-1]
     assert row[1] == "Coffee"  # description
@@ -255,87 +315,217 @@ def test_entry_appends_row_and_replies(tmp_path, sent):
     assert row[3] == ""  # credit blank
     assert row[4] == "Expense:Dining"  # categorized from cash history
     assert row[5] == "Karti"  # remarks = sender label
-    assert "Coffee" in outbox[-1]["text"] and "✓" in outbox[-1]["text"]
+    assert client.sent[-1]["channel"] == "finance"
+    assert "Coffee" in client.sent[-1]["text"] and "✓" in client.sent[-1]["text"]
 
 
-def test_credit_entry_writes_credit_column(tmp_path, sent):
-    bot, ds = make_bot(tmp_path)
+def test_entry_reads_nested_payload_and_matrix_sender(tmp_path):
+    bot, ds, client = make_bot(
+        tmp_path,
+        settings={
+            "transport": "matrix",
+            "allowed_users": {"@mini:matrix.example": "Mini"},
+        },
+    )
+    cat = bot._build_categorizer()
+    recorded = bot.process_message(
+        {
+            "event_type": "message",
+            "payload": {"text": "Auto 80", "sender_id": "@mini:matrix.example"},
+        },
+        cat,
+    )
+    assert recorded is True
+    row = ds.sheets_service.appended[-1]
+    assert row[1] == "Auto"
+    assert row[5] == "Mini"
+    assert "Mini" in client.sent[-1]["text"]
+
+
+def test_entry_without_allowed_users_mapping_leaves_remarks_blank(tmp_path):
+    bot, ds, client = make_bot(tmp_path, settings={})
+    cat = bot._build_categorizer()
+    recorded = bot.process_message(
+        {"event_type": "message", "sender_id": "999", "text": "Coffee 120"}, cat
+    )
+    assert recorded is True
+    row = ds.sheets_service.appended[-1]
+    assert row[5] == ""
+    assert "✓ Coffee ₹120" in client.sent[-1]["text"]
+
+
+def test_credit_entry_writes_credit_column(tmp_path):
+    bot, ds, _ = make_bot(tmp_path)
     cat = bot._build_categorizer()
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 222}, "text": "+2000 ATM"}, cat
+        {"event_type": "message", "sender_id": "222", "text": "+2000 ATM"}, cat
     )
     row = ds.sheets_service.appended[-1]
     assert row[2] == "" and row[3] == 2000.0  # debit blank, credit set
+    assert row[5] == "Mini"
 
 
-def test_chatter_without_amount_is_silent(tmp_path, sent):
-    outbox, _ = sent
-    bot, ds = make_bot(tmp_path)
+def test_chatter_without_amount_is_silent(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
     cat = bot._build_categorizer()
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "dinner tonight?"}, cat
+        {"event_type": "message", "sender_id": "111", "text": "dinner tonight?"}, cat
     )
     assert ds.sheets_service.appended == []
-    assert outbox == []
+    assert client.sent == []
 
 
-def test_undo_deletes_last_row(tmp_path, sent):
-    outbox, _ = sent
-    bot, ds = make_bot(tmp_path)
+def test_undo_deletes_last_row(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
     cat = bot._build_categorizer()
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "Coffee 250"}, cat
+        {"event_type": "message", "sender_id": "111", "text": "Coffee 250"}, cat
     )
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/undo"}, cat
+        {"event_type": "message", "sender_id": "111", "text": "/undo"}, cat
     )
     assert ds.sheets_service.deleted  # a deleteDimension was issued
     assert bot.state["last_appended"] is None
-    assert "Removed" in outbox[-1]["text"]
+    assert "Removed" in client.sent[-1]["text"]
 
 
-def test_undo_with_nothing_to_undo(tmp_path, sent):
-    outbox, _ = sent
-    bot, _ = make_bot(tmp_path)
+def test_undo_with_nothing_to_undo(tmp_path):
+    bot, _, client = make_bot(tmp_path)
     cat = bot._build_categorizer()
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/undo"}, cat
+        {"event_type": "message", "sender_id": "111", "text": "/undo"}, cat
     )
-    assert "Nothing to undo" in outbox[-1]["text"]
+    assert "Nothing to undo" in client.sent[-1]["text"]
 
 
-# --- run_once ------------------------------------------------------------------
+def test_bot_mention_suffix_stripped_on_commands(tmp_path):
+    bot, _, client = make_bot(tmp_path)
+    bot.process_message(
+        {"event_type": "message", "sender_id": "111", "text": "/help@gajana_bot"}
+    )
+    assert "/addon" in client.sent[-1]["text"]
 
 
-def test_run_once_advances_offset_and_filters(tmp_path, sent):
-    outbox, updates = sent
-    bot, ds = make_bot(tmp_path)
-    updates["result"] = [
+# --- run_once & state persistence ----------------------------------------------
+
+
+def test_run_once_registers_pulls_processes_saves_last_seq_and_acks(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
+    client.events = [
         {
-            "update_id": 10,
-            "message": {
-                "chat": {"id": -100123},
-                "from": {"id": 111},
-                "text": "Coffee 250",
-            },
+            "seq": 10,
+            "channel": "finance",
+            "transport": "telegram",
+            "event_type": "message",
+            "sender_id": "111",
+            "text": "Coffee 250",
         },
         {
-            "update_id": 11,
-            "message": {"chat": {"id": -999}, "from": {"id": 111}, "text": "Hack 999"},
+            "seq": 11,
+            "channel": "finance",
+            "transport": "telegram",
+            "event_type": "attachment",
+            "sender_id": "111",
+            "text": "100",
         },
         {
-            "update_id": 12,
-            "message": {
-                "chat": {"id": -100123},
-                "from": {"id": 111},
-                "text": "Auto 80",
-            },
+            "seq": 12,
+            "channel": "finance",
+            "transport": "telegram",
+            "event_type": "message",
+            "payload": {"text": "Auto 80", "sender_id": "222"},
         },
     ]
     handled = bot.run_once()
-    assert handled == 2  # unauthorized chat ignored
-    assert bot.state["offset"] == 13  # max(update_id)+1
+    assert handled == 2
+    assert client.registered == [("finance", "telegram")]
+    assert client.pulls == [("finance", 0, 0)]
+    assert client.acked == [("finance", 10), ("finance", 11), ("finance", 12)]
+    assert bot.state["last_seq"] == 12
+    assert bot.state["last_appended"]["summary"] == "Auto ₹80"
     assert len(ds.sheets_service.appended) == 2
+
+    # Next run resumes from last_seq=12 and preserves last_appended for /undo
+    client.events.append(
+        {
+            "seq": 13,
+            "channel": "finance",
+            "transport": "telegram",
+            "event_type": "message",
+            "sender_id": "111",
+            "text": "/undo",
+        }
+    )
+    bot2 = TelegramCashBot(
+        ds,
+        SETTINGS,
+        str(tmp_path / "state.json"),
+        chat_client=client,
+        addon_cards=SYNTHETIC_ADDON_CONFIG,
+    )
+    handled2 = bot2.run_once()
+    assert handled2 == 0
+    assert client.pulls[-1] == ("finance", 12, 0)
+    assert client.acked[-1] == ("finance", 13)
+    assert ds.sheets_service.deleted
+    assert bot2.state["last_seq"] == 13
+    assert bot2.state["last_appended"] is None
+
+
+def test_run_once_disabled_in_settings_skips_bridge(tmp_path):
+    bot, _, client = make_bot(tmp_path, settings={"enabled": False})
+    client.events = [
+        {"seq": 1, "event_type": "message", "text": "Coffee 250", "sender_id": "111"}
+    ]
+    assert bot.run_once() == 0
+    assert client.registered == []
+    assert client.pulls == []
+
+
+def test_run_once_gateway_unavailable_exits_cleanly_without_corrupting_state(
+    tmp_path, caplog
+):
+    state_file = tmp_path / "state.json"
+    initial_state = {"last_seq": 42, "last_appended": {"row": 10, "summary": "Tea ₹20"}}
+    state_file.write_text(json.dumps(initial_state), encoding="utf-8")
+
+    bot, _, client = make_bot(tmp_path)
+    client.register_error = ChatGatewayUnavailableError("bridge restarting")
+    with caplog.at_level("WARNING"):
+        assert bot.run_once() == 0
+    assert "Chat bridge unavailable" in caplog.text
+    assert json.loads(state_file.read_text(encoding="utf-8")) == initial_state
+
+    client.register_error = None
+    client.pull_error = ChatGatewayUnavailableError("socket down")
+    with caplog.at_level("WARNING"):
+        assert bot.run_once() == 0
+    assert json.loads(state_file.read_text(encoding="utf-8")) == initial_state
+
+
+def test_send_message_catches_chat_socket_error_and_oserror(tmp_path, caplog):
+    bot, _, client = make_bot(tmp_path)
+    client.send_error = ChatSocketError("send failed")
+    with caplog.at_level("WARNING"):
+        assert bot.send_message("hi") is False
+    assert "Failed to send chat bridge reply" in caplog.text
+
+    client.send_error = OSError("broken pipe")
+    assert bot.send_message("hi") is False
+
+
+def test_run_once_ack_error_persists_last_seq_and_continues(tmp_path, caplog):
+    bot, ds, client = make_bot(tmp_path)
+    client.events = [
+        {"seq": 5, "event_type": "message", "sender_id": "111", "text": "Coffee 100"},
+    ]
+    client.ack_error = ChatSocketError("transient ack error")
+    with caplog.at_level("WARNING"):
+        assert bot.run_once() == 1
+    assert "Failed to ack chat bridge event seq=5" in caplog.text
+    assert len(ds.sheets_service.appended) == 1
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["last_seq"] == 5
 
 
 # --- addon commands ------------------------------------------------------------
@@ -369,28 +559,28 @@ SAMPLE_BANK_LOG = [
 ]
 
 
-def test_addon_command_reimbursable_forwardable_reply(tmp_path, sent):
-    outbox, _ = sent
-    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
-    bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon"}
+def test_addon_command_reimbursable_forwardable_reply(tmp_path):
+    bot, _, client = make_bot(
+        tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG
     )
-    assert len(outbox) == 1
-    reply = outbox[-1]["text"]
+    bot.process_message({"event_type": "message", "sender_id": "111", "text": "/addon"})
+    assert len(client.sent) == 1
+    reply = client.sent[-1]["text"]
     assert "Hi Amma, credit card spend summary:" in reply
     assert "Items total: ₹3,500" in reply
     assert "Already received via UPI: -₹1,500" in reply
     assert "Amount due: ₹2,000" in reply
 
 
-def test_addon_all_command_overview_reply(tmp_path, sent):
-    outbox, _ = sent
-    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
-    bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon all"}
+def test_addon_all_command_overview_reply(tmp_path):
+    bot, _, client = make_bot(
+        tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG
     )
-    assert len(outbox) == 1
-    reply = outbox[-1]["text"]
+    bot.process_message(
+        {"event_type": "message", "sender_id": "111", "text": "/addon all"}
+    )
+    assert len(client.sent) == 1
+    reply = client.sent[-1]["text"]
     assert "Add-on Cards Overview:" in reply
     assert "Mom (reimbursable):" in reply
     assert "Net due: ₹2,000" in reply
@@ -398,110 +588,226 @@ def test_addon_all_command_overview_reply(tmp_path, sent):
     assert "Total spend: ₹4,000" in reply
 
 
-def test_addon_specific_user_reimbursable_and_non_reimbursable(tmp_path, sent):
-    outbox, _ = sent
-    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
-
-    # Specific reimbursable user
-    bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon mom"}
+def test_addon_specific_user_reimbursable_and_non_reimbursable(tmp_path):
+    bot, _, client = make_bot(
+        tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG
     )
-    assert "Hi Amma, credit card spend summary:" in outbox[-1]["text"]
 
-    # Specific non-reimbursable user
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon partner"}
+        {"event_type": "message", "sender_id": "111", "text": "/addon mom"}
     )
-    assert "Partner Spend Summary:" in outbox[-1]["text"]
-    assert "Total spend: ₹4,000" in outbox[-1]["text"]
+    assert "Hi Amma, credit card spend summary:" in client.sent[-1]["text"]
 
-
-def test_addon_unknown_user_suggests_available(tmp_path, sent):
-    outbox, _ = sent
-    bot, _ = make_bot(tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG)
     bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon nonexistent"}
+        {"event_type": "message", "sender_id": "111", "text": "/addon partner"}
     )
-    reply = outbox[-1]["text"]
+    assert "Partner Spend Summary:" in client.sent[-1]["text"]
+    assert "Total spend: ₹4,000" in client.sent[-1]["text"]
+
+
+def test_addon_unknown_user_suggests_available(tmp_path):
+    bot, _, client = make_bot(
+        tmp_path, cc_history=SAMPLE_CC_LOG, bank_history=SAMPLE_BANK_LOG
+    )
+    bot.process_message(
+        {"event_type": "message", "sender_id": "111", "text": "/addon nonexistent"}
+    )
+    reply = client.sent[-1]["text"]
     assert "Unknown add-on user 'nonexistent'" in reply
     assert "Available add-on users: Mom, Partner" in reply
     assert "/addon all" in reply
 
 
-def test_help_mentions_addon(tmp_path, sent):
-    outbox, _ = sent
-    bot, _ = make_bot(tmp_path)
-    bot.process_message({"chat": {"id": -100123}, "from": {"id": 111}, "text": "/help"})
-    reply = outbox[-1]["text"]
+def test_help_mentions_addon(tmp_path):
+    bot, _, client = make_bot(tmp_path)
+    bot.process_message({"event_type": "message", "sender_id": "111", "text": "/help"})
+    reply = client.sent[-1]["text"]
     assert "/addon" in reply
     assert "/addon all" in reply
 
 
-def test_addon_command_handles_data_source_error_gracefully(
-    tmp_path, sent, monkeypatch
-):
-    outbox, _ = sent
-    bot, ds = make_bot(tmp_path)
+def test_addon_command_handles_data_source_error_gracefully(tmp_path):
+    bot, ds, client = make_bot(tmp_path)
 
     def _err(acc):
         raise RuntimeError("Google Sheets 503 Service Unavailable")
 
-    monkeypatch.setattr(ds, "get_transaction_log_data", _err)
+    ds.get_transaction_log_data = _err  # type: ignore[method-assign]
 
-    bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "/addon"}
-    )
-    assert len(outbox) == 1
-    reply = outbox[-1]["text"]
+    bot.process_message({"event_type": "message", "sender_id": "111", "text": "/addon"})
+    assert len(client.sent) == 1
+    reply = client.sent[-1]["text"]
     assert "Could not fetch add-on spend right now; please try again shortly." in reply
 
 
 def test_append_cash_row_missing_sheets_service_raises_and_handles_gracefully(
-    tmp_path, sent
+    tmp_path,
 ):
-    outbox, _ = sent
     ds = FakeDataSource(CASH_HISTORY)
     ds.sheets_service = None  # simulate missing sheets service
+    client = FakeChatClient()
     state = str(tmp_path / "state.json")
     bot = TelegramCashBot(
-        ds, SETTINGS, "TOKEN", state, addon_cards=SYNTHETIC_ADDON_CONFIG
+        ds,
+        SETTINGS,
+        state,
+        chat_client=client,
+        addon_cards=SYNTHETIC_ADDON_CONFIG,
     )
     cat = bot._build_categorizer()
 
-    # Direct append_cash_row raises RuntimeError
     entry = parse_entry("Coffee 100")
     assert entry is not None
     with pytest.raises(RuntimeError, match="Google Sheets service is not configured"):
         bot.append_cash_row(entry, "Expense:Dining", "Karti")
 
-    # process_message catches the error, sends error message, returns False, does not set last_appended
     res = bot.process_message(
-        {"chat": {"id": -100123}, "from": {"id": 111}, "text": "Coffee 100"}, cat
+        {"event_type": "message", "sender_id": "111", "text": "Coffee 100"}, cat
     )
     assert res is False
     assert bot.state.get("last_appended") is None
-    assert len(outbox) == 1
-    assert "Failed to record entry in Google Sheets" in outbox[-1]["text"]
+    assert len(client.sent) == 1
+    assert "Failed to record entry in Google Sheets" in client.sent[-1]["text"]
 
 
-def test_telegram_bot_addon_cards_config_precedence(tmp_path, monkeypatch):
+def test_telegram_bot_addon_cards_config_precedence(tmp_path):
     ds = FakeDataSource(CASH_HISTORY)
     state = str(tmp_path / "state.json")
+    client = FakeChatClient()
 
-    # 1. Explicit addon_cards passed
-    b1 = TelegramCashBot(ds, SETTINGS, "TOKEN", state, addon_cards={"custom": "passed"})
+    b1 = TelegramCashBot(
+        ds,
+        SETTINGS,
+        state,
+        chat_client=client,
+        addon_cards={"custom": "passed"},
+    )
     assert b1.addon_cards == {"custom": "passed"}
 
-    # 2. addon_cards is None -> falls back to ADDON_CARDS or settings.get("addon_cards") or {}
     b2 = TelegramCashBot(
         ds,
         {**SETTINGS, "addon_cards": {"from": "settings"}},
-        "TOKEN",
         state,
+        chat_client=client,
         addon_cards=None,
     )
-    # If ADDON_CARDS in constants is set, it takes priority, else settings
     from src.constants import ADDON_CARDS
 
     expected = ADDON_CARDS or {"from": "settings"}
     assert b2.addon_cards == expected
+
+
+# --- run_telegram_bot entrypoint -----------------------------------------------
+
+
+def test_run_telegram_bot_main_without_settings_uses_defaults(tmp_path, monkeypatch):
+    missing_settings = tmp_path / "missing_settings.json"
+    state_file = tmp_path / "state.json"
+    called = {}
+
+    class _FakeBot:
+        def __init__(self, ds, settings, state_path):
+            called["settings"] = settings
+            called["state_path"] = state_path
+
+        def run_once(self):
+            called["ran"] = True
+            return 1
+
+    monkeypatch.setattr(run_telegram_bot, "SETTINGS_PATH", str(missing_settings))
+    monkeypatch.setattr(run_telegram_bot, "STATE_PATH", str(state_file))
+    monkeypatch.setattr(
+        run_telegram_bot, "GoogleDataSource", lambda: FakeDataSource(CASH_HISTORY)
+    )
+    monkeypatch.setattr(run_telegram_bot, "TelegramCashBot", _FakeBot)
+
+    run_telegram_bot.main()
+    assert called == {"settings": {}, "state_path": str(state_file), "ran": True}
+
+
+def test_run_telegram_bot_main_respects_disabled_flag(tmp_path, monkeypatch):
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text('{"enabled": false}', encoding="utf-8")
+    monkeypatch.setattr(run_telegram_bot, "SETTINGS_PATH", str(settings_file))
+    monkeypatch.setattr(
+        run_telegram_bot,
+        "GoogleDataSource",
+        lambda: pytest.fail("GoogleDataSource should not be initialized when disabled"),
+    )
+    run_telegram_bot.main()
+
+
+# --- real AF_UNIX socket round-trip with src/chat_client.py --------------------
+
+
+def test_real_unix_socket_round_trip(tmp_path, monkeypatch):
+    sock_path = tmp_path / "chat.sock"
+    monkeypatch.setenv("AGENTIC_CHAT_SOCKET", str(sock_path))
+
+    events_db = [
+        {
+            "seq": 1,
+            "channel": "finance",
+            "transport": "telegram",
+            "event_type": "message",
+            "sender_id": "111",
+            "text": "Coffee 250",
+            "payload": {"text": "Coffee 250", "sender_id": "111"},
+        }
+    ]
+    acked_seqs: list[int] = []
+    sent_texts: list[str] = []
+
+    def handler(req: dict[str, Any]) -> dict[str, Any]:
+        op = req.get("op")
+        if op == "register_channel":
+            return {
+                "ok": True,
+                "channel": req["channel"],
+                "transport": req["transport"],
+            }
+        if op == "pull_events":
+            after = int(req.get("after_seq", 0))
+            return {
+                "ok": True,
+                "events": [e for e in events_db if e["seq"] > after],
+            }
+        if op == "send_message":
+            sent_texts.append(req["text"])
+            return {"ok": True}
+        if op == "ack_event":
+            acked_seqs.append(int(req["seq"]))
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown op {op}"}
+
+    srv = _LocalUnixChatServer(sock_path, handler)
+    try:
+        ds = FakeDataSource(CASH_HISTORY)
+        state_path = str(tmp_path / "bot_state.json")
+        client = ChatSocketClient()  # resolves AGENTIC_CHAT_SOCKET from env
+        bot = TelegramCashBot(
+            ds,
+            {"transport": "telegram", "allowed_users": {"111": "Karti"}},
+            state_path,
+            chat_client=client,
+            addon_cards=SYNTHETIC_ADDON_CONFIG,
+        )
+        handled = bot.run_once()
+        assert handled == 1
+        assert [r["op"] for r in srv.requests] == [
+            "register_channel",
+            "pull_events",
+            "send_message",
+            "ack_event",
+        ]
+        assert srv.requests[0]["channel"] == "finance"
+        assert srv.requests[0]["transport"] == "telegram"
+        assert ds.sheets_service.appended[-1][1] == "Coffee"
+        assert ds.sheets_service.appended[-1][5] == "Karti"
+        assert len(sent_texts) == 1 and "Coffee ₹250" in sent_texts[0]
+        assert acked_seqs == [1]
+        persisted = json.loads(Path(state_path).read_text(encoding="utf-8"))
+        assert persisted["last_seq"] == 1
+        assert persisted["last_appended"]["summary"] == "Coffee ₹250"
+    finally:
+        srv.close()

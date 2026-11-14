@@ -1,10 +1,12 @@
-"""Telegram cash-entry bot for gajana.
+"""Chat-bridge cash-entry bot for gajana.
 
-Cron-polled (no webhook, no exposed port): each run fetches new group messages
-via ``getUpdates``, parses a cash entry ("Coffee 250" or "+2000 ATM"),
-categorizes it from the Cash Transactions history, appends a row to that tab,
-and replies in the group. Only the configured group chat and allowed users are
-processed. ``/undo`` removes the most recent entry.
+Cron-polled (no webhook, no exposed port): each run registers the ``finance``
+channel over the host unified chat bridge Unix socket (``src.chat_client``),
+pulls pre-authorized events since ``last_seq``, parses cash entries
+("Coffee 250" or "+2000 ATM"), categorizes them from the Cash Transactions
+history, appends a row to that tab, replies via the chat bridge, and
+acknowledges processed events. ``/undo`` removes the most recent entry and
+``/addon`` queries add-on card spend and settlement.
 
 Cash rows live in the "Cash Transactions" tab, columns B:G
 (Date | Description | Debit | Credit | Category | Remarks) -- there is no
@@ -20,17 +22,18 @@ import os
 import re
 from typing import Any, Hashable, Optional
 
-import requests
-
-from src.addon_tracker import redact_telegram_token
 from src.categorizer import Categorizer
+from src.chat_client import (
+    ChatGatewayUnavailableError,
+    ChatSocketClient,
+    ChatSocketError,
+)
 from src.constants import ADDON_CARDS, DEFAULT_CATEGORY, TRANSACTIONS_SHEET_ID
 
 logger = logging.getLogger(__name__)
 
 CASH_SHEET_NAME = "Cash Transactions"
-API_URL = "https://api.telegram.org/bot{token}/{method}"
-HTTP_TIMEOUT = 30
+CHANNEL = "finance"
 
 # A leading-token that flags the entry as cash-in (a Credit) rather than a spend.
 CREDIT_FIRST_WORDS = {"atm", "received", "deposit", "credit", "cashin", "refund"}
@@ -105,58 +108,51 @@ def parse_entry(text: str) -> Optional[ParsedEntry]:
 
 
 class TelegramCashBot:
-    """Polls Telegram, records cash entries to the Cash Transactions sheet."""
+    """Polls the host chat bridge ``finance`` channel and records cash entries."""
 
     def __init__(
         self,
         data_source: Any,
-        settings: dict[str, Any],
-        token: str,
+        settings: Optional[dict[str, Any]],
         state_path: str,
+        chat_client: Optional[ChatSocketClient] = None,
         addon_cards: Optional[dict[str, Any]] = None,
+        channel: str = CHANNEL,
     ) -> None:
+        cfg = settings or {}
         self.ds = data_source
         self.sheets = getattr(data_source, "sheets_service", None)
-        self.token = token
         self.state_path = state_path
-        self.allowed_chat_id = settings.get("allowed_chat_id")
-        # {telegram_user_id (int): "Label"} -- who may log, and their name.
-        self.allowed_users = {
-            int(k): v for k, v in settings.get("allowed_users", {}).items()
+        self.channel = channel
+        self.enabled: bool = cfg.get("enabled", True) is not False
+        self.transport: str = (
+            str(cfg.get("transport") or "telegram").strip() or "telegram"
+        )
+        self.chat_client: ChatSocketClient = (
+            chat_client if chat_client is not None else ChatSocketClient()
+        )
+        # Optional {sender_id_str: "Label"} for populating sheet Remarks;
+        # channel authorization itself is enforced on the host by chat-bridge.
+        raw_users = cfg.get("allowed_users") or cfg.get("user_labels") or {}
+        self.allowed_users: dict[str, str] = {
+            str(k): str(v) for k, v in raw_users.items()
         }
         self.addon_cards = (
             addon_cards
             if addon_cards is not None
-            else ADDON_CARDS or settings.get("addon_cards") or {}
+            else ADDON_CARDS or cfg.get("addon_cards") or {}
         )
         self.state = self._load_state()
 
-    # --- Telegram transport --------------------------------------------------
-    def _api(self, method: str) -> str:
-        return API_URL.format(token=self.token, method=method)
-
-    def get_updates(self) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {
-            "timeout": 0,
-            "allowed_updates": json.dumps(["message"]),
-        }
-        if self.state.get("offset"):
-            params["offset"] = self.state["offset"]
-        resp = requests.get(
-            self._api("getUpdates"), params=params, timeout=HTTP_TIMEOUT
-        )
-        resp.raise_for_status()
-        return resp.json().get("result", [])
-
-    def send_message(self, chat_id: int, text: str) -> None:
+    # --- Chat bridge transport -----------------------------------------------
+    def send_message(self, text: str) -> bool:
+        """Send a reply via chat-bridge without raising on transport failures."""
         try:
-            requests.post(
-                self._api("sendMessage"),
-                json={"chat_id": chat_id, "text": text},
-                timeout=HTTP_TIMEOUT,
-            )
-        except requests.RequestException as e:
-            logger.warning(f"Failed to send Telegram reply: {redact_telegram_token(e)}")
+            self.chat_client.send_message(self.channel, text)
+            return True
+        except (ChatSocketError, OSError) as e:
+            logger.warning(f"Failed to send chat bridge reply: {e}")
+            return False
 
     # --- State ---------------------------------------------------------------
     def _load_state(self) -> dict[str, Any]:
@@ -172,20 +168,6 @@ class TelegramCashBot:
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(self.state, f, indent=2)
-
-    # --- Authorization -------------------------------------------------------
-    def _authorized(self, message: dict[str, Any]) -> bool:
-        chat_id = message.get("chat", {}).get("id")
-        user_id = message.get("from", {}).get("id")
-        if self.allowed_chat_id in (None, 0, ""):
-            # Setup mode: help the operator discover the chat id, process nothing.
-            logger.info(
-                f"[setup] saw message in chat_id={chat_id} from user_id={user_id} "
-                f"({message.get('from', {}).get('first_name')}). Set allowed_chat_id "
-                "in settings to enable."
-            )
-            return False
-        return chat_id == self.allowed_chat_id and user_id in self.allowed_users
 
     # --- Categorization ------------------------------------------------------
     def _build_categorizer(self) -> Categorizer:
@@ -277,18 +259,18 @@ class TelegramCashBot:
         return True
 
     # --- Message handling ----------------------------------------------------
-    def _handle_undo(self, chat_id: int) -> None:
+    def _handle_undo(self) -> None:
         last = self.state.get("last_appended")
         if not last:
-            self.send_message(chat_id, "Nothing to undo.")
+            self.send_message("Nothing to undo.")
             return
         if self.delete_row(int(last["row"])):
-            self.send_message(chat_id, f"✗ Removed: {last['summary']}")
+            self.send_message(f"✗ Removed: {last['summary']}")
             self.state["last_appended"] = None
         else:
-            self.send_message(chat_id, "Could not undo (row not found).")
+            self.send_message("Could not undo (row not found).")
 
-    def _handle_addon(self, chat_id: int, arg: str = "") -> None:
+    def _handle_addon(self, arg: str = "") -> None:
         try:
             from src.addon_tracker import (
                 compute_addon_report,
@@ -307,17 +289,17 @@ class TelegramCashBot:
             arg_clean = arg.strip().lower()
 
             if arg_clean == "all":
-                self.send_message(chat_id, format_all_addons_overview(report))
+                self.send_message(format_all_addons_overview(report))
                 return
 
             reimbursable_users = [u for u in report.users if u.user.reimburse]
 
             if not arg_clean:
                 if not reimbursable_users:
-                    self.send_message(chat_id, format_all_addons_overview(report))
+                    self.send_message(format_all_addons_overview(report))
                     return
                 for u_rep in reimbursable_users:
-                    self.send_message(chat_id, format_reimbursable_user_message(u_rep))
+                    self.send_message(format_reimbursable_user_message(u_rep))
                 return
 
             # Specific user requested
@@ -330,18 +312,14 @@ class TelegramCashBot:
                 ] + [p.lower() for p in u.cardholder_patterns]
                 if arg_clean in candidates:
                     if u.reimburse:
-                        self.send_message(
-                            chat_id, format_reimbursable_user_message(u_rep)
-                        )
+                        self.send_message(format_reimbursable_user_message(u_rep))
                     else:
-                        self.send_message(
-                            chat_id, format_non_reimbursable_user_message(u_rep)
-                        )
+                        self.send_message(format_non_reimbursable_user_message(u_rep))
                     return
 
             for unconf in report.unconfigured_users:
                 if arg_clean == unconf.label.lower():
-                    self.send_message(chat_id, format_unconfigured_user_message(unconf))
+                    self.send_message(format_unconfigured_user_message(unconf))
                     return
 
             available = [u.user.label for u in report.users] + [
@@ -349,25 +327,25 @@ class TelegramCashBot:
             ]
             names_str = ", ".join(available) if available else "none"
             self.send_message(
-                chat_id,
                 f"Unknown add-on user '{arg.strip()}'. Available add-on users: {names_str}. "
-                "Use `/addon all` for full overview.",
+                "Use `/addon all` for full overview."
             )
         except Exception as e:
-            logger.warning(f"Failed to handle /addon: {redact_telegram_token(e)}")
+            logger.warning(f"Failed to handle /addon: {e}")
             self.send_message(
-                chat_id,
-                "Could not fetch add-on spend right now; please try again shortly.",
+                "Could not fetch add-on spend right now; please try again shortly."
             )
 
     def _handle_entry(
-        self, chat_id: int, user_id: int, text: str, categorizer: Categorizer
+        self,
+        text: str,
+        categorizer: Categorizer,
+        sender_label: str = "",
     ) -> bool:
         """Record a cash entry. Returns True if a row was written."""
         entry = parse_entry(text)
         if entry is None:
             return False  # not a cash entry (chatter) -> stay silent
-        label = self.allowed_users.get(user_id, "")
         signed = entry.amount if entry.is_credit else -entry.amount
         txn: dict[Hashable, Any] = {
             "description": entry.description,
@@ -379,12 +357,11 @@ class TelegramCashBot:
         category = str(txn.get("category") or DEFAULT_CATEGORY)
 
         try:
-            row = self.append_cash_row(entry, category, remarks=label)
+            row = self.append_cash_row(entry, category, remarks=sender_label)
         except Exception as e:
-            logger.error(f"Failed to append cash row: {redact_telegram_token(e)}")
+            logger.error(f"Failed to append cash row: {e}")
             self.send_message(
-                chat_id,
-                "Failed to record entry in Google Sheets. Please check bot logs or configuration.",
+                "Failed to record entry in Google Sheets. Please check bot logs or configuration."
             )
             return False
 
@@ -393,72 +370,111 @@ class TelegramCashBot:
         self.state["last_appended"] = {
             "row": row,
             "summary": summary,
-            "chat_id": chat_id,
         }
-        by = f" · {label}" if label else ""
-        self.send_message(
-            chat_id, f"✓ {summary} → {category} (cash){by}. /undo to remove."
-        )
+        by = f" · {sender_label}" if sender_label else ""
+        self.send_message(f"✓ {summary} → {category} (cash){by}. /undo to remove.")
         return True
 
+    def _resolve_sender_label(
+        self, event: dict[str, Any], payload: dict[str, Any]
+    ) -> str:
+        sender_id = event.get("sender_id")
+        if sender_id is None:
+            sender_id = payload.get("sender_id")
+        if sender_id is None and isinstance(event.get("from"), dict):
+            sender_id = event["from"].get("id")
+        if sender_id is not None:
+            mapped = self.allowed_users.get(str(sender_id), "")
+            if mapped:
+                return mapped
+        return str(
+            event.get("sender_label")
+            or payload.get("sender_label")
+            or event.get("sender_name")
+            or payload.get("sender_name")
+            or ""
+        ).strip()
+
     def process_message(
-        self, message: dict[str, Any], categorizer: Optional[Categorizer] = None
+        self, event: dict[str, Any], categorizer: Optional[Categorizer] = None
     ) -> bool:
-        """Handle one message. Returns True if a cash entry was recorded."""
-        text = str(message.get("text", "")).strip()
-        chat_id = message["chat"]["id"]
-        user_id = message["from"]["id"]
+        """Handle one chat bridge message event. Returns True if a cash entry was recorded."""
+        raw_payload = event.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        text = str(event.get("text") or payload.get("text") or "").strip()
+        if not text:
+            return False
+        sender_label = self._resolve_sender_label(event, payload)
         parts = text.split(None, 1)
         first_token = parts[0] if parts else ""
         cmd = first_token.split("@")[0].lower()
         args = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/undo",):
-            self._handle_undo(chat_id)
+            self._handle_undo()
         elif cmd in ("/addon",):
-            self._handle_addon(chat_id, args)
+            self._handle_addon(args)
         elif cmd in ("/start", "/help"):
             self.send_message(
-                chat_id,
                 "Log cash: e.g. `Coffee 250` (spend) or `+2000 ATM` (cash in). "
                 "Add `yesterday` or `YYYY-MM-DD` for a past date. /undo removes "
                 "the last entry. /addon shows add-on card spend and settlement; "
-                "/addon all for full overview.",
+                "/addon all for full overview."
             )
         elif text.startswith("/"):
             return False  # unknown command -> ignore
         else:
             if categorizer is None:
                 categorizer = self._build_categorizer()
-            return self._handle_entry(chat_id, user_id, text, categorizer)
+            return self._handle_entry(text, categorizer, sender_label=sender_label)
         return False
 
     # --- Orchestration -------------------------------------------------------
     def run_once(self) -> int:
-        """Poll once, process authorized messages, persist state. Returns the
-        number of cash entries actually written (not messages seen)."""
-        updates = self.get_updates()
-        if not updates:
-            return 0
-        # Advance the offset past every fetched update so nothing is reprocessed,
-        # even messages we ignore.
-        self.state["offset"] = max(u["update_id"] for u in updates) + 1
+        """Poll the host chat bridge once, process message events, and persist state.
 
-        authorized = [
-            u["message"]
-            for u in updates
-            if "message" in u and self._authorized(u["message"])
-        ]
+        Returns the number of cash entries actually written (not events seen).
+        """
+        if not self.enabled:
+            logger.info("Finance chat bot disabled in settings; skipping.")
+            return 0
+
+        try:
+            self.chat_client.register_channel(self.channel, transport=self.transport)
+            last_seq = int(self.state.get("last_seq", 0))
+            events = self.chat_client.pull_events(
+                self.channel, after_seq=last_seq, wait_s=0
+            )
+        except (ChatGatewayUnavailableError, OSError) as e:
+            logger.warning(f"Chat bridge unavailable during {self.channel} poll: {e}")
+            return 0
+
+        if not events:
+            return 0
+
+        categorizer: Optional[Categorizer] = None
         recorded = 0
-        if authorized:
-            categorizer = self._build_categorizer()
-            for message in authorized:
+        for event in events:
+            seq = int(event["seq"])
+            if event.get("event_type") == "message":
                 try:
-                    if self.process_message(message, categorizer):
+                    raw_payload = event.get("payload")
+                    payload: dict[str, Any] = (
+                        raw_payload if isinstance(raw_payload, dict) else {}
+                    )
+                    text = str(event.get("text") or payload.get("text") or "").strip()
+                    if text and not text.startswith("/") and categorizer is None:
+                        categorizer = self._build_categorizer()
+                    if self.process_message(event, categorizer):
                         recorded += 1
                 except Exception as e:  # never let one bad message wedge the loop
                     logger.error(f"Error processing message: {e}", exc_info=True)
-        self._save_state()
+            self.state["last_seq"] = seq
+            self._save_state()
+            try:
+                self.chat_client.ack_event(self.channel, seq)
+            except (ChatSocketError, OSError) as e:
+                logger.warning(f"Failed to ack chat bridge event seq={seq}: {e}")
         return recorded
 
 

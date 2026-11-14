@@ -17,13 +17,13 @@ from src.addon_tracker import (
     parse_addon_config,
     parse_addon_repay_tag,
     parse_addon_tag,
-    redact_telegram_token,
     resolve_cardholder_tag,
     send_telegram_addon_notification,
 )
 from src.categorizer import Categorizer
 from src.category_index import CategoryIndex
 from src.constants import DEFAULT_CATEGORY
+from src.utils import redact_telegram_token
 
 # ---------------------------------------------------------------------------
 # Synthetic Test Configurations (strictly zero real personal data)
@@ -607,27 +607,26 @@ def test_format_unconfigured_user():
 
 
 # ---------------------------------------------------------------------------
-# Telegram Notification Helper
+# Chat Bridge Notification Helper
 # ---------------------------------------------------------------------------
 
 
-def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
-    outbox = []
+def test_send_telegram_addon_notification_flow(tmp_path, caplog):
+    from src.chat_client import ChatGatewayUnavailableError, ChatSocketError
 
-    class _FakeResp:
-        def raise_for_status(self):
-            pass
+    class _FakeChatClient:
+        def __init__(self):
+            self.outbox = []
+            self.raise_on_call = None
 
-    def fake_post(url, json=None, timeout=None):
-        outbox.append(json)
-        return _FakeResp()
+        def send_message(self, channel, text, reply_to=None):
+            if callable(self.raise_on_call):
+                self.raise_on_call(len(self.outbox), text)
+            self.outbox.append({"channel": channel, "text": text})
+            return {"ok": True}
 
-    monkeypatch.setattr("requests.post", fake_post)
-
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text('{"allowed_chat_id": 12345}')
-    token_file = tmp_path / "telegram.json"
-    token_file.write_text('{"token": "BOT_TOKEN"}')
+    client = _FakeChatClient()
+    missing_settings = tmp_path / "missing_settings.json"
 
     # Case 1: No add-on swipes -> False, no messages
     res1 = send_telegram_addon_notification(
@@ -641,13 +640,13 @@ def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
             }
         ],
         addon_config=SYNTHETIC_ADDON_CONFIG,
-        settings_path=str(settings_file),
-        token_path=str(token_file),
+        settings_path=str(missing_settings),
+        chat_client=client,
     )
     assert res1 is False
-    assert len(outbox) == 0
+    assert len(client.outbox) == 0
 
-    # Case 2: New add-on swipe for Mom -> header + separate forwardable message
+    # Case 2: New add-on swipe for Mom (settings.json absent -> still sends via bridge)
     new_cc = [
         {
             "date": datetime.date(2026, 8, 10),
@@ -661,20 +660,22 @@ def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
         all_bank=[],
         newly_added_cc=new_cc,
         addon_config=SYNTHETIC_ADDON_CONFIG,
-        settings_path=str(settings_file),
-        token_path=str(token_file),
+        settings_path=str(missing_settings),
+        chat_client=client,
     )
     assert res2 is True
-    # Two messages sent: 1 header summary, 1 forwardable message for Mom
-    assert len(outbox) == 2
+    assert len(client.outbox) == 2
+    assert client.outbox[0]["channel"] == "finance"
     assert (
-        "New CC statement add-on spend booked: Mom ₹2,500 (1 txn)." in outbox[0]["text"]
+        "New CC statement add-on spend booked: Mom ₹2,500 (1 txn)."
+        in client.outbox[0]["text"]
     )
-    assert "Hi Amma, credit card spend summary:" in outbox[1]["text"]
-    assert "• 10 Aug – PHARMACY: ₹2,500" in outbox[1]["text"]
+    assert client.outbox[1]["channel"] == "finance"
+    assert "Hi Amma, credit card spend summary:" in client.outbox[1]["text"]
+    assert "• 10 Aug – PHARMACY: ₹2,500" in client.outbox[1]["text"]
 
     # Case 3: Batch containing a purchase (-3000), a refund (+500), and card bill payment (+10000)
-    outbox.clear()
+    client.outbox.clear()
     new_cc_mixed = [
         {
             "date": datetime.date(2026, 8, 12),
@@ -700,18 +701,17 @@ def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
         all_bank=[],
         newly_added_cc=new_cc_mixed,
         addon_config=SYNTHETIC_ADDON_CONFIG,
-        settings_path=str(settings_file),
-        token_path=str(token_file),
+        settings_path=str(missing_settings),
+        chat_client=client,
     )
     assert res3 is True
-    # Card bill payment (10000) is skipped; net spend is 3000 - 500 = 2500 (2 txns)
     assert (
         "New CC statement add-on spend booked: Mom ₹2,500 (2 txns)."
-        in outbox[0]["text"]
+        in client.outbox[0]["text"]
     )
 
     # Case 4: Net refund activity (refund exceeds purchase)
-    outbox.clear()
+    client.outbox.clear()
     new_cc_refund = [
         {
             "date": datetime.date(2026, 8, 12),
@@ -731,14 +731,89 @@ def test_send_telegram_addon_notification_flow(tmp_path, monkeypatch):
         all_bank=[],
         newly_added_cc=new_cc_refund,
         addon_config=SYNTHETIC_ADDON_CONFIG,
-        settings_path=str(settings_file),
-        token_path=str(token_file),
+        settings_path=str(missing_settings),
+        chat_client=client,
     )
     assert res4 is True
     assert (
         "New CC statement add-on spend booked: Mom net -₹500 (2 txns)."
-        in outbox[0]["text"]
+        in client.outbox[0]["text"]
     )
+
+    # Case 5: Respects enabled: false in settings.json
+    client.outbox.clear()
+    disabled_settings = tmp_path / "disabled_settings.json"
+    disabled_settings.write_text('{"enabled": false}', encoding="utf-8")
+    res5 = send_telegram_addon_notification(
+        all_cc=new_cc,
+        all_bank=[],
+        newly_added_cc=new_cc,
+        addon_config=SYNTHETIC_ADDON_CONFIG,
+        settings_path=str(disabled_settings),
+        chat_client=client,
+    )
+    assert res5 is False
+    assert len(client.outbox) == 0
+
+    # Case 6: Header send error catches ChatSocketError / OSError without raising
+    client.outbox.clear()
+
+    def _fail_first(idx, txt):
+        raise ChatGatewayUnavailableError("bridge unavailable")
+
+    client.raise_on_call = _fail_first
+    with caplog.at_level("WARNING"):
+        res6 = send_telegram_addon_notification(
+            all_cc=new_cc,
+            all_bank=[],
+            newly_added_cc=new_cc,
+            addon_config=SYNTHETIC_ADDON_CONFIG,
+            settings_path=str(missing_settings),
+            chat_client=client,
+        )
+    assert res6 is False
+    assert "Failed to send add-on header notification" in caplog.text
+
+    # Case 7: Forwardable message error catches ChatSocketError without raising
+    client.outbox.clear()
+
+    def _fail_second(idx, txt):
+        if idx >= 1:
+            raise ChatSocketError("send failed")
+
+    client.raise_on_call = _fail_second
+    with caplog.at_level("WARNING"):
+        res7 = send_telegram_addon_notification(
+            all_cc=new_cc,
+            all_bank=[],
+            newly_added_cc=new_cc,
+            addon_config=SYNTHETIC_ADDON_CONFIG,
+            settings_path=str(missing_settings),
+            chat_client=client,
+        )
+    assert res7 is True
+    assert len(client.outbox) == 1
+    assert "Failed to send forwardable add-on message" in caplog.text
+
+
+def test_send_telegram_addon_notification_no_live_socket_fallback(tmp_path):
+    """Ensure conftest isolates AGENTIC_CHAT_SOCKET so unmocked calls fail closed cleanly."""
+    new_cc = [
+        {
+            "date": datetime.date(2026, 8, 10),
+            "description": "PHARMACY",
+            "amount": -2500.0,
+            "remarks": "addon:Mom",
+        }
+    ]
+    res = send_telegram_addon_notification(
+        all_cc=new_cc,
+        all_bank=[],
+        newly_added_cc=new_cc,
+        addon_config=SYNTHETIC_ADDON_CONFIG,
+        settings_path=str(tmp_path / "missing.json"),
+    )
+    assert res is False
 
 
 # ---------------------------------------------------------------------------

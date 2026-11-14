@@ -13,21 +13,15 @@ import os
 import re
 from typing import Any, Hashable, Optional, Sequence
 
-import requests
 import pandas as pd
 
-from src.utils import is_card_bill_payment_or_cashback, redact_telegram_token
+from src.chat_client import ChatSocketClient, ChatSocketError
+from src.utils import is_card_bill_payment_or_cashback
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://api.telegram.org/bot{token}/{method}"
-HTTP_TIMEOUT = 30
-
 _DEFAULT_SETTINGS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "plugins", "telegram_bot", "settings.json"
-)
-_DEFAULT_TOKEN_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "secrets", "telegram.json"
 )
 
 
@@ -785,10 +779,13 @@ def send_telegram_addon_notification(
     addon_config: Optional[dict[str, Any]] = None,
     settings_path: Optional[str] = None,
     token_path: Optional[str] = None,
+    chat_client: Optional[ChatSocketClient] = None,
 ) -> bool:
     """Sends header notification and separate forwardable messages when new CC add-on rows land.
-    Returns True if notification was sent, False if unconfigured or no add-on rows.
+    Returns True if notification was sent, False if disabled, unavailable, or no add-on rows.
     """
+    del token_path  # deprecated; chat-bridge holds bot credentials on the host
+
     # 1. Filter newly added CC rows that have an addon: tag, skipping card bill payments
     new_addon_rows: list[tuple[str, float]] = []
     for t in newly_added_cc:
@@ -805,39 +802,19 @@ def send_telegram_addon_notification(
     if not new_addon_rows:
         return False
 
-    # 2. Check Telegram configuration
+    # 2. Check optional enabled toggle in settings.json
     st_path = settings_path or _DEFAULT_SETTINGS_PATH
-    if not os.path.exists(st_path):
-        logger.info("Telegram settings not found; skipping add-on notification.")
-        return False
-
-    try:
-        with open(st_path, "r", encoding="utf-8") as f:
-            st_data = json.load(f)
-    except Exception as e:
-        logger.warning(f"Could not read Telegram settings: {e}")
-        return False
-
-    chat_id = st_data.get("allowed_chat_id")
-    if not chat_id:
-        return False
-
-    tk_path = token_path or _DEFAULT_TOKEN_PATH
-    token = ""
-    if os.path.exists(tk_path):
+    if os.path.exists(st_path):
         try:
-            with open(tk_path, "r", encoding="utf-8") as f:
-                tk_data = json.load(f)
-            token = str(tk_data.get("token") or tk_data.get("bot_token") or "").strip()
+            with open(st_path, "r", encoding="utf-8") as f:
+                st_data = json.load(f)
+            if isinstance(st_data, dict) and st_data.get("enabled") is False:
+                logger.info(
+                    "Chat notifications disabled in settings; skipping add-on notification."
+                )
+                return False
         except Exception as e:
-            logger.warning(f"Could not read Telegram token: {e}")
-
-    if not token:
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-
-    if not token:
-        logger.info("No Telegram bot token found; skipping add-on notification.")
-        return False
+            logger.warning(f"Could not read chat bot settings: {e}")
 
     # 3. Compute full report
     report = compute_addon_report(all_cc, all_bank, addon_config)
@@ -861,21 +838,16 @@ def send_telegram_addon_notification(
 
     header_msg = f"New CC statement add-on spend booked: {', '.join(summary_parts)}."
 
-    url = API_URL.format(token=token, method="sendMessage")
+    client = chat_client if chat_client is not None else ChatSocketClient()
 
     def _send(txt: str) -> None:
-        resp = requests.post(
-            url, json={"chat_id": chat_id, "text": txt}, timeout=HTTP_TIMEOUT
-        )
-        resp.raise_for_status()
+        client.send_message("finance", txt)
 
     # Send header message
     try:
         _send(header_msg)
-    except Exception as e:
-        logger.warning(
-            f"Failed to send Telegram header notification: {redact_telegram_token(e)}"
-        )
+    except (ChatSocketError, OSError) as e:
+        logger.warning(f"Failed to send add-on header notification: {e}")
         return False
 
     # 5. Send separate clean message for each reimbursable user with new rows
@@ -890,9 +862,9 @@ def send_telegram_addon_notification(
             msg = format_reimbursable_user_message(u_rep)
             try:
                 _send(msg)
-            except Exception as e:
+            except (ChatSocketError, OSError) as e:
                 logger.warning(
-                    f"Failed to send forwardable add-on message for {tag}: {redact_telegram_token(e)}"
+                    f"Failed to send forwardable add-on message for {tag}: {e}"
                 )
 
     return True

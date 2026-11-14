@@ -102,6 +102,8 @@ Sheets: `Date | Description | Debit | Credit | Category | Remarks | Account` sta
 
 LLM requests do not use local API key files; they route over the host LLM gateway Unix socket (`/run/agentic/llm.sock`) via `src/llm_client.py`.
 
+Chat notifications (`src/addon_tracker.py`) and the cash-entry bot (`plugins/telegram_bot/`, `run_telegram_bot.py`) route over the host unified chat bridge Unix socket (`/run/agentic/chat.sock`, channel `"finance"`) via `src/chat_client.py` rather than storing Telegram bot tokens or chat IDs locally.
+
 ### Adding a new bank/CC
 
 1. Add account identifier to `BANK_ACCOUNTS` or `CC_ACCOUNTS` in `src/constants.py` — format: `{type}-{bank}-{name}` (e.g. `bank-newbank-savings`)
