@@ -42,6 +42,6 @@ customize:
 - `"enabled"`: `true` or `false` (disables both bot polling and outbound add-on
   notifications when `false`).
 - `"transport"`: `"telegram"` (default) or `"matrix"`.
-- `"allowed_users"`: optional `{sender_id: "Label"}` map used only to populate
-  the sheet `Remarks` column (channel authorization is enforced on the host by
-  `chat-bridge`).
+- `"allowed_users"`: optional `{sender_id: "Label"}` map used to populate the
+  sheet `Remarks` column and, when non-empty, enforce an additional local sender
+  allowlist (channel authorization is also enforced on the host by `chat-bridge`).

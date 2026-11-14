@@ -808,13 +808,19 @@ def send_telegram_addon_notification(
         try:
             with open(st_path, "r", encoding="utf-8") as f:
                 st_data = json.load(f)
-            if isinstance(st_data, dict) and st_data.get("enabled") is False:
+            if not isinstance(st_data, dict):
+                logger.warning(
+                    "Chat bot settings is not a JSON object; skipping add-on notification."
+                )
+                return False
+            if st_data.get("enabled") is False:
                 logger.info(
                     "Chat notifications disabled in settings; skipping add-on notification."
                 )
                 return False
         except Exception as e:
             logger.warning(f"Could not read chat bot settings: {e}")
+            return False
 
     # 3. Compute full report
     report = compute_addon_report(all_cc, all_bank, addon_config)

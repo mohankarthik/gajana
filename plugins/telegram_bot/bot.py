@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from typing import Any, Hashable, Optional
 
 from src.categorizer import Categorizer
@@ -133,10 +134,17 @@ class TelegramCashBot:
             chat_client if chat_client is not None else ChatSocketClient()
         )
         # Optional {sender_id_str: "Label"} for populating sheet Remarks;
-        # channel authorization itself is enforced on the host by chat-bridge.
-        raw_users = cfg.get("allowed_users") or cfg.get("user_labels") or {}
+        # when non-empty, `allowed_users` also enforces a local sender gate
+        # alongside host chat-bridge channel authorization.
+        raw_allowed = cfg.get("allowed_users")
+        raw_labels = cfg.get("user_labels")
+        allowed_map = raw_allowed if isinstance(raw_allowed, dict) else {}
+        labels_map = raw_labels if isinstance(raw_labels, dict) else {}
+        self._allowed_sender_ids: set[str] = {str(k) for k in allowed_map}
+        self._enforce_allowed_users: bool = bool(self._allowed_sender_ids)
         self.allowed_users: dict[str, str] = {
-            str(k): str(v) for k, v in raw_users.items()
+            **{str(k): str(v) for k, v in labels_map.items()},
+            **{str(k): str(v) for k, v in allowed_map.items()},
         }
         self.addon_cards = (
             addon_cards
@@ -174,9 +182,21 @@ class TelegramCashBot:
         return {}
 
     def _save_state(self) -> None:
-        os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=2)
+        state_dir = os.path.dirname(self.state_path) or "."
+        os.makedirs(state_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".state_", suffix=".tmp", dir=state_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.state_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     # --- Categorization ------------------------------------------------------
     def _build_categorizer(self) -> Categorizer:
@@ -277,8 +297,8 @@ class TelegramCashBot:
             deleted = self.delete_row(int(last["row"]))
         except Exception as e:
             logger.error(f"Failed to delete cash row for /undo: {e}")
-            self._record_backend_error(
-                "Failed to undo entry in Google Sheets. Please try again shortly."
+            self.send_message(
+                "✗ Failed to undo entry in Google Sheets. Please check the sheet and bot logs."
             )
             return
         if deleted:
@@ -377,8 +397,8 @@ class TelegramCashBot:
             row = self.append_cash_row(entry, category, remarks=sender_label)
         except Exception as e:
             logger.error(f"Failed to append cash row: {e}")
-            self._record_backend_error(
-                "Failed to record entry in Google Sheets. Please check bot logs or configuration."
+            self.send_message(
+                "✗ Failed to record entry in Google Sheets. Please check bot logs or configuration."
             )
             return False
 
@@ -392,16 +412,32 @@ class TelegramCashBot:
         self.send_message(f"✓ {summary} → {category} (cash){by}. /undo to remove.")
         return True
 
-    def _resolve_sender_label(
-        self, event: dict[str, Any], payload: dict[str, Any]
-    ) -> str:
+    @staticmethod
+    def _extract_sender_id(
+        event: dict[str, Any], payload: dict[str, Any]
+    ) -> Optional[str]:
         sender_id = event.get("sender_id")
         if sender_id is None:
             sender_id = payload.get("sender_id")
         if sender_id is None and isinstance(event.get("from"), dict):
             sender_id = event["from"].get("id")
+        return str(sender_id) if sender_id is not None else None
+
+    def _is_sender_allowed(self, sender_id: Optional[str]) -> bool:
+        if not self._enforce_allowed_users:
+            return True
+        return sender_id is not None and sender_id in self._allowed_sender_ids
+
+    def _resolve_sender_label(
+        self,
+        event: dict[str, Any],
+        payload: dict[str, Any],
+        sender_id: Optional[str] = None,
+    ) -> str:
+        if sender_id is None:
+            sender_id = self._extract_sender_id(event, payload)
         if sender_id is not None:
-            mapped = self.allowed_users.get(str(sender_id), "")
+            mapped = self.allowed_users.get(sender_id, "")
             if mapped:
                 return mapped
         return str(
@@ -419,10 +455,14 @@ class TelegramCashBot:
         self._last_backend_error = None
         raw_payload = event.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        sender_id = self._extract_sender_id(event, payload)
+        if not self._is_sender_allowed(sender_id):
+            logger.warning(f"Ignoring event from unauthorized sender_id={sender_id!r}")
+            return False
         text = str(event.get("text") or payload.get("text") or "").strip()
         if not text:
             return False
-        sender_label = self._resolve_sender_label(event, payload)
+        sender_label = self._resolve_sender_label(event, payload, sender_id=sender_id)
         parts = text.split(None, 1)
         first_token = parts[0] if parts else ""
         cmd = first_token.split("@")[0].lower()
@@ -486,12 +526,23 @@ class TelegramCashBot:
 
         try:
             self.chat_client.register_channel(self.channel, transport=self.transport)
-            last_seq = int(self.state.get("last_seq", 0))
+            try:
+                last_seq = int(self.state.get("last_seq") or 0)
+            except (TypeError, ValueError):
+                last_seq = 0
             events = self.chat_client.pull_events(
                 self.channel, after_seq=last_seq, wait_s=0
             )
         except (ChatGatewayUnavailableError, OSError) as e:
             logger.warning(f"Chat bridge unavailable during {self.channel} poll: {e}")
+            return 0
+        except ChatSocketError as e:
+            if e.error_type in ("permission", "protocol"):
+                logger.error(
+                    f"Chat bridge {e.error_type} error during {self.channel} poll: {e}"
+                )
+            else:
+                logger.warning(f"Chat bridge error during {self.channel} poll: {e}")
             return 0
 
         if not events:
@@ -500,7 +551,16 @@ class TelegramCashBot:
         categorizer: Optional[Categorizer] = None
         recorded = 0
         for event in events:
-            seq = int(event["seq"])
+            try:
+                if not isinstance(event, dict) or isinstance(event.get("seq"), bool):
+                    raise TypeError("event must be a dict with integer seq")
+                seq = int(event["seq"])
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(
+                    f"Skipping malformed chat bridge event without valid seq: {event!r} ({e})"
+                )
+                continue
+
             backend_error: Optional[str] = None
             if event.get("event_type") == "message":
                 self._last_backend_error = None
@@ -510,20 +570,37 @@ class TelegramCashBot:
                     payload: dict[str, Any] = (
                         raw_payload if isinstance(raw_payload, dict) else {}
                     )
+                    sender_id = self._extract_sender_id(event, payload)
                     text = str(event.get("text") or payload.get("text") or "").strip()
-                    if text and not text.startswith("/") and categorizer is None:
-                        categorizer = self._build_categorizer()
-                    if self.process_message(event, categorizer):
-                        recorded += 1
-                    backend_error = self._last_backend_error
-                except Exception as e:
-                    logger.error(
-                        f"Error processing message seq={seq}: {e}", exc_info=True
-                    )
-                    backend_error = (
-                        self._last_backend_error
-                        or "Failed to record entry in Google Sheets. Please check bot logs or configuration."
-                    )
+                    if (
+                        self._is_sender_allowed(sender_id)
+                        and text
+                        and not text.startswith("/")
+                        and parse_entry(text) is not None
+                        and categorizer is None
+                    ):
+                        try:
+                            categorizer = self._build_categorizer()
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to build categorizer for seq={seq}: {e}",
+                                exc_info=True,
+                            )
+                            backend_error = (
+                                "Failed to record entry in Google Sheets. "
+                                "Please check bot logs or configuration."
+                            )
+
+                    if backend_error is None:
+                        try:
+                            if self.process_message(event, categorizer):
+                                recorded += 1
+                            backend_error = self._last_backend_error
+                        except Exception as e:
+                            logger.error(
+                                f"Error processing message seq={seq}: {e}",
+                                exc_info=True,
+                            )
                 finally:
                     self._suppress_error_replies = False
 

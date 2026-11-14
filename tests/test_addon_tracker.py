@@ -795,6 +795,42 @@ def test_send_telegram_addon_notification_flow(tmp_path, caplog):
     assert len(client.outbox) == 1
     assert "Failed to send forwardable add-on message" in caplog.text
 
+    # Case 8: Corrupt settings.json fails closed (does not bypass enabled: false)
+    client.outbox.clear()
+    caplog.clear()
+    corrupt_settings = tmp_path / "corrupt_settings.json"
+    corrupt_settings.write_text("{not valid json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        res8 = send_telegram_addon_notification(
+            all_cc=new_cc,
+            all_bank=[],
+            newly_added_cc=new_cc,
+            addon_config=SYNTHETIC_ADDON_CONFIG,
+            settings_path=str(corrupt_settings),
+            chat_client=client,
+        )
+    assert res8 is False
+    assert len(client.outbox) == 0
+    assert "Could not read chat bot settings" in caplog.text
+
+    # Case 9: Non-object JSON in settings.json also fails closed
+    client.outbox.clear()
+    caplog.clear()
+    list_settings = tmp_path / "list_settings.json"
+    list_settings.write_text("[]", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        res9 = send_telegram_addon_notification(
+            all_cc=new_cc,
+            all_bank=[],
+            newly_added_cc=new_cc,
+            addon_config=SYNTHETIC_ADDON_CONFIG,
+            settings_path=str(list_settings),
+            chat_client=client,
+        )
+    assert res9 is False
+    assert len(client.outbox) == 0
+    assert "not a JSON object" in caplog.text
+
 
 def test_send_telegram_addon_notification_no_live_socket_fallback(tmp_path):
     """Ensure conftest isolates AGENTIC_CHAT_SOCKET so unmocked calls fail closed cleanly."""
