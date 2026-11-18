@@ -1,0 +1,9 @@
+{
+  "prompt_schema_sha256": "c56cfe9b9a422f94f6fe69002b8d9ded05b5045f38516b6d019234b5cb3acf48",
+  "recorded_models": {
+    "categorizer": "sonnet",
+    "pdf": "gemini-4-hydrogen-high"
+  },
+  "pdf_extraction_text": "```json\n{\n  \"transactions\": [\n    {\n      \"date\": \"2026-05-02\",\n      \"description\": \"uber ride\",\n      \"debit\": \"200.00\",\n      \"credit\": \"\",\n      \"cardholder\": \"\"\n    },\n    {\n      \"date\": \"2026-05-03\",\n      \"description\": \"salary\",\n      \"debit\": \"\",\n      \"credit\": \"50000.00\",\n      \"cardholder\": \"\"\n    }\n  ],\n  \"summary\": {\n    \"total_debit\": \"\",\n    \"total_credit\": \"\",\n    \"opening_balance\": \"\",\n    \"closing_balance\": \"\"\n  }\n}\n```\n",
+  "categorizer_text": "[{\"i\": 0, \"category\": \"Dining & Food\"}, {\"i\": 1, \"category\": \"Groceries\"}]"
+}

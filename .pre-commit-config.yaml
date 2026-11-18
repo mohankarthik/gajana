@@ -1,4 +1,5 @@
 ---
+default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -27,40 +28,16 @@ repos:
       - id: yamllint
   - repo: local
     hooks:
-      - id: pytest
-        name: pytest
-        entry: ./venv/bin/pytest tests
-        language: system
-        types: [python]
-        pass_filenames: false
-        always_run: true
-      - id: run-e2e-tests
-        name: run-e2e-tests
-        entry: ./venv/bin/pytest tests/test_e2e.py
-        language: system
-        types: [python]
-        pass_filenames: false
-        always_run: true
-  - repo: local
-    hooks:
       - id: pytest-cov
         name: pytest-cov
-        # The entry no longer needs a hardcoded path
-        entry: pytest tests --cov=src --cov-report=xml --cov-fail-under=85
-        language: python
+        entry: >-
+          ./venv/bin/pytest tests --cov=src --cov-report=xml
+          --cov-fail-under=85
+        language: system
         types: [python]
         pass_filenames: false
         always_run: true
-        # pre-commit will install these dependencies in a managed environment
-        additional_dependencies:
-          - pytest
-          - pytest-cov
-          - pytest-mock
-          - pandas
-          - google-api-python-client
-          - oauth2client
-          - pypdf
-          - reportlab
+        stages: [pre-commit]
       - id: diff-coverage
         name: diff-coverage
         # The entry no longer needs a hardcoded path
@@ -69,8 +46,16 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
         # pre-commit installs diff-cover into the hook's environment
         additional_dependencies: [diff-cover]
+      - id: live-llm-e2e
+        name: live-llm-e2e
+        entry: bash scripts/pre_push_e2e.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
   # - repo: https://github.com/PyCQA/pydocstyle
   #   rev: '6.3.0'
   #   hooks:

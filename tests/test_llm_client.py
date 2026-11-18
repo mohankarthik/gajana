@@ -378,6 +378,58 @@ class LLMClientTest(unittest.TestCase):
                 socket_path=srv2_path,
             )
 
+    def test_caller_resolution_and_transmission(self):
+        with mock.patch.dict(os.environ, {"AGENTIC_CALLER": ""}):
+            self.assertIsNone(lc.resolve_caller())
+            self.assertEqual(lc.resolve_caller("  gajana  "), "gajana")
+            self.assertIsNone(lc.resolve_caller("bad caller"))
+            self.assertIsNone(lc.resolve_caller("../escape"))
+            self.assertIsNone(lc.resolve_caller("x" * 33))
+
+        with mock.patch.dict(os.environ, {"AGENTIC_CALLER": "gajana"}):
+            self.assertEqual(lc.resolve_caller(), "gajana")
+            self.assertEqual(lc.resolve_caller("nalam"), "nalam")
+            self.assertEqual(lc.resolve_caller("bad caller"), "gajana")
+
+        srv = self.start_server(
+            lambda _req: {"ok": True, "text": "ok", "data": {"ok": 1}}
+        )
+
+        # No caller set -> omitted from wire request
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENTIC_CALLER", None)
+            client = lc.LLMClient(socket_path=self.sock_path)
+            client.complete_text("no caller")
+            self.assertNotIn("caller", srv.requests[-1])
+
+        # AGENTIC_CALLER env var transmitted on complete_text / complete_json / complete_pdf
+        with mock.patch.dict(os.environ, {"AGENTIC_CALLER": "gajana"}):
+            client = lc.LLMClient(socket_path=self.sock_path)
+            client.complete_text("via env")
+            self.assertEqual(srv.requests[-1].get("caller"), "gajana")
+
+            client.complete_json("via env json")
+            self.assertEqual(srv.requests[-1].get("caller"), "gajana")
+
+            client.complete_pdf("via env pdf", b"%PDF-1.4")
+            self.assertEqual(srv.requests[-1].get("caller"), "gajana")
+
+            # Client-level caller overrides env; per-call caller overrides client-level
+            client_override = lc.LLMClient(
+                socket_path=self.sock_path, caller="chat-bridge"
+            )
+            client_override.complete_text("client override")
+            self.assertEqual(srv.requests[-1].get("caller"), "chat-bridge")
+
+            client_override.complete_text("call override", caller="nalam")
+            self.assertEqual(srv.requests[-1].get("caller"), "nalam")
+
+        # Invalid caller falls back to omitting field when env is unset
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENTIC_CALLER", None)
+            lc.complete_text("invalid", socket_path=self.sock_path, caller="../../etc")
+            self.assertNotIn("caller", srv.requests[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

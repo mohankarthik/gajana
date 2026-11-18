@@ -19,7 +19,10 @@ def _isolate_llm_gateway_socket(monkeypatch, tmp_path_factory):
     sock_dir = tmp_path_factory.mktemp("llm_gateway")
     dead_sock = str(sock_dir / "llm.sock")
     dead_chat_sock = str(sock_dir / "no-chat.sock")
-    if not os.environ.get("GAJANA_LIVE_LLM_SOCKET"):
+    if (
+        not os.environ.get("GAJANA_LIVE_LLM_SOCKET")
+        and os.environ.get("AGENTIC_LIVE_LLM_E2E") != "1"
+    ):
         monkeypatch.setenv("LLM_GATEWAY_SOCKET", dead_sock)
         monkeypatch.setenv("AGENTIC_LLM_SOCKET", dead_sock)
         monkeypatch.setenv("AGENTIC_STATE_DIR", str(sock_dir / "state"))

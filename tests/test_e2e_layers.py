@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from typing import List
 
@@ -19,10 +20,11 @@ from src.constants import BANK_TRANSACTIONS_SHEET_NAME, CC_TRANSACTIONS_SHEET_NA
 
 class TestGajanaE2ELayers(unittest.TestCase):
     def setUp(self):
-        self.fixtures_dir = "/root/gajana/tests/fixtures/e2e_layers"
-        self.working_dir = "/tmp/gajana_e2e_layers_work"
-        if os.path.exists(self.working_dir):
-            shutil.rmtree(self.working_dir)
+        self.repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.fixtures_dir = os.path.join(
+            self.repo_dir, "tests", "fixtures", "e2e_layers"
+        )
+        self.working_dir = tempfile.mkdtemp(prefix="gajana_e2e_layers_")
         os.makedirs(os.path.join(self.working_dir, "statements"))
 
     def tearDown(self):
@@ -31,7 +33,7 @@ class TestGajanaE2ELayers(unittest.TestCase):
 
     def _run_main(self, args: List[str]):
         cmd = [sys.executable, "main.py", "--csv-db-path", self.working_dir] + args
-        return subprocess.run(cmd, capture_output=True, text=True, cwd="/root/gajana")
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=self.repo_dir)
 
     def _compare(self, actual_path, expected_path):
         with open(actual_path, encoding="utf-8") as a, open(
